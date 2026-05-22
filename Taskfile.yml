@@ -1,0 +1,45 @@
+version: '3'
+
+vars:
+  # Go toolchain to build/test/lint with. Resolved from the project's
+  # `go` directive (go.mod) via the currently selected Go, so it needs
+  # no manual update when the go directive is bumped.
+  GO_TOOLCHAIN:
+    sh: go env GOVERSION
+  # golangci-lint is run on demand via `go run`, so it never lands in
+  # the project's go.mod (runtime deps stay at the modules in SPEC §20.1).
+  GOLANGCI_LINT_VERSION: v2.12.2
+
+env:
+  # Pin every `go` invocation to the project's toolchain. Without this,
+  # `go run golangci-lint@...` would build the linter with golangci-lint's
+  # own (older) go directive, and that linter then refuses to analyse
+  # code targeting a newer Go.
+  GOTOOLCHAIN: "{{.GO_TOOLCHAIN}}"
+
+tasks:
+  build:
+    desc: Build a static binary (no cgo)
+    cmds:
+      - CGO_ENABLED=0 go build -o bin/gatekeeper ./cmd/gatekeeper
+
+  run:
+    desc: Run the application
+    cmds:
+      - go run ./cmd/gatekeeper
+
+  test:
+    desc: Run all tests
+    cmds:
+      - go test ./...
+
+  lint:
+    desc: Run go vet and golangci-lint (linter fetched on demand, no install step)
+    cmds:
+      - go vet ./...
+      - go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@{{.GOLANGCI_LINT_VERSION}} run ./...
+
+  tidy:
+    desc: Tidy go module dependencies
+    cmds:
+      - go mod tidy
