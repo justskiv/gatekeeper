@@ -43,6 +43,15 @@ func baseEnv() map[string]string {
 	}
 }
 
+// lookup adapts an environment map to the func(string) (string, bool)
+// signature LoadFromLookup expects, so tests never touch process state.
+func lookup(env map[string]string) func(string) (string, bool) {
+	return func(key string) (string, bool) {
+		v, ok := env[key]
+		return v, ok
+	}
+}
+
 func TestLoad(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -59,7 +68,11 @@ func TestLoad(t *testing.T) {
 		{"direct without allow flag", map[string]string{"INVITE_MODE": "direct"}, true},
 		{
 			"direct with allow flag",
-			map[string]string{"INVITE_MODE": "direct", "ALLOW_DIRECT_INVITES": "true"},
+			map[string]string{
+				"INVITE_MODE":          "direct",
+				"ALLOW_DIRECT_INVITES": "true",
+				"INVITE_TTL":           "1h",
+			},
 			false,
 		},
 		{"tribute webhook without API key", map[string]string{"TRIBUTE_MODE": "webhook"}, true},
@@ -83,6 +96,11 @@ func TestLoad(t *testing.T) {
 		{"invalid timezone", map[string]string{"TIMEZONE": "Mars/Olympus"}, true},
 		{"invalid invite mode", map[string]string{"INVITE_MODE": "carrier-pigeon"}, true},
 		{"invalid expiry mode", map[string]string{"EXPIRY_MODE": "whenever"}, true},
+		{"invalid log format", map[string]string{"LOG_FORMAT": "yaml"}, true},
+		{"non-boolean flag", map[string]string{"ALLOW_DIRECT_INVITES": "maybe"}, true},
+		{"non-positive owner ID", map[string]string{"OWNER_TG_IDS": "-5"}, true},
+		{"non-positive enforcer workers", map[string]string{"ENFORCER_WORKERS": "0"}, true},
+		{"invalid subscribe URL", map[string]string{"BOOSTY_SUBSCRIBE_URL": "not-a-url"}, true},
 	}
 
 	for _, tt := range tests {
@@ -91,11 +109,8 @@ func TestLoad(t *testing.T) {
 			for k, v := range tt.mutate {
 				env[k] = v
 			}
-			for k, v := range env {
-				t.Setenv(k, v)
-			}
 
-			cfg, err := Load()
+			cfg, err := LoadFromLookup(lookup(env))
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got nil (cfg=%+v)", cfg)
@@ -105,19 +120,15 @@ func TestLoad(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if cfg == nil {
-				t.Fatal("expected a config, got nil")
+			if cfg.BotToken == "" {
+				t.Fatal("expected a populated config, got the zero value")
 			}
 		})
 	}
 }
 
 func TestLoadParsesValues(t *testing.T) {
-	for k, v := range baseEnv() {
-		t.Setenv(k, v)
-	}
-
-	cfg, err := Load()
+	cfg, err := LoadFromLookup(lookup(baseEnv()))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -131,6 +142,9 @@ func TestLoadParsesValues(t *testing.T) {
 	if cfg.ClubChatID != -1003333333333 {
 		t.Errorf("ClubChatID = %d", cfg.ClubChatID)
 	}
+	if cfg.AdminLogChatID != nil {
+		t.Errorf("AdminLogChatID = %v, want nil when unset", cfg.AdminLogChatID)
+	}
 	if cfg.GracePeriod.Hours() != 72 {
 		t.Errorf("GracePeriod = %v", cfg.GracePeriod)
 	}
@@ -139,19 +153,29 @@ func TestLoadParsesValues(t *testing.T) {
 	}
 }
 
-func TestLoadCapsDirectInviteTTL(t *testing.T) {
-	for k, v := range baseEnv() {
-		t.Setenv(k, v)
-	}
-	t.Setenv("INVITE_MODE", "direct")
-	t.Setenv("ALLOW_DIRECT_INVITES", "true")
-	t.Setenv("INVITE_TTL", "24h")
+func TestLoadParsesOptionalAdminLogChatID(t *testing.T) {
+	env := baseEnv()
+	env["ADMIN_LOG_CHAT_ID"] = "-1005555555555"
 
-	cfg, err := Load()
+	cfg, err := LoadFromLookup(lookup(env))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.InviteTTL.Hours() != 1 {
-		t.Errorf("InviteTTL not capped to 1h for direct mode: %v", cfg.InviteTTL)
+	if cfg.AdminLogChatID == nil || *cfg.AdminLogChatID != -1005555555555 {
+		t.Errorf("AdminLogChatID = %v, want -1005555555555", cfg.AdminLogChatID)
+	}
+}
+
+// TestLoadRejectsLongDirectInviteTTL verifies that an INVITE_TTL above
+// Telegram's one-hour cap is rejected in direct mode rather than
+// silently clamped — the loader must not rewrite the operator's value.
+func TestLoadRejectsLongDirectInviteTTL(t *testing.T) {
+	env := baseEnv()
+	env["INVITE_MODE"] = "direct"
+	env["ALLOW_DIRECT_INVITES"] = "true"
+	env["INVITE_TTL"] = "24h"
+
+	if _, err := LoadFromLookup(lookup(env)); err == nil {
+		t.Fatal("expected an error for INVITE_TTL=24h when INVITE_MODE=direct")
 	}
 }

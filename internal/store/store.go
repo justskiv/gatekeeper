@@ -5,6 +5,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -21,11 +22,24 @@ var ErrNotFound = errors.New("store: record not found")
 // Open opens the SQLite database at dbPath, creating its parent
 // directory (mode 0700) when missing, and configures the connection
 // pool. Migrations are applied separately via Migrate.
-func Open(dbPath string) (*sql.DB, error) {
+func Open(ctx context.Context, dbPath string) (*sql.DB, error) {
 	if dir := filepath.Dir(dbPath); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("create data directory: %w", err)
 		}
+	}
+
+	// Pre-create the database file with 0600 so DB contents are not
+	// world-readable; sql.Open would otherwise create it 0644.
+	f, err := os.OpenFile(dbPath, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("create database file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return nil, fmt.Errorf("close database file: %w", err)
+	}
+	if err := os.Chmod(dbPath, 0o600); err != nil {
+		return nil, fmt.Errorf("set database file permissions: %w", err)
 	}
 
 	// DSN per SPEC §20.1: WAL, busy_timeout, foreign keys on, NORMAL
@@ -48,7 +62,7 @@ func Open(dbPath string) (*sql.DB, error) {
 	db.SetMaxOpenConns(1)
 	db.SetConnMaxLifetime(time.Hour)
 
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping database: %w", err)
 	}

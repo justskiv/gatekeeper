@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"embed"
 	"fmt"
@@ -20,8 +21,8 @@ var migrationsFS embed.FS
 // its schema_migrations bookkeeping row, so a partially applied
 // migration can never be recorded. Migrations are forward-only and a
 // repeated run is a no-op.
-func Migrate(db *sql.DB) error {
-	if _, err := db.Exec(`
+func Migrate(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
 			version    INTEGER PRIMARY KEY,
 			name       TEXT    NOT NULL,
@@ -30,7 +31,7 @@ func Migrate(db *sql.DB) error {
 		return fmt.Errorf("create schema_migrations: %w", err)
 	}
 
-	applied, err := appliedVersions(db)
+	applied, err := appliedVersions(ctx, db)
 	if err != nil {
 		return err
 	}
@@ -53,7 +54,7 @@ func Migrate(db *sql.DB) error {
 		if err != nil {
 			return fmt.Errorf("read migration %s: %w", file, err)
 		}
-		if err := applyMigration(db, version, name, string(body)); err != nil {
+		if err := applyMigration(ctx, db, version, name, string(body)); err != nil {
 			return fmt.Errorf("apply migration %s: %w", file, err)
 		}
 	}
@@ -61,8 +62,8 @@ func Migrate(db *sql.DB) error {
 }
 
 // appliedVersions returns the set of migration versions already applied.
-func appliedVersions(db *sql.DB) (map[int]bool, error) {
-	rows, err := db.Query(`SELECT version FROM schema_migrations`)
+func appliedVersions(ctx context.Context, db *sql.DB) (map[int]bool, error) {
+	rows, err := db.QueryContext(ctx, `SELECT version FROM schema_migrations`)
 	if err != nil {
 		return nil, fmt.Errorf("read schema_migrations: %w", err)
 	}
@@ -97,17 +98,17 @@ func parseMigrationName(file string) (int, string, error) {
 }
 
 // applyMigration runs one migration body and records it, atomically.
-func applyMigration(db *sql.DB, version int, name, body string) error {
-	tx, err := db.Begin()
+func applyMigration(ctx context.Context, db *sql.DB, version int, name, body string) error {
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }() // no-op once the tx is committed
 
-	if _, err := tx.Exec(body); err != nil {
+	if _, err := tx.ExecContext(ctx, body); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO schema_migrations(version, name, applied_at) VALUES(?, ?, ?)`,
 		version, name, time.Now().UTC().Format(time.RFC3339),
 	); err != nil {

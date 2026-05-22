@@ -35,7 +35,11 @@ func run() error {
 	logger := newLogger(cfg)
 	slog.SetDefault(logger)
 
-	db, err := store.Open(cfg.DBPath)
+	ctx, stop := signal.NotifyContext(context.Background(),
+		syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	db, err := store.Open(ctx, cfg.DBPath)
 	if err != nil {
 		return err
 	}
@@ -46,13 +50,9 @@ func run() error {
 		}
 	}()
 
-	if err := store.Migrate(db); err != nil {
+	if err := store.Migrate(ctx, db); err != nil {
 		return err
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(),
-		syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	logger.Info("gatekeeper started",
 		slog.String("db_path", cfg.DBPath),
@@ -70,7 +70,7 @@ func run() error {
 
 // newLogger builds a slog.Logger from the configured level and format.
 // The values are already validated by config.Load.
-func newLogger(cfg *config.Config) *slog.Logger {
+func newLogger(cfg config.Config) *slog.Logger {
 	level := slog.LevelInfo
 	switch cfg.LogLevel {
 	case "debug":

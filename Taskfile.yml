@@ -21,7 +21,7 @@ tasks:
   build:
     desc: Build a static binary (no cgo)
     cmds:
-      - CGO_ENABLED=0 go build -o bin/gatekeeper ./cmd/gatekeeper
+      - CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/gatekeeper ./cmd/gatekeeper
 
   run:
     desc: Run the application

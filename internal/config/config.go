@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -29,7 +30,7 @@ type Config struct {
 	// Managed club resources
 	ClubChatID     int64
 	ClubChannelID  int64
-	AdminLogChatID int64 // 0 when unset
+	AdminLogChatID *int64 // nil when unset
 
 	// Subscribe links
 	BoostySubscribeURL  string
@@ -70,15 +71,20 @@ type Config struct {
 	MetricsEnabled bool
 }
 
-// Load reads the configuration from the environment, applying defaults
-// and validating every value. A .env file in the working directory is
-// loaded first if present (development convenience). On any problem it
-// returns a single error listing every issue found.
-func Load() (*Config, error) {
+// Load reads the configuration from the process environment, applying
+// defaults and validating every value. A .env file in the working
+// directory is loaded first if present (development convenience).
+func Load() (Config, error) {
 	// Best-effort .env load; a missing file is not an error.
 	_ = godotenv.Load()
+	return LoadFromLookup(os.LookupEnv)
+}
 
-	l := &loader{}
+// LoadFromLookup reads the configuration from an arbitrary lookup
+// function, applying defaults and validating every value. On any
+// problem it returns a single error listing every issue found.
+func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
+	l := &loader{lookup: lookup}
 	cfg := &Config{}
 
 	cfg.BotToken = l.required("BOT_TOKEN")
@@ -89,7 +95,7 @@ func Load() (*Config, error) {
 	cfg.TributeChannelID = l.chatID("TRIBUTE_CHANNEL_ID", true)
 	cfg.ClubChatID = l.chatID("CLUB_CHAT_ID", true)
 	cfg.ClubChannelID = l.chatID("CLUB_CHANNEL_ID", true)
-	cfg.AdminLogChatID = l.chatID("ADMIN_LOG_CHAT_ID", false)
+	cfg.AdminLogChatID = l.optionalChatID("ADMIN_LOG_CHAT_ID")
 
 	cfg.BoostySubscribeURL = l.required("BOOSTY_SUBSCRIBE_URL")
 	cfg.TributeSubscribeURL = l.required("TRIBUTE_SUBSCRIBE_URL")
@@ -127,31 +133,41 @@ func Load() (*Config, error) {
 	l.validate(cfg)
 
 	if len(l.errs) > 0 {
-		return nil, fmt.Errorf("invalid configuration:\n  - %s",
+		return Config{}, fmt.Errorf("invalid configuration:\n  - %s",
 			strings.Join(l.errs, "\n  - "))
 	}
-	return cfg, nil
+	return *cfg, nil
 }
 
-// loader reads typed values from the environment and accumulates every
-// problem so that Load can report them all at once.
+// loader reads typed values from a lookup function and accumulates
+// every problem so that Load can report them all at once.
 type loader struct {
-	errs []string
+	lookup func(string) (string, bool)
+	errs   []string
 }
 
 func (l *loader) errf(format string, args ...any) {
 	l.errs = append(l.errs, fmt.Sprintf(format, args...))
 }
 
+// get returns the trimmed value for key, or "" if it is absent.
+func (l *loader) get(key string) string {
+	v, ok := l.lookup(key)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(v)
+}
+
 func (l *loader) str(key, def string) string {
-	if v := os.Getenv(key); v != "" {
+	if v := l.get(key); v != "" {
 		return v
 	}
 	return def
 }
 
 func (l *loader) required(key string) string {
-	v := os.Getenv(key)
+	v := l.get(key)
 	if v == "" {
 		l.errf("%s is required", key)
 	}
@@ -161,7 +177,7 @@ func (l *loader) required(key string) string {
 // chatID parses a Telegram chat ID, which must be a negative integer.
 // When required is false an empty value yields 0 without an error.
 func (l *loader) chatID(key string, required bool) int64 {
-	v := os.Getenv(key)
+	v := l.get(key)
 	if v == "" {
 		if required {
 			l.errf("%s is required", key)
@@ -179,8 +195,26 @@ func (l *loader) chatID(key string, required bool) int64 {
 	return id
 }
 
+// optionalChatID parses an optional negative chat ID; absent → nil.
+func (l *loader) optionalChatID(key string) *int64 {
+	v := l.get(key)
+	if v == "" {
+		return nil
+	}
+	id, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		l.errf("%s must be an integer, got %q", key, v)
+		return nil
+	}
+	if id >= 0 {
+		l.errf("%s must be a negative chat ID, got %d", key, id)
+		return nil
+	}
+	return &id
+}
+
 func (l *loader) idList(key string) []int64 {
-	v := os.Getenv(key)
+	v := l.get(key)
 	if v == "" {
 		l.errf("%s is required", key)
 		return nil
@@ -194,6 +228,10 @@ func (l *loader) idList(key string) []int64 {
 		id, err := strconv.ParseInt(part, 10, 64)
 		if err != nil {
 			l.errf("%s contains an invalid ID %q", key, part)
+			continue
+		}
+		if id <= 0 {
+			l.errf("%s must contain positive IDs, got %d", key, id)
 			continue
 		}
 		ids = append(ids, id)
@@ -229,7 +267,7 @@ func (l *loader) duration(key, def string) time.Duration {
 }
 
 func (l *loader) boolean(key string, def bool) bool {
-	v := os.Getenv(key)
+	v := l.get(key)
 	if v == "" {
 		return def
 	}
@@ -242,7 +280,7 @@ func (l *loader) boolean(key string, def bool) bool {
 }
 
 func (l *loader) intVal(key string, def int) int {
-	v := os.Getenv(key)
+	v := l.get(key)
 	if v == "" {
 		return def
 	}
@@ -261,6 +299,19 @@ func (l *loader) location(key, tz string) *time.Location {
 		return time.UTC
 	}
 	return loc
+}
+
+// httpURL records an error when a non-empty value is not an absolute
+// http(s) URL. An empty value is accepted (the field may be optional).
+func (l *loader) httpURL(key, value string) {
+	if value == "" {
+		return
+	}
+	u, err := url.ParseRequestURI(value)
+	if err != nil || u.Host == "" ||
+		(u.Scheme != "http" && u.Scheme != "https") {
+		l.errf("%s must be a valid http(s) URL, got %q", key, value)
+	}
 }
 
 // validate runs the cross-field rules from SPEC §18.3.
@@ -304,9 +355,20 @@ func (l *loader) validate(cfg *Config) {
 		if !cfg.AllowDirectInvites {
 			l.errf("ALLOW_DIRECT_INVITES must be true when INVITE_MODE=direct")
 		}
-		// Telegram caps direct invite links at one hour.
+		// Telegram caps direct invite links at one hour; reject rather
+		// than silently rewrite the operator's value.
 		if cfg.InviteTTL > time.Hour {
-			cfg.InviteTTL = time.Hour
+			l.errf("INVITE_TTL must be less than or equal to 1h " +
+				"when INVITE_MODE=direct")
 		}
 	}
+
+	if cfg.EnforcerWorkers <= 0 {
+		l.errf("ENFORCER_WORKERS must be greater than zero, got %d",
+			cfg.EnforcerWorkers)
+	}
+
+	l.httpURL("BOOSTY_SUBSCRIBE_URL", cfg.BoostySubscribeURL)
+	l.httpURL("TRIBUTE_SUBSCRIBE_URL", cfg.TributeSubscribeURL)
+	l.httpURL("TELEGRAM_WEBHOOK_PUBLIC_URL", cfg.TelegramWebhookPublicURL)
 }

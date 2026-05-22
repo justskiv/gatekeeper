@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -15,12 +16,12 @@ import (
 // applies the migrations.
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if err := Migrate(db); err != nil {
+	if err := Migrate(context.Background(), db); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
@@ -67,7 +68,7 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	db := newTestDB(t) // already migrated once
 	ctx := context.Background()
 
-	if err := Migrate(db); err != nil {
+	if err := Migrate(ctx, db); err != nil {
 		t.Fatalf("second migrate run: %v", err)
 	}
 
@@ -204,4 +205,97 @@ func TestMetaGetSet(t *testing.T) {
 	if v, _, _ = meta.Get(ctx, "offset"); v != "200" {
 		t.Errorf("value not updated: %q", v)
 	}
+}
+
+// TestDatabaseFileMode is the regression test for SPEC §22.1: the
+// database file must not be world-readable. Open pre-creates it 0600,
+// which sql.Open would otherwise leave at the default 0644.
+func TestDatabaseFileMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mode.db")
+	db, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat database file: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("database file mode = %#o, want 0600", perm)
+	}
+}
+
+// TestInviteLinksPartialUniqueIndexes checks the partial unique indexes
+// on invite_links: at most one active (created/sent) link may occupy a
+// slot, while inactive links (e.g. expired) leave the slot free. Phase
+// 01 has no invite repository, so rows are inserted with raw SQL.
+func TestInviteLinksPartialUniqueIndexes(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	users := NewUsers(db)
+
+	// personal/direct links carry a NOT NULL tg_id (FK + CHECK).
+	if err := users.Upsert(ctx, domain.User{TGID: 1001, Username: "alice"}); err != nil {
+		t.Fatalf("upsert user 1001: %v", err)
+	}
+	if err := users.Upsert(ctx, domain.User{TGID: 1002, Username: "bob"}); err != nil {
+		t.Fatalf("upsert user 1002: %v", err)
+	}
+
+	insertInvite := func(tgID *int64, resource, mode, status, suffix string) error {
+		_, err := db.ExecContext(ctx, `
+			INSERT INTO invite_links (
+				tg_id, resource, mode, invite_link, invite_link_hash,
+				status, creates_join_request, created_at, updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, 1,
+			        '2026-05-22T00:00:00Z', '2026-05-22T00:00:00Z')`,
+			nullableInt64(tgID), resource, mode,
+			"https://t.me/+"+suffix, "hash-"+suffix, status)
+		return err
+	}
+
+	// shared_join_request: one active link per (resource, mode); an
+	// expired link does not occupy the slot.
+	if err := insertInvite(nil, "chat", "shared_join_request", "created", "shared-1"); err != nil {
+		t.Fatalf("first shared invite: %v", err)
+	}
+	if err := insertInvite(nil, "chat", "shared_join_request", "sent", "shared-2"); err == nil {
+		t.Fatal("expected a unique-index violation for the second active shared invite")
+	}
+	if err := insertInvite(nil, "chat", "shared_join_request", "expired", "shared-3"); err != nil {
+		t.Fatalf("expired shared invite should be allowed: %v", err)
+	}
+
+	// personal_join_request: one active link per (tg_id, resource, mode).
+	alice := int64(1001)
+	if err := insertInvite(&alice, "chat", "personal_join_request", "created", "personal-1"); err != nil {
+		t.Fatalf("first personal invite: %v", err)
+	}
+	if err := insertInvite(&alice, "chat", "personal_join_request", "sent", "personal-2"); err == nil {
+		t.Fatal("expected a unique-index violation for the second active personal invite")
+	}
+	// A different user does not share the slot.
+	bob := int64(1002)
+	if err := insertInvite(&bob, "chat", "personal_join_request", "created", "personal-3"); err != nil {
+		t.Fatalf("personal invite for another user should be allowed: %v", err)
+	}
+
+	// direct shares the partial index with personal_join_request.
+	if err := insertInvite(&alice, "channel", "direct", "created", "direct-1"); err != nil {
+		t.Fatalf("first direct invite: %v", err)
+	}
+	if err := insertInvite(&alice, "channel", "direct", "sent", "direct-2"); err == nil {
+		t.Fatal("expected a unique-index violation for the second active direct invite")
+	}
+}
+
+// nullableInt64 turns an optional ID into a SQL NULL or its value.
+func nullableInt64(v *int64) any {
+	if v == nil {
+		return nil
+	}
+	return *v
 }
