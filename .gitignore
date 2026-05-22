@@ -1,0 +1,19 @@
+# Secrets and runtime data — never commit
+.env
+*.db
+*.db-wal
+*.db-shm
+data/
+
+# Build artifacts
+/gatekeeper
+/bin/
+coverage.out
+.task/
+
+# Editors and OS
+.idea/
+.DS_Store
+
+# Planning and working materials — decide later what to publish
+local/
