@@ -371,4 +371,15 @@ func (l *loader) validate(cfg *Config) {
 	l.httpURL("BOOSTY_SUBSCRIBE_URL", cfg.BoostySubscribeURL)
 	l.httpURL("TRIBUTE_SUBSCRIBE_URL", cfg.TributeSubscribeURL)
 	l.httpURL("TELEGRAM_WEBHOOK_PUBLIC_URL", cfg.TelegramWebhookPublicURL)
+
+	// Webhook paths are used as HTTP routes; a missing leading slash
+	// silently mismounts the handler.
+	if !strings.HasPrefix(cfg.TributeWebhookPath, "/") {
+		l.errf("TRIBUTE_WEBHOOK_PATH must start with /, got %q",
+			cfg.TributeWebhookPath)
+	}
+	if !strings.HasPrefix(cfg.TelegramWebhookPath, "/") {
+		l.errf("TELEGRAM_WEBHOOK_PATH must start with /, got %q",
+			cfg.TelegramWebhookPath)
+	}
 }

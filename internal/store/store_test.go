@@ -207,6 +207,118 @@ func TestMetaGetSet(t *testing.T) {
 	}
 }
 
+func TestSubscriptionsGetActive(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	users := NewUsers(db)
+	subs := NewSubscriptions(db)
+
+	if err := users.Upsert(ctx, domain.User{TGID: 1, Username: "alice"}); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+
+	// No active subscription yet.
+	if _, ok, err := subs.GetActive(ctx, 1, domain.PlatformBoosty); err != nil || ok {
+		t.Fatalf("GetActive on empty store: ok=%v err=%v", ok, err)
+	}
+
+	// RFC3339 storage rounds to seconds; truncate inputs to compare.
+	started := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+	expires := started.Add(30 * 24 * time.Hour)
+	id, err := subs.Create(ctx, domain.Subscription{
+		TGID:       1,
+		Platform:   domain.PlatformBoosty,
+		Status:     domain.SubActive,
+		ExternalID: "ext-1",
+		PeriodID:   "p-1",
+		Tier:       "gold",
+		StartedAt:  started,
+		ExpiresAt:  &expires,
+		LastSignal: "webhook",
+	})
+	if err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+
+	got, ok, err := subs.GetActive(ctx, 1, domain.PlatformBoosty)
+	if err != nil {
+		t.Fatalf("GetActive: %v", err)
+	}
+	if !ok {
+		t.Fatal("GetActive ok = false after Create, want true")
+	}
+	if got.ID != id {
+		t.Errorf("ID = %d, want %d", got.ID, id)
+	}
+	if got.Status != domain.SubActive {
+		t.Errorf("Status = %s, want active", got.Status)
+	}
+	if got.ExternalID != "ext-1" || got.Tier != "gold" {
+		t.Errorf("fields mismatch: %+v", got)
+	}
+	if !got.StartedAt.Equal(started) {
+		t.Errorf("StartedAt = %v, want %v", got.StartedAt, started)
+	}
+	if got.ExpiresAt == nil || !got.ExpiresAt.Equal(expires) {
+		t.Errorf("ExpiresAt = %v, want %v", got.ExpiresAt, expires)
+	}
+
+	// Expire the row via raw SQL — GetActive must no longer find it.
+	if _, err := db.ExecContext(ctx,
+		`UPDATE subscriptions SET status = 'expired', ended_at = ?
+		 WHERE id = ?`,
+		time.Now().UTC().Format(time.RFC3339), id); err != nil {
+		t.Fatalf("expire subscription: %v", err)
+	}
+	if _, ok, err := subs.GetActive(ctx, 1, domain.PlatformBoosty); err != nil || ok {
+		t.Fatalf("GetActive after expire: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestGrantsUpsertAndGet(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	users := NewUsers(db)
+	grants := NewGrants(db)
+
+	if err := users.Upsert(ctx, domain.User{TGID: 7, Username: "carol"}); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+
+	joined := time.Now().UTC().Truncate(time.Second)
+	if err := grants.Upsert(ctx, domain.AccessGrant{
+		TGID:     7,
+		Resource: domain.ResourceChat,
+		State:    domain.GrantJoined,
+		JoinedAt: &joined,
+	}); err != nil {
+		t.Fatalf("upsert grant: %v", err)
+	}
+
+	got, err := grants.Get(ctx, 7, domain.ResourceChat)
+	if err != nil {
+		t.Fatalf("get grant: %v", err)
+	}
+	if got.State != domain.GrantJoined {
+		t.Errorf("State = %s, want joined", got.State)
+	}
+	if got.AdmittedBy != "bot" {
+		t.Errorf("AdmittedBy = %q, want bot (default)", got.AdmittedBy)
+	}
+	if got.JoinedAt == nil || !got.JoinedAt.Equal(joined) {
+		t.Errorf("JoinedAt = %v, want %v", got.JoinedAt, joined)
+	}
+	if got.RevokedAt != nil {
+		t.Errorf("RevokedAt = %v, want nil", got.RevokedAt)
+	}
+
+	if _, err := grants.Get(ctx, 999, domain.ResourceChat); !errors.Is(err, ErrNotFound) {
+		t.Errorf("expected ErrNotFound for an unknown grant, got %v", err)
+	}
+}
+
 // TestDatabaseFileMode is the regression test for SPEC §22.1: the
 // database file must not be world-readable. Open pre-creates it 0600,
 // which sql.Open would otherwise leave at the default 0644.

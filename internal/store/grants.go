@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -47,4 +48,43 @@ func (r *Grants) Upsert(ctx context.Context, g domain.AccessGrant) error {
 		return fmt.Errorf("upsert grant %d/%s: %w", g.TGID, g.Resource, err)
 	}
 	return nil
+}
+
+// Get returns the access grant for (tgID, resource), or ErrNotFound.
+func (r *Grants) Get(
+	ctx context.Context, tgID int64, resource domain.Resource,
+) (domain.AccessGrant, error) {
+	row := r.db.QueryRowContext(ctx, `
+		SELECT id, tg_id, resource, state, admitted_by,
+		       joined_at, revoked_at, revoked_reason
+		FROM access_grants
+		WHERE tg_id = ? AND resource = ?`,
+		tgID, string(resource))
+
+	var (
+		g                     domain.AccessGrant
+		resourceStr, stateStr string
+		joinedAt, revokedAt   sql.NullString
+	)
+	err := row.Scan(&g.ID, &g.TGID, &resourceStr, &stateStr, &g.AdmittedBy,
+		&joinedAt, &revokedAt, &g.RevokedReason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.AccessGrant{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.AccessGrant{}, fmt.Errorf(
+			"get grant %d/%s: %w", tgID, resource, err)
+	}
+
+	g.Resource = domain.Resource(resourceStr)
+	g.State = domain.GrantState(stateStr)
+	if g.JoinedAt, err = parseNullTime(joinedAt); err != nil {
+		return domain.AccessGrant{}, fmt.Errorf(
+			"parse grant joined_at: %w", err)
+	}
+	if g.RevokedAt, err = parseNullTime(revokedAt); err != nil {
+		return domain.AccessGrant{}, fmt.Errorf(
+			"parse grant revoked_at: %w", err)
+	}
+	return g, nil
 }

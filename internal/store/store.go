@@ -89,6 +89,19 @@ func parseTime(s string) (time.Time, error) {
 	return time.Parse(time.RFC3339, s)
 }
 
+// parseNullTime parses an optional RFC3339 timestamp from a nullable
+// SQL string. NULL or empty becomes nil.
+func parseNullTime(v sql.NullString) (*time.Time, error) {
+	if !v.Valid || v.String == "" {
+		return nil, nil
+	}
+	t, err := parseTime(v.String)
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
 // nullString stores an empty string as a SQL NULL and any non-empty
 // string as itself.
 func nullString(s string) any {

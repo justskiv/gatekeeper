@@ -101,6 +101,10 @@ func TestLoad(t *testing.T) {
 		{"non-positive owner ID", map[string]string{"OWNER_TG_IDS": "-5"}, true},
 		{"non-positive enforcer workers", map[string]string{"ENFORCER_WORKERS": "0"}, true},
 		{"invalid subscribe URL", map[string]string{"BOOSTY_SUBSCRIBE_URL": "not-a-url"}, true},
+		{"webhook path without leading slash",
+			map[string]string{"TRIBUTE_WEBHOOK_PATH": "webhooks/tribute"}, true},
+		{"required var with only whitespace",
+			map[string]string{"BOT_TOKEN": "   "}, true},
 	}
 
 	for _, tt := range tests {
@@ -163,6 +167,36 @@ func TestLoadParsesOptionalAdminLogChatID(t *testing.T) {
 	}
 	if cfg.AdminLogChatID == nil || *cfg.AdminLogChatID != -1005555555555 {
 		t.Errorf("AdminLogChatID = %v, want -1005555555555", cfg.AdminLogChatID)
+	}
+}
+
+// TestLoadTrimsWhitespace verifies that whitespace padding around env
+// values is stripped: parsing succeeds and the parsed value carries no
+// padding. The companion negative case (whitespace-only required var)
+// lives in TestLoad.
+func TestLoadTrimsWhitespace(t *testing.T) {
+	env := baseEnv()
+	env["BOT_TOKEN"] = "  123456:ABC-DEF  "
+	env["BOOSTY_SUBSCRIBE_URL"] = "  https://boosty.to/author  "
+	env["OWNER_TG_IDS"] = " 11111111 , 22222222 "
+	env["GRACE_PERIOD"] = "  72h  "
+
+	cfg, err := LoadFromLookup(lookup(env))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.BotToken != "123456:ABC-DEF" {
+		t.Errorf("BotToken = %q", cfg.BotToken)
+	}
+	if cfg.BoostySubscribeURL != "https://boosty.to/author" {
+		t.Errorf("BoostySubscribeURL = %q", cfg.BoostySubscribeURL)
+	}
+	if len(cfg.OwnerTGIDs) != 2 ||
+		cfg.OwnerTGIDs[0] != 11111111 || cfg.OwnerTGIDs[1] != 22222222 {
+		t.Errorf("OwnerTGIDs = %v", cfg.OwnerTGIDs)
+	}
+	if cfg.GracePeriod.Hours() != 72 {
+		t.Errorf("GracePeriod = %v", cfg.GracePeriod)
 	}
 }
 
