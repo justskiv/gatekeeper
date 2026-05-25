@@ -1,6 +1,5 @@
+-- +goose Up
 -- Migration 0001_init: initial schema.
--- The schema_migrations bookkeeping table is created by the migration
--- runner, not by this file (see internal/store/migrate.go).
 
 -- ── Domain state ─────────────────────────────────────────────────────
 
@@ -140,20 +139,25 @@ CREATE INDEX idx_invite_links_expires
 
 -- ── Idempotency and durable execution ────────────────────────────────
 
--- Raw incoming Telegram updates: idempotency by update_id plus audit.
+-- Durable inbox for incoming Telegram updates with the state machine
+-- pending -> processed | ignored | failed (see SPEC §16.3).
 CREATE TABLE telegram_updates (
     update_id    INTEGER PRIMARY KEY,
     update_type  TEXT    NOT NULL,
     chat_id      INTEGER,
     tg_id        INTEGER,
     payload_json TEXT    NOT NULL,
-    status       TEXT    NOT NULL DEFAULT 'received'
-                 CHECK (status IN ('received','processed','failed','ignored')),
-    error        TEXT    NOT NULL DEFAULT '',
+    status       TEXT    NOT NULL DEFAULT 'pending'
+                 CHECK (status IN ('pending','processed','ignored','failed')),
+    error        TEXT    NOT NULL DEFAULT '',  -- non-empty when status='failed'
     received_at  TEXT    NOT NULL,
-    processed_at TEXT
+    processed_at TEXT                          -- set on the terminal transition
 );
-CREATE INDEX idx_telegram_updates_status ON telegram_updates(status);
+-- Partial index: only pending rows are indexed. Terminal rows
+-- (processed/ignored/failed) stay out of the index, so the growing
+-- inbox tail does not bloat the b-tree.
+CREATE INDEX idx_telegram_updates_pending
+    ON telegram_updates(update_id) WHERE status = 'pending';
 
 -- Raw Tribute webhooks: idempotency by dedup_key plus audit (mode B).
 CREATE TABLE tribute_events (

@@ -6,14 +6,18 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/pressly/goose/v3"
 
 	"github.com/justskiv/gatekeeper/internal/domain"
 )
 
 // newTestDB opens a fresh on-disk database in a temp directory and
-// applies the migrations.
+// applies every migration from the top-level migrations/ directory.
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
@@ -21,35 +25,50 @@ func newTestDB(t *testing.T) *sql.DB {
 		t.Fatalf("open database: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if err := Migrate(context.Background(), db); err != nil {
-		t.Fatalf("migrate: %v", err)
+
+	provider, err := goose.NewProvider(
+		goose.DialectSQLite3, db, os.DirFS(migrationsDir(t)))
+	if err != nil {
+		t.Fatalf("new goose provider: %v", err)
+	}
+	if _, err := provider.Up(context.Background()); err != nil {
+		t.Fatalf("apply migrations: %v", err)
 	}
 	return db
+}
+
+// migrationsDir resolves the repo's top-level migrations/ directory
+// relative to this test file, so the path holds regardless of the
+// `go test` invocation cwd.
+func migrationsDir(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed; cannot resolve migrations dir")
+	}
+	return filepath.Join(filepath.Dir(file), "..", "..", "migrations")
 }
 
 func TestMigrateCreatesSchema(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
 
-	// schema_migrations records exactly migration 0001.
-	var (
-		version int
-		name    string
-	)
+	// goose_db_version records at least one applied migration.
+	var version sql.NullInt64
 	if err := db.QueryRowContext(ctx,
-		`SELECT version, name FROM schema_migrations`).Scan(&version, &name); err != nil {
-		t.Fatalf("query schema_migrations: %v", err)
+		`SELECT max(version_id) FROM goose_db_version WHERE is_applied = 1`,
+	).Scan(&version); err != nil {
+		t.Fatalf("query goose_db_version: %v", err)
 	}
-	if version != 1 || name != "init" {
-		t.Fatalf("schema_migrations = (%d, %q), want (1, \"init\")", version, name)
+	if !version.Valid || version.Int64 < 1 {
+		t.Fatalf("goose_db_version max = %v, want >= 1", version)
 	}
 
-	// All 13 tables exist: 12 domain/ops tables plus schema_migrations.
+	// All 12 domain/ops tables exist.
 	wantTables := []string{
 		"users", "subscriptions", "access_grants", "pending_revocations",
 		"whitelist", "invite_links", "telegram_updates", "tribute_events",
 		"access_actions", "audit_log", "admin_alerts", "meta",
-		"schema_migrations",
 	}
 	for _, table := range wantTables {
 		var n int
@@ -64,21 +83,28 @@ func TestMigrateCreatesSchema(t *testing.T) {
 	}
 }
 
-func TestMigrateIsIdempotent(t *testing.T) {
-	db := newTestDB(t) // already migrated once
-	ctx := context.Background()
-
-	if err := Migrate(ctx, db); err != nil {
-		t.Fatalf("second migrate run: %v", err)
+func TestCheckSchemaErrorsOnEmptyDB(t *testing.T) {
+	// Open without migrating — CheckSchema must reject the db.
+	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "empty.db"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
 	}
+	t.Cleanup(func() { _ = db.Close() })
 
-	var count int
-	if err := db.QueryRowContext(ctx,
-		`SELECT count(*) FROM schema_migrations`).Scan(&count); err != nil {
-		t.Fatalf("count schema_migrations: %v", err)
+	err = CheckSchema(context.Background(), db)
+	if !errors.Is(err, ErrUnmigrated) {
+		t.Fatalf("CheckSchema on empty db = %v, want ErrUnmigrated", err)
 	}
-	if count != 1 {
-		t.Fatalf("schema_migrations has %d rows after re-run, want 1", count)
+	if !strings.Contains(err.Error(), "task migrate:up") {
+		t.Errorf("error message %q lacks the migrate:up instruction",
+			err.Error())
+	}
+}
+
+func TestCheckSchemaPassesOnMigratedDB(t *testing.T) {
+	db := newTestDB(t)
+	if err := CheckSchema(context.Background(), db); err != nil {
+		t.Fatalf("CheckSchema on migrated db: %v", err)
 	}
 }
 

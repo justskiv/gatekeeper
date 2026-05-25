@@ -1,0 +1,33 @@
+// Package applog wires slog to the project's logging configuration so
+// every binary (gatekeeper, migrate) emits logs in the same shape.
+package applog
+
+import (
+	"log/slog"
+	"os"
+
+	"github.com/justskiv/gatekeeper/internal/config"
+)
+
+// New builds a slog.Logger from the configured level and format. The
+// values are already validated by config.Load.
+func New(cfg config.Config) *slog.Logger {
+	level := slog.LevelInfo
+	switch cfg.LogLevel {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+
+	opts := &slog.HandlerOptions{Level: level}
+	var handler slog.Handler
+	if cfg.LogFormat == "text" {
+		handler = slog.NewTextHandler(os.Stdout, opts)
+	} else {
+		handler = slog.NewJSONHandler(os.Stdout, opts)
+	}
+	return slog.New(handler)
+}

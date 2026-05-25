@@ -1,7 +1,9 @@
 // Package store owns the SQLite database: opening it with the right
-// pragmas, applying migrations and the concrete repository types built
-// on hand-written SQL. The database/sql primitives stay concrete inside
-// this package; consumers depend on narrow interfaces of their own.
+// pragmas, verifying that the schema is in place and the concrete
+// repository types built on hand-written SQL. Migrations themselves
+// live outside the application binary (see cmd/migrate). The
+// database/sql primitives stay concrete inside this package;
+// consumers depend on narrow interfaces of their own.
 package store
 
 import (
@@ -19,9 +21,17 @@ import (
 // ErrNotFound is returned by repository getters when no row matches.
 var ErrNotFound = errors.New("store: record not found")
 
+// ErrUnmigrated is returned by CheckSchema when the database has no
+// applied migrations. The wrapped message instructs the operator to
+// run the migrate CLI.
+var ErrUnmigrated = errors.New(
+	"database is not migrated; run `task migrate:up`")
+
 // Open opens the SQLite database at dbPath, creating its parent
 // directory (mode 0700) when missing, and configures the connection
-// pool. Migrations are applied separately via Migrate.
+// pool. Migrations are applied separately by the migrate CLI (see
+// cmd/migrate); call CheckSchema to verify that schema is in place
+// before serving traffic.
 func Open(ctx context.Context, dbPath string) (*sql.DB, error) {
 	if dir := filepath.Dir(dbPath); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -67,6 +77,38 @@ func Open(ctx context.Context, dbPath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 	return db, nil
+}
+
+// CheckSchema returns ErrUnmigrated if the database has no applied
+// migrations. The application never creates schema on its own; this
+// is the boundary check between "operator forgot to run migrate" and
+// "schema is good enough to serve". It speaks plain SQL on purpose so
+// the goose package does not get linked into the runtime binary.
+func CheckSchema(ctx context.Context, db *sql.DB) error {
+	var present int
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*) FROM sqlite_master
+		WHERE type = 'table' AND name = 'goose_db_version'`,
+	).Scan(&present); err != nil {
+		return fmt.Errorf("check schema: %w", err)
+	}
+	if present == 0 {
+		return ErrUnmigrated
+	}
+
+	// Goose seeds the table with version_id=0 / is_applied=1 when it
+	// creates it; a real applied migration carries version_id >= 1.
+	var version sql.NullInt64
+	if err := db.QueryRowContext(ctx, `
+		SELECT max(version_id) FROM goose_db_version
+		WHERE is_applied = 1`,
+	).Scan(&version); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+	if !version.Valid || version.Int64 < 1 {
+		return ErrUnmigrated
+	}
+	return nil
 }
 
 // rfc3339 formats a time as RFC3339 in UTC — the on-disk representation
