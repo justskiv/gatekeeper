@@ -1,0 +1,41 @@
+schema: spec-driven
+
+context: |
+  Gatekeeper - self-hosted Telegram-бот контроля доступа для одного
+  автора. Источники подписки: Boosty-группа и Tribute-канал.
+  Управляемые ресурсы: отдельные клубные чат и канал.
+
+  Текущий baseline реализации:
+  - выполнена foundation-фаза: Go-модуль, конфигурация, доменные типы,
+    SQLite schema/repositories и отдельный migration CLI;
+  - Telegram-транспорт, команды бота, engine статусов, outbox workers,
+    выдача инвайтов, отзыв доступа, reconciliation, webhooks и
+    ops-команды еще не реализованы;
+  - SQLite-схема уже содержит таблицы для будущих фаз, но поведение,
+    которое пишет в эти таблицы, должно появляться отдельными
+    OpenSpec changes.
+
+  Технический стек:
+  - Go module github.com/justskiv/gatekeeper;
+  - Go 1.26.0 в go.mod;
+  - SQLite через modernc.org/sqlite, без cgo;
+  - миграции через pressly/goose в cmd/migrate;
+  - конфигурация из environment variables, godotenv только для
+    локальной разработки;
+  - build/test/lint через Taskfile.yml.
+
+  Продуктовые инварианты из плановой спеки:
+  - идентичность пользователя - Telegram user ID;
+  - любая активная Boosty, Tribute или manual подписка дает единый
+    доступ;
+  - UNKNOWN от источника не должен приводить к отзыву доступа;
+  - hard-ban сильнее подписки, whitelist сильнее отсутствия подписки;
+  - исходящие Telegram-действия должны идти через durable outbox после
+    реализации этой capability;
+  - в v1 не вводить entitlements, access_scopes, grant_rules,
+    неофициальный Boosty API и дифференциацию доступа по тарифам.
+
+  Язык артефактов:
+  - служебные заголовки OpenSpec и кодовые идентификаторы остаются на
+    английском;
+  - содержательные описания пишутся на русском, если это не мешает tooling.

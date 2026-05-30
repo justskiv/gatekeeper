@@ -4,9 +4,9 @@ Self-hosted Telegram access-control bot for paid subscriptions. Gatekeeper
 observes subscription sources (Boosty group, Tribute channel) and manages
 access to the club chat and channel accordingly.
 
-The project is built phase by phase from the specification in
-`local/specs/init/SPEC.md`. This is the foundation phase: build tooling,
-configuration, the SQLite schema and the domain model.
+The project is moving to OpenSpec. Current implemented behavior is described
+in `openspec/specs/`; the full product reference document lives in
+`docs/gatekeeper-product-spec.md`.
 
 ## Requirements
 
@@ -46,8 +46,9 @@ on an unmigrated database it fails with an instruction to run
 
 All configuration comes from environment variables (12-factor); in
 development a `.env` file is loaded automatically. See `.env.example` for
-the full list and `local/specs/init/SPEC.md` §18 for the reference.
+the full list and `docs/gatekeeper-product-spec.md` §18 for the reference.
 
 ## Specification
 
-The full design lives in `local/specs/init/SPEC.md`.
+Current specs live in `openspec/specs/`; the product reference lives in
+`docs/gatekeeper-product-spec.md`.
