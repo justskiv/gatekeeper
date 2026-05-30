@@ -5,17 +5,19 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
 
 // Meta is the repository for the meta key-value table: poller offset,
 // reconcile time, chat health and other service state.
 type Meta struct {
-	db *sql.DB
+	db DBTX
 }
 
-// NewMeta returns a Meta repository backed by db.
-func NewMeta(db *sql.DB) *Meta {
+// NewMeta returns a Meta repository backed by db or tx.
+func NewMeta(db DBTX) *Meta {
 	return &Meta{db: db}
 }
 
@@ -47,4 +49,31 @@ func (r *Meta) Set(ctx context.Context, key, value string) error {
 		return fmt.Errorf("set meta %q: %w", key, err)
 	}
 	return nil
+}
+
+// GetUpdateOffset returns the durable Telegram polling offset.
+func (r *Meta) GetUpdateOffset(ctx context.Context) (int64, bool, error) {
+	value, ok, err := r.Get(ctx, "update_offset")
+	if err != nil || !ok {
+		return 0, ok, err
+	}
+	offset, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, false, fmt.Errorf("parse update_offset %q: %w", value, err)
+	}
+	return offset, true, nil
+}
+
+// SetUpdateOffset stores the durable Telegram polling offset.
+func (r *Meta) SetUpdateOffset(ctx context.Context, offset int64) error {
+	return r.Set(ctx, "update_offset", strconv.FormatInt(offset, 10))
+}
+
+// SetHealth stores a stable health.<key> value. The caller may pass
+// either "club_chat" or "health.club_chat".
+func (r *Meta) SetHealth(ctx context.Context, key, value string) error {
+	if !strings.HasPrefix(key, "health.") {
+		key = "health." + key
+	}
+	return r.Set(ctx, key, value)
 }

@@ -1,12 +1,8 @@
 // Command gatekeeper is a self-hosted Telegram access-control bot.
 //
-// This is the foundation build: it loads and validates the
-// configuration, opens the SQLite database, verifies that the schema
-// is in place and shuts down cleanly on a signal. Migrations are
-// applied separately by the migrate CLI (see cmd/migrate); on a
-// non-migrated database the bot fails fast with an instruction to
-// run `task migrate:up`. Telegram transport and the domain logic are
-// added by later phases.
+// Migrations are applied separately by the migrate CLI (see cmd/migrate);
+// on a non-migrated database the bot fails fast with an instruction to
+// run `task migrate:up`.
 package main
 
 import (
@@ -19,7 +15,10 @@ import (
 
 	"github.com/justskiv/gatekeeper/internal/applog"
 	"github.com/justskiv/gatekeeper/internal/config"
+	"github.com/justskiv/gatekeeper/internal/notify"
 	"github.com/justskiv/gatekeeper/internal/store"
+	"github.com/justskiv/gatekeeper/internal/telegram"
+	"golang.org/x/sync/errgroup"
 )
 
 func main() {
@@ -38,6 +37,10 @@ func run() error {
 
 	logger := applog.New(cfg)
 	slog.SetDefault(logger)
+
+	if cfg.TelegramMode == "webhook" {
+		return fmt.Errorf("telegram webhook mode is not implemented in this phase")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(),
 		syscall.SIGINT, syscall.SIGTERM)
@@ -58,16 +61,49 @@ func run() error {
 		return err
 	}
 
+	tgClient, err := telegram.NewClient(cfg.BotToken)
+	if err != nil {
+		return err
+	}
+	me, err := tgClient.GetMe(ctx)
+	if err != nil {
+		return err
+	}
+	logger.Info("getMe ok",
+		slog.Int64("bot_id", me.ID),
+		slog.String("username", me.Username))
+
+	if err := tgClient.SetMyCommands(ctx, cfg.OwnerTGIDs); err != nil {
+		logger.Warn("failed to set bot commands", slog.Any("error", err))
+	}
+
+	notifier := notify.New(store.NewUsers(db), tgClient, logger)
+	healthChats := telegram.HealthChatsFromConfig(cfg)
+	if err := telegram.CheckStartupHealth(
+		ctx, db, tgClient, notifier, healthChats, cfg.OwnerTGIDs, me.ID, logger,
+	); err != nil {
+		return err
+	}
+
+	group, groupCtx := errgroup.WithContext(ctx)
+	poller := telegram.NewPoller(
+		db, tgClient, notifier, healthChats, cfg.OwnerTGIDs, logger)
+	group.Go(func() error {
+		return poller.Run(groupCtx)
+	})
+
 	logger.Info("gatekeeper started",
 		slog.String("db_path", cfg.DBPath),
 		slog.String("telegram_mode", cfg.TelegramMode),
 		slog.String("tribute_mode", cfg.TributeMode))
 
-	// This phase runs no background subsystems — just wait for a
-	// shutdown signal. Later phases start the poller, Enforcer and
-	// Reconciler here under an errgroup.
-	<-ctx.Done()
+	<-groupCtx.Done()
 
-	logger.Info("shutdown signal received, stopping")
+	if ctx.Err() != nil {
+		logger.Info("shutdown signal received, stopping")
+	}
+	if err := group.Wait(); err != nil {
+		return err
+	}
 	return nil
 }

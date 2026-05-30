@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"time"
 )
@@ -20,11 +19,11 @@ type AuditEntry struct {
 
 // Audit is the repository for the append-only audit_log table.
 type Audit struct {
-	db *sql.DB
+	db DBTX
 }
 
-// NewAudit returns an Audit repository backed by db.
-func NewAudit(db *sql.DB) *Audit {
+// NewAudit returns an Audit repository backed by db or tx.
+func NewAudit(db DBTX) *Audit {
 	return &Audit{db: db}
 }
 

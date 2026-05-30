@@ -3,6 +3,7 @@
 package applog
 
 import (
+	"io"
 	"log/slog"
 	"os"
 
@@ -12,6 +13,10 @@ import (
 // New builds a slog.Logger from the configured level and format. The
 // values are already validated by config.Load.
 func New(cfg config.Config) *slog.Logger {
+	return newWithWriter(cfg, os.Stdout, shouldColor(os.Stdout))
+}
+
+func newWithWriter(cfg config.Config, out io.Writer, color bool) *slog.Logger {
 	level := slog.LevelInfo
 	switch cfg.LogLevel {
 	case "debug":
@@ -25,9 +30,12 @@ func New(cfg config.Config) *slog.Logger {
 	opts := &slog.HandlerOptions{Level: level}
 	var handler slog.Handler
 	if cfg.LogFormat == "text" {
-		handler = slog.NewTextHandler(os.Stdout, opts)
+		handler = newConsoleHandler(out, consoleHandlerOptions{
+			Level: level,
+			Color: color,
+		})
 	} else {
-		handler = slog.NewJSONHandler(os.Stdout, opts)
+		handler = slog.NewJSONHandler(out, opts)
 	}
 	return slog.New(handler)
 }

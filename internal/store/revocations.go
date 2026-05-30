@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"time"
 
@@ -12,11 +11,11 @@ import (
 // Revocations is the repository for the pending_revocations table — the
 // grace-period queue, keyed by user.
 type Revocations struct {
-	db *sql.DB
+	db DBTX
 }
 
-// NewRevocations returns a Revocations repository backed by db.
-func NewRevocations(db *sql.DB) *Revocations {
+// NewRevocations returns a Revocations repository backed by db or tx.
+func NewRevocations(db DBTX) *Revocations {
 	return &Revocations{db: db}
 }
 

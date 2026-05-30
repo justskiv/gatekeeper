@@ -14,11 +14,11 @@ import (
 // append-only: a new period adds a new row and an expired one is marked
 // rather than deleted.
 type Subscriptions struct {
-	db *sql.DB
+	db DBTX
 }
 
-// NewSubscriptions returns a Subscriptions repository backed by db.
-func NewSubscriptions(db *sql.DB) *Subscriptions {
+// NewSubscriptions returns a Subscriptions repository backed by db or tx.
+func NewSubscriptions(db DBTX) *Subscriptions {
 	return &Subscriptions{db: db}
 }
 

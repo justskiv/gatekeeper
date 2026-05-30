@@ -205,6 +205,35 @@ func TestUsersUpsertAndGet(t *testing.T) {
 		t.Errorf("username not updated: %q", got.Username)
 	}
 
+	if err := users.Upsert(ctx, domain.User{
+		TGID:         99,
+		Username:     "blocked",
+		DMState:      domain.DMBlocked,
+		Banned:       true,
+		BannedReason: "manual",
+		Notes:        "keep",
+	}); err != nil {
+		t.Fatalf("upsert banned user: %v", err)
+	}
+	if err := users.Upsert(ctx, domain.User{
+		TGID:     99,
+		Username: "fresh",
+		DMState:  domain.DMOpen,
+	}); err != nil {
+		t.Fatalf("refresh banned user: %v", err)
+	}
+	got, err = users.Get(ctx, 99)
+	if err != nil {
+		t.Fatalf("get banned user: %v", err)
+	}
+	if got.Username != "fresh" ||
+		got.DMState != domain.DMOpen ||
+		!got.Banned ||
+		got.BannedReason != "manual" ||
+		got.Notes != "keep" {
+		t.Errorf("refreshed user = %+v, want admin fields preserved", got)
+	}
+
 	if _, err := users.Get(ctx, 7777); !errors.Is(err, ErrNotFound) {
 		t.Errorf("expected ErrNotFound for an unknown user, got %v", err)
 	}

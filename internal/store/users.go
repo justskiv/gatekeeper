@@ -12,17 +12,17 @@ import (
 
 // Users is the repository for the users table.
 type Users struct {
-	db *sql.DB
+	db DBTX
 }
 
-// NewUsers returns a Users repository backed by db.
-func NewUsers(db *sql.DB) *Users {
+// NewUsers returns a Users repository backed by db or tx.
+func NewUsers(db DBTX) *Users {
 	return &Users{db: db}
 }
 
-// Upsert inserts a user or updates the mutable columns of an existing
-// row. created_at is preserved on update; updated_at and last_seen_at
-// are set to the current time.
+// Upsert inserts a user or refreshes Telegram-owned profile fields.
+// Admin-owned fields such as bans and notes are preserved on update.
+// created_at is preserved; updated_at and last_seen_at are set to now.
 func (r *Users) Upsert(ctx context.Context, u domain.User) error {
 	now := rfc3339(time.Now())
 	dmState := u.DMState
@@ -42,9 +42,6 @@ func (r *Users) Upsert(ctx context.Context, u domain.User) error {
 			language_code = excluded.language_code,
 			is_bot        = excluded.is_bot,
 			dm_state      = excluded.dm_state,
-			banned        = excluded.banned,
-			banned_reason = excluded.banned_reason,
-			notes         = excluded.notes,
 			updated_at    = excluded.updated_at,
 			last_seen_at  = excluded.last_seen_at`,
 		u.TGID, u.Username, u.FirstName, u.LastName, u.LanguageCode,
@@ -90,4 +87,30 @@ func (r *Users) Get(ctx context.Context, tgID int64) (domain.User, error) {
 		return domain.User{}, fmt.Errorf("parse user %d last_seen_at: %w", tgID, err)
 	}
 	return u, nil
+}
+
+// SetDMState narrowly updates the direct-message state without touching
+// profile cache fields. Opening a DM also advances last_seen_at.
+func (r *Users) SetDMState(
+	ctx context.Context, tgID int64, state domain.DMState,
+) error {
+	now := rfc3339(time.Now())
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE users
+		SET dm_state = ?,
+		    updated_at = ?,
+		    last_seen_at = CASE WHEN ? = 'open' THEN ? ELSE last_seen_at END
+		WHERE tg_id = ?`,
+		string(state), now, string(state), now, tgID)
+	if err != nil {
+		return fmt.Errorf("set user %d dm_state: %w", tgID, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read user %d dm_state rows affected: %w", tgID, err)
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

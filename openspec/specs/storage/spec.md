@@ -2,170 +2,207 @@
 
 ## Purpose
 
-Defines SQLite connection lifecycle, schema readiness checks, and the
-repository boundary over the v1 database schema.
+Описывает жизненный цикл SQLite-соединения, проверку готовности схемы и
+repository-границу над схемой БД v1.
 
 ## Requirements
+
 ### Requirement: SQLite database is opened with the required pragmas
 
-The database MUST be opened via `database/sql` using the
-`modernc.org/sqlite` driver (registered as `sqlite`). The DSN MUST
-set `journal_mode=WAL`, `busy_timeout=5000`, `foreign_keys=ON`,
-`synchronous=NORMAL` and `_txlock=immediate` (every transaction
-MUST begin with `BEGIN IMMEDIATE`). The pool MUST be sized at one
-connection (`SetMaxOpenConns(1)`) with a one-hour
-`ConnMaxLifetime` so WAL checkpoints can run.
+База MUST открываться через `database/sql` с драйвером
+`modernc.org/sqlite` (зарегистрирован как `sqlite`). DSN MUST задавать
+`journal_mode=WAL`, `busy_timeout=5000`, `foreign_keys=ON`,
+`synchronous=NORMAL` и `_txlock=immediate` (каждая транзакция MUST
+начинаться как `BEGIN IMMEDIATE`). Пул MUST быть ограничен одним
+соединением (`SetMaxOpenConns(1)`) с `ConnMaxLifetime` в один час, чтобы
+WAL checkpoint'ы могли выполняться.
 
-#### Scenario: Database opens successfully
-- **WHEN** `Open(ctx, dbPath)` is called against a writable path
-- **THEN** a `*sql.DB` is returned with `foreign_keys=ON` and the pool
-  configured to a single connection
-- **AND** a subsequent `PingContext` succeeds
+#### Scenario: База успешно открывается
+- **WHEN** `Open(ctx, dbPath)` вызван для доступного на запись пути
+- **THEN** возвращается `*sql.DB` с `foreign_keys=ON` и пулом в одно
+  соединение
+- **AND** последующий `PingContext` успешен
 
-#### Scenario: Database directory is missing
-- **WHEN** the parent directory of `dbPath` does not exist
-- **THEN** `Open` creates it (and parents) with mode `0700`
+#### Scenario: Каталога базы нет
+- **WHEN** родительский каталог `dbPath` отсутствует
+- **THEN** `Open` создаёт его и родителей с правами `0700`
 
 ### Requirement: Database file is created with mode 0600
 
-The database file MUST NOT be world-readable. `Open` MUST
-pre-create the file with mode `0600` before passing the path to the
-SQLite driver (otherwise the driver would default to `0644`).
+Файл базы MUST NOT быть world-readable. `Open` MUST заранее создать
+файл с правами `0600` перед передачей пути SQLite-драйверу (иначе
+драйвер создал бы файл с дефолтными `0644`).
 
-#### Scenario: New database file
-- **WHEN** `Open` is called against a path with no existing file
-- **THEN** the file is created with permission bits `0600`
+#### Scenario: Новый файл базы
+- **WHEN** `Open` вызван для пути, где файла ещё нет
+- **THEN** файл создаётся с permission bits `0600`
 
 ### Requirement: Schema-presence check refuses an unmigrated database
 
-The application MUST NOT apply DDL itself; it MUST only verify that
-the schema is in place. `CheckSchema` MUST read goose's bookkeeping
-table (`goose_db_version`) and MUST return `ErrUnmigrated` if the
-table is missing or its `max(version_id) WHERE is_applied = 1` is
-`< 1`. The wrapped error message MUST instruct the operator to run
-`task migrate:up`.
+Приложение MUST NOT применять DDL самостоятельно; оно MUST только
+проверять, что схема уже на месте. `CheckSchema` MUST читать служебную
+таблицу goose (`goose_db_version`) и MUST возвращать `ErrUnmigrated`,
+если таблицы нет или `max(version_id) WHERE is_applied = 1` меньше `1`.
+Текст ошибки MUST подсказывать оператору выполнить `task migrate:up`.
 
-#### Scenario: Empty database
-- **WHEN** `CheckSchema` runs against a freshly opened, unmigrated db
-- **THEN** the returned error wraps `ErrUnmigrated`
-- **AND** the error message contains the string `"task migrate:up"`
+#### Scenario: Пустая база
+- **WHEN** `CheckSchema` выполняется на свежей немигрированной базе
+- **THEN** возвращённая ошибка оборачивает `ErrUnmigrated`
+- **AND** текст ошибки содержит строку `"task migrate:up"`
 
-#### Scenario: Migrated database
-- **WHEN** `CheckSchema` runs after `migrate up` applied at least one
-  migration
-- **THEN** the call returns `nil`
+#### Scenario: Мигрированная база
+- **WHEN** `CheckSchema` выполняется после `migrate up`, применившего
+  хотя бы одну миграцию
+- **THEN** вызов возвращает `nil`
 
 ### Requirement: Initial schema defines the v1 data model
 
-Migration `0001_init.sql` MUST create twelve tables that the rest
-of the system depends on: `users`, `subscriptions`, `access_grants`,
-`pending_revocations`, `whitelist`, `invite_links`,
-`telegram_updates`, `tribute_events`, `access_actions`,
-`audit_log`, `admin_alerts`, `meta`. All timestamp columns MUST
-store RFC3339 strings in UTC. Domain enums (platform, state, mode,
-status, severity, action_type) MUST be enforced via `CHECK`
-constraints.
+Миграция `0001_init.sql` MUST создавать 12 таблиц, от которых зависит
+остальная система: `users`, `subscriptions`, `access_grants`,
+`pending_revocations`, `whitelist`, `invite_links`, `telegram_updates`,
+`tribute_events`, `access_actions`, `audit_log`, `admin_alerts`,
+`meta`. Все timestamp-колонки MUST хранить строки RFC3339 в UTC.
+Доменные enum'ы (`platform`, `state`, `mode`, `status`, `severity`,
+`action_type`) MUST фиксироваться через `CHECK` constraints.
 
-#### Scenario: Tables exist after migrating
-- **WHEN** the test harness opens a fresh database and runs goose `Up`
-- **THEN** all twelve tables exist in `sqlite_master`
-- **AND** `goose_db_version` records at least one applied migration
+#### Scenario: Таблицы существуют после миграции
+- **WHEN** тестовый harness открывает свежую базу и запускает goose `Up`
+- **THEN** все 12 таблиц есть в `sqlite_master`
+- **AND** `goose_db_version` содержит хотя бы одну применённую миграцию
 
 ### Requirement: At most one active subscription per (user, platform)
 
-The schema MUST reject a second active subscription for the same
-`(tg_id, platform)` pair. This is enforced by the partial unique
-index `idx_subscriptions_active_unique` on
-`subscriptions(tg_id, platform) WHERE status = 'active'`. Expired
-subscriptions MUST NOT occupy the slot, and the same user MUST be
-allowed active subscriptions on different platforms.
+Схема MUST отклонять вторую активную подписку для той же пары
+`(tg_id, platform)`. Это обеспечивает partial unique index
+`idx_subscriptions_active_unique` на
+`subscriptions(tg_id, platform) WHERE status = 'active'`. Истёкшие
+подписки MUST NOT занимать слот, а один пользователь MUST иметь
+возможность держать активные подписки на разных платформах.
 
-#### Scenario: Duplicate active subscription
-- **WHEN** an active subscription exists for `(user, platform)` and a
-  second active subscription is inserted for the same pair
-- **THEN** the insert fails with a unique-constraint violation
+#### Scenario: Дубликат активной подписки
+- **WHEN** активная подписка уже есть для `(user, platform)`, и вторая
+  активная подписка вставляется для той же пары
+- **THEN** вставка падает с unique-constraint violation
 
-#### Scenario: Active subscription after an expired one
-- **WHEN** an active subscription for `(user, platform)` was expired
-  (`status='expired'`, `ended_at` set)
-- **THEN** a new active subscription for the same pair is allowed
+#### Scenario: Активная подписка после истёкшей
+- **WHEN** активная подписка для `(user, platform)` была истекшей
+  (`status='expired'`, `ended_at` заполнен)
+- **THEN** новая активная подписка для той же пары разрешена
 
 ### Requirement: Invite links honour per-mode active uniqueness
 
-Two partial unique indexes on `invite_links` MUST enforce one
-active link per slot, where "active" means
+Два partial unique index'а на `invite_links` MUST обеспечивать одну
+активную ссылку на слот, где «активная» означает
 `status IN ('created','sent')`:
 
-- `shared_join_request`: at most one active link per
-  `(resource, mode)`; the `tg_id` column MUST be `NULL` for shared
-  links.
-- `personal_join_request` and `direct`: at most one active link per
-  `(tg_id, resource, mode)`; `tg_id` MUST be `NOT NULL` for these.
+- `shared_join_request`: максимум одна активная ссылка на
+  `(resource, mode)`; колонка `tg_id` MUST быть `NULL` для shared
+  ссылок.
+- `personal_join_request` и `direct`: максимум одна активная ссылка на
+  `(tg_id, resource, mode)`; `tg_id` MUST быть `NOT NULL` для этих
+  режимов.
 
-A `CHECK` constraint MUST enforce the `tg_id` nullability rule by
-mode.
+`CHECK` constraint MUST фиксировать правило nullable/non-nullable
+`tg_id` по режиму.
 
-#### Scenario: Second active shared link rejected
-- **WHEN** an active shared link exists for `(chat, shared_join_request)`
-  and a second active shared link is inserted for the same pair
-- **THEN** the insert fails with a unique-constraint violation
+#### Scenario: Вторая активная shared-ссылка отклоняется
+- **WHEN** активная shared-ссылка уже есть для
+  `(chat, shared_join_request)`, и вторая активная shared-ссылка
+  вставляется для той же пары
+- **THEN** вставка падает с unique-constraint violation
 
-#### Scenario: Personal link slot freed by an expired link
-- **WHEN** the prior personal link for `(user, resource, mode)` is
-  marked `expired`
-- **THEN** a new active personal link for the same triple is allowed
+#### Scenario: Personal-слот освобождён истёкшей ссылкой
+- **WHEN** предыдущая personal-ссылка для `(user, resource, mode)`
+  помечена `expired`
+- **THEN** новая активная personal-ссылка для той же тройки разрешена
 
 ### Requirement: Foreign keys are enforced
 
-`PRAGMA foreign_keys` MUST be `1` on every connection so that
-referential integrity is checked at write time.
+`PRAGMA foreign_keys` MUST быть `1` на каждом соединении, чтобы
+referential integrity проверялась при записи.
 
-#### Scenario: Subscription without a user
-- **WHEN** a subscription row referencing a non-existent `tg_id` is
-  inserted
-- **THEN** the insert fails with a foreign-key violation
+#### Scenario: Подписка без пользователя
+- **WHEN** вставляется строка подписки, ссылающаяся на несуществующий
+  `tg_id`
+- **THEN** вставка падает с foreign-key violation
 
 ### Requirement: Repositories expose narrow methods on the v1 schema
 
-Phase 01 MUST ship hand-written repository types for the tables the
-next phases need. Each repository MUST wrap `*sql.DB` and MUST be
-constructed via a `NewX(db)` helper. The following methods MUST be
-available:
+`store` MUST поставлять рукописные repository-типы для таблиц, которые
+нужны рантайм-фазам. Механизм транзакционности фиксируется так: пакет
+объявляет узкий querier-интерфейс `DBTX` (методы `ExecContext`,
+`QueryContext`, `QueryRowContext`), удовлетворяемый и `*sql.DB`, и
+`*sql.Tx`; repository конструируется хелпером `NewX(q DBTX)` поверх
+этого исполнителя. Чтобы выдержать инвариант I1 (`telegram-transport`),
+поллер открывает `tx2` и конструирует repo обработчика **поверх этой
+`*sql.Tx`**, поэтому доменные изменения и терминальный
+`telegram_updates.status` коммитятся атомарно. Исполнитель приходит из
+конструктора, поэтому сигнатуры методов остаются на `ctx` (без
+per-call executor-аргумента).
 
-- `Users.Upsert(ctx, User) error`, `Users.Get(ctx, tgID) (User, error)`
-- `Subscriptions.Create(ctx, Subscription) (id, error)`,
-  `Subscriptions.GetActive(ctx, tgID, platform) (Subscription, ok, error)`
-- `Grants.Upsert(ctx, AccessGrant) error`,
-  `Grants.Get(ctx, tgID, resource) (AccessGrant, error)`
-- `Meta.Get(ctx, key) (value, ok, error)`,
-  `Meta.Set(ctx, key, value) error`
+Доступны MUST быть методы:
 
-Additional repositories (`Revocations`, `Whitelist`, `Audit`,
-`Alerts`) are constructable in Phase 01 but their full method sets
-are added by the phases that need them.
+- `Users.Upsert(ctx, User) error`
+- `Users.Get(ctx, tgID) (User, error)`
+- `Users.SetDMState(ctx, tgID, state) error`
+- `Subscriptions.Create(ctx, Subscription) (id, error)`
+- `Subscriptions.GetActive(ctx, tgID, platform) (Subscription, ok, error)`
+- `Grants.Upsert(ctx, AccessGrant) error`
+- `Grants.Get(ctx, tgID, resource) (AccessGrant, error)`
+- `Meta.Get(ctx, key) (value, ok, error)`
+- `Meta.Set(ctx, key, value) error`
+- `Meta.GetUpdateOffset(ctx) (offset, ok, error)`
+- `Meta.SetUpdateOffset(ctx, offset) error`
+- `Meta.SetHealth(ctx, key, value) error`
+- `TelegramUpdates.InsertBatch(ctx, updates, nextOffset) error`
+- `TelegramUpdates.ListPending(ctx, limit) ([]TelegramUpdate, error)`
+- `TelegramUpdates.MarkTerminal(ctx, updateID, status, errorText) error`
+- `Audit.Append(ctx, AuditEntry) error`
+- `Alerts.Create(ctx, AlertInput) (id, error)`
 
-#### Scenario: Getter on a missing row
-- **WHEN** a `Get` method is called for a key that has no row
-- **THEN** the returned error wraps `ErrNotFound`
+Остальные repository (`Revocations`, `Whitelist`) конструируемы в этой
+фазе, но их полные наборы методов добавят фазы, которым они нужны.
 
-#### Scenario: Upsert is idempotent on the key
-- **WHEN** `Users.Upsert` is called twice with the same `tg_id`
-- **THEN** the second call updates the mutable columns instead of
-  failing on the primary key
+#### Scenario: Getter по отсутствующей строке
+- **WHEN** метод `Get` вызывается для ключа, у которого нет строки
+- **THEN** возвращённая ошибка оборачивает `ErrNotFound`
+
+#### Scenario: Upsert идемпотентен по ключу
+- **WHEN** `Users.Upsert` дважды вызывается с одним `tg_id`
+- **THEN** второй вызов обновляет изменяемые колонки вместо падения на
+  primary key
+
+#### Scenario: DM-state обновляется узко
+- **WHEN** `Users.SetDMState` обновляет состояние личной переписки
+  пользователя
+- **THEN** меняются только `dm_state`, `updated_at` (и при необходимости
+  `last_seen_at`), а кэш профиля сохраняется
+
+#### Scenario: Telegram batch insert атомарно продвигает offset
+- **WHEN** `TelegramUpdates.InsertBatch` сохраняет батч, заканчивающийся
+  на `update_id = 42`
+- **THEN** каждая новая строка зафиксирована со статусом `pending` и
+  заполненным `payload_json`
+- **AND** `meta.update_offset` зафиксирован как `43` в той же транзакции
+
+#### Scenario: Terminal status делит транзакцию с состоянием handler'а
+- **WHEN** обработчик меняет строку `users` и помечает обновление
+  `processed`
+- **THEN** обе записи можно зафиксировать в одной SQL-транзакции
 
 ### Requirement: Timestamps cross the boundary as RFC3339 UTC
 
-The `store` package MUST own the only places where `time.Time` is
-encoded to or decoded from a SQL row. Encoding MUST be
-`time.RFC3339` in UTC; decoding MUST parse the same shape.
-Optional timestamps MUST round-trip through `*time.Time` with
+Пакет `store` MUST владеть единственными местами, где `time.Time`
+кодируется в SQL-строку и декодируется обратно. Запись MUST быть
+`time.RFC3339` в UTC; чтение MUST парсить тот же формат. Опциональные
+timestamp'ы MUST round-trip'иться через `*time.Time` с соответствием
 `NULL` ↔ `nil`.
 
-#### Scenario: Round-trip of an optional timestamp
-- **WHEN** a row with a non-nil `ExpiresAt` is written and read back
-- **THEN** the returned `*time.Time` is non-nil and equal to the
-  original (to RFC3339-second precision)
+#### Scenario: Round-trip опционального timestamp
+- **WHEN** строка с non-nil `ExpiresAt` записана и прочитана обратно
+- **THEN** возвращённый `*time.Time` non-nil и равен исходному значению
+  с точностью до секунды RFC3339
 
-#### Scenario: NULL maps to nil
-- **WHEN** a row stores `NULL` in an optional timestamp column
-- **THEN** the decoded value is a nil `*time.Time`
+#### Scenario: NULL отображается в nil
+- **WHEN** строка хранит `NULL` в опциональной timestamp-колонке
+- **THEN** декодированное значение равно nil `*time.Time`

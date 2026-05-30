@@ -18,6 +18,19 @@ import (
 	_ "modernc.org/sqlite" // registers the "sqlite" driver
 )
 
+// DBTX is the narrow SQL executor shared by *sql.DB and *sql.Tx.
+// Repository constructors accept it so handlers can bind repositories to
+// the transaction that owns the update's terminal state transition.
+type DBTX interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+type txStarter interface {
+	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+}
+
 // ErrNotFound is returned by repository getters when no row matches.
 var ErrNotFound = errors.New("store: record not found")
 

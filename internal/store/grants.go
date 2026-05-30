@@ -13,11 +13,11 @@ import (
 // Grants is the repository for the access_grants table: one row per
 // (user, resource) pair.
 type Grants struct {
-	db *sql.DB
+	db DBTX
 }
 
-// NewGrants returns a Grants repository backed by db.
-func NewGrants(db *sql.DB) *Grants {
+// NewGrants returns a Grants repository backed by db or tx.
+func NewGrants(db DBTX) *Grants {
 	return &Grants{db: db}
 }
 

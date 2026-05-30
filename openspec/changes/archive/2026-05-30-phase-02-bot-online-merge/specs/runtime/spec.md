@@ -1,12 +1,4 @@
-# runtime Specification
-
-## Purpose
-
-Описывает жизненный цикл процесса `gatekeeper`: загрузку конфигурации,
-проверку готовности БД, запуск Telegram-подсистем и остановку по
-сигналу.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: The `gatekeeper` binary follows a fixed startup order
 
@@ -64,6 +56,21 @@
 - **AND** горутина поллера завершается до того, как выполнится
   deferred `db.Close()`, и процесс выходит с кодом `0`
 
+## REMOVED Requirements
+
+### Requirement: Phase 01 runs no background subsystems
+
+**Reason**: Эта фаза запускает Telegram-поллер как supervised
+background subsystem, поэтому запрет фоновых подсистем из Фазы 01
+больше не действует.
+
+**Migration**: Жизненный цикл поллера теперь задан обновлённым
+требованием порядка старта и новым требованием про supervised
+`errgroup`. Enforcer и Reconciler подключатся к тому же `errgroup` в
+следующих фазах.
+
+## ADDED Requirements
+
 ### Requirement: Background subsystems run under a supervised errgroup
 
 Фоновые подсистемы MUST запускаться под `errgroup.WithContext` (в этой
@@ -110,37 +117,3 @@ fatal-ошибкой, а не молча уходить в polling. Webhook-тр
   метриками
 - **THEN** HTTP-listener не открывается
 - **AND** поллер — единственная запущенная фоновая интеграция
-
-### Requirement: Both binaries share log configuration via `applog`
-
-Пакет `applog` MUST строить `log/slog.Logger` из `Config.LogLevel`
-(`debug`/`info`/`warn`/`error`) и `Config.LogFormat` (`json`/`text`).
-Один и тот же построитель MUST использоваться бинарями `gatekeeper` и
-`migrate`, чтобы все процессы писали логи в согласованном формате.
-
-#### Scenario: Настроенный уровень логирования
-- **WHEN** `LOG_LEVEL=debug`
-- **THEN** `applog.New` возвращает логгер, чей handler пропускает записи
-  уровня `Debug` и выше
-
-#### Scenario: Настроенный формат логирования
-- **WHEN** `LOG_FORMAT=text`
-- **THEN** `applog.New` возвращает логгер с текстовым handler'ом,
-  пишущим в stdout; иначе handler использует JSON
-
-### Requirement: Fatal errors print to stderr and exit non-zero
-
-Оба бинаря MUST использовать единый формат fatal-ошибки:
-
-```
-fatal: <error>
-```
-
-Строка пишется в stderr, затем процесс вызывает `os.Exit(1)`. В момент
-обнаружения fatal-ошибки логгер может ещё не быть настроен, поэтому
-stderr MUST оставаться надёжным каналом.
-
-#### Scenario: Любая неустранимая ошибка из `run`
-- **WHEN** внутренняя функция `run()` возвращает ненулевую ошибку
-- **THEN** `main` пишет `"fatal: <message>"` в stderr и выходит с
-  кодом `1`

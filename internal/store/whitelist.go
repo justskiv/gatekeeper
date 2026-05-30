@@ -11,11 +11,11 @@ import (
 // Whitelist is the repository for the whitelist table: users with
 // permanent free access (owner, moderators, etc.).
 type Whitelist struct {
-	db *sql.DB
+	db DBTX
 }
 
-// NewWhitelist returns a Whitelist repository backed by db.
-func NewWhitelist(db *sql.DB) *Whitelist {
+// NewWhitelist returns a Whitelist repository backed by db or tx.
+func NewWhitelist(db DBTX) *Whitelist {
 	return &Whitelist{db: db}
 }
 
