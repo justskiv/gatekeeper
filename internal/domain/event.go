@@ -19,9 +19,12 @@ const (
 type EventKind string
 
 const (
-	EventActivated             EventKind = "activated"              // subscription appeared / is active
-	EventDeactivated           EventKind = "deactivated"            // subscription gone / expired
-	EventCancelledSubscription EventKind = "cancelled_subscription" // provider cancellation notice
+	// EventActivated means the subscription appeared or is active.
+	EventActivated EventKind = "activated"
+	// EventDeactivated means the subscription is gone or expired.
+	EventDeactivated EventKind = "deactivated"
+	// EventCancelledSubscription means the provider sent a cancellation notice.
+	EventCancelledSubscription EventKind = "cancelled_subscription"
 )
 
 // SubscriptionEvent is a normalized subscription event from any source.

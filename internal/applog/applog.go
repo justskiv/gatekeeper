@@ -18,6 +18,7 @@ func New(cfg config.Config) *slog.Logger {
 
 func newWithWriter(cfg config.Config, out io.Writer, color bool) *slog.Logger {
 	level := slog.LevelInfo
+
 	switch cfg.LogLevel {
 	case "debug":
 		level = slog.LevelDebug
@@ -28,6 +29,7 @@ func newWithWriter(cfg config.Config, out io.Writer, color bool) *slog.Logger {
 	}
 
 	opts := &slog.HandlerOptions{Level: level}
+
 	var handler slog.Handler
 	if cfg.LogFormat == "text" {
 		handler = newConsoleHandler(out, consoleHandlerOptions{
@@ -37,5 +39,6 @@ func newWithWriter(cfg config.Config, out io.Writer, color bool) *slog.Logger {
 	} else {
 		handler = slog.NewJSONHandler(out, opts)
 	}
+
 	return slog.New(handler)
 }

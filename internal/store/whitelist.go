@@ -32,20 +32,24 @@ func (r *Whitelist) Add(ctx context.Context, tgID, addedBy int64, reason string)
 	if err != nil {
 		return fmt.Errorf("add whitelist %d: %w", tgID, err)
 	}
+
 	return nil
 }
 
 // Has reports whether the user is whitelisted.
 func (r *Whitelist) Has(ctx context.Context, tgID int64) (bool, error) {
 	var one int
+
 	err := r.db.QueryRowContext(ctx,
 		`SELECT 1 FROM whitelist WHERE tg_id = ?`, tgID).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
+
 	if err != nil {
 		return false, fmt.Errorf("check whitelist %d: %w", tgID, err)
 	}
+
 	return true, nil
 }
 
@@ -55,5 +59,6 @@ func (r *Whitelist) Remove(ctx context.Context, tgID int64) error {
 		`DELETE FROM whitelist WHERE tg_id = ?`, tgID); err != nil {
 		return fmt.Errorf("remove whitelist %d: %w", tgID, err)
 	}
+
 	return nil
 }

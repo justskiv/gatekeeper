@@ -34,6 +34,7 @@ func (r *Alerts) Create(ctx context.Context, a AlertInput) (int64, error) {
 	if a.TGID != nil {
 		tgID = *a.TGID
 	}
+
 	res, err := r.db.ExecContext(ctx, `
 		INSERT INTO admin_alerts (severity, status, kind, title, detail, tg_id, created_at)
 		VALUES (?, 'open', ?, ?, ?, ?, ?)`,
@@ -41,6 +42,7 @@ func (r *Alerts) Create(ctx context.Context, a AlertInput) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("create alert %q: %w", a.Kind, err)
 	}
+
 	return res.LastInsertId()
 }
 
@@ -50,6 +52,7 @@ func (r *Alerts) CreateOpenIfMissing(
 	ctx context.Context, a AlertInput,
 ) (int64, bool, error) {
 	var existingID int64
+
 	err := r.db.QueryRowContext(ctx, `
 		SELECT id
 		FROM admin_alerts
@@ -60,14 +63,17 @@ func (r *Alerts) CreateOpenIfMissing(
 	if err == nil {
 		return existingID, false, nil
 	}
+
 	if !errors.Is(err, sql.ErrNoRows) {
 		return 0, false,
 			fmt.Errorf("find open alert %q/%q: %w", a.Kind, a.Title, err)
 	}
+
 	id, err := r.Create(ctx, a)
 	if err != nil {
 		return 0, false, err
 	}
+
 	return id, true, nil
 }
 
@@ -81,5 +87,6 @@ func (r *Alerts) ResolveOpenByTitle(ctx context.Context, kind, title string) err
 	if err != nil {
 		return fmt.Errorf("resolve alert %q/%q: %w", kind, title, err)
 	}
+
 	return nil
 }

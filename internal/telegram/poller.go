@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/go-telegram/bot/models"
@@ -72,6 +73,7 @@ func NewPoller(
 	if logger == nil {
 		logger = slog.Default()
 	}
+
 	poller := &Poller{
 		db:       db,
 		client:   client,
@@ -85,29 +87,35 @@ func NewPoller(
 	for _, opt := range opts {
 		opt(poller)
 	}
+
 	return poller
 }
 
 // Run recovers pending rows, then polls Telegram until ctx is cancelled.
 func (p *Poller) Run(ctx context.Context) error {
 	updatesRepo := store.NewTelegramUpdates(p.db)
+
 	offset, err := updatesRepo.ResolveOffset(ctx, store.NewMeta(p.db))
 	if err != nil {
 		if isContextDone(ctx, err) {
 			return nil
 		}
+
 		return err
 	}
+
 	p.logger.Info("telegram poller resolved offset", slog.Int64("offset", offset))
 
 	if err := p.processPending(ctx); err != nil {
 		if isContextDone(ctx, err) {
 			return nil
 		}
+
 		return err
 	}
 
 	backoff := 100 * time.Millisecond
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -125,20 +133,27 @@ func (p *Poller) Run(ctx context.Context) error {
 			if isContextDone(ctx, err) {
 				return nil
 			}
+
 			if shouldAbortPolling(err) {
 				return err
 			}
+
 			nextBackoff, waitErr := p.waitAfterPollError(ctx, err, backoff)
 			if waitErr != nil {
 				if isContextDone(ctx, waitErr) {
 					return nil
 				}
+
 				return waitErr
 			}
+
 			backoff = nextBackoff
+
 			continue
 		}
+
 		backoff = 100 * time.Millisecond
+
 		if len(updates) == 0 {
 			continue
 		}
@@ -147,18 +162,22 @@ func (p *Poller) Run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+
 		if err := updatesRepo.InsertBatch(ctx, batch, nextOffset); err != nil {
 			if isContextDone(ctx, err) {
 				return nil
 			}
+
 			return err
 		}
+
 		offset = nextOffset
 
 		if err := p.processPending(ctx); err != nil {
 			if isContextDone(ctx, err) {
 				return nil
 			}
+
 			return err
 		}
 	}
@@ -168,27 +187,30 @@ func (p *Poller) waitAfterPollError(
 	ctx context.Context, err error, backoff time.Duration,
 ) (time.Duration, error) {
 	wait := backoff
+
 	var apiErr *APIError
 	if errors.As(err, &apiErr) &&
 		apiErr.Category == ErrorCategoryRateLimited &&
 		apiErr.RetryAfter > 0 {
 		wait = time.Duration(apiErr.RetryAfter) * time.Second
 	}
+
 	p.logger.Warn("telegram polling failed",
 		slog.Duration("retry_after", wait),
 		slog.Any("error", err))
+
 	select {
 	case <-ctx.Done():
 		return backoff, ctx.Err()
 	case <-time.After(wait):
 	}
+
 	if wait >= maxPollBackoff {
 		return maxPollBackoff, nil
 	}
-	next := wait * 2
-	if next > maxPollBackoff {
-		next = maxPollBackoff
-	}
+
+	next := min(wait*2, maxPollBackoff)
+
 	return next, nil
 }
 
@@ -197,6 +219,7 @@ func shouldAbortPolling(err error) bool {
 	if !errors.As(err, &apiErr) {
 		return false
 	}
+
 	return apiErr.Category == ErrorCategoryUnauthorized
 }
 
@@ -205,13 +228,16 @@ func (p *Poller) processPending(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+
 		rows, err := store.NewTelegramUpdates(p.db).ListPending(ctx, pendingBatchLimit)
 		if err != nil {
 			return err
 		}
+
 		if len(rows) == 0 {
 			return nil
 		}
+
 		for _, row := range rows {
 			if err := p.processOne(ctx, row); err != nil {
 				return err
@@ -225,11 +251,13 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 	if err := json.Unmarshal(row.PayloadJSON, &update); err != nil {
 		return p.markFailed(ctx, row.UpdateID, fmt.Errorf("decode update payload: %w", err))
 	}
+
 	preflight, err := p.buildPreflight(ctx, &update)
 	if err != nil {
 		if isContextDone(ctx, err) {
 			return err
 		}
+
 		return p.markFailed(ctx, row.UpdateID, err)
 	}
 
@@ -238,8 +266,10 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 		if isContextDone(ctx, err) {
 			return err
 		}
+
 		return fmt.Errorf("begin telegram update tx2: %w", err)
 	}
+
 	if p.afterBeginTx != nil {
 		p.afterBeginTx()
 	}
@@ -261,28 +291,36 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 	result, err := router.Route(ctx, &update)
 	if err != nil {
 		_ = tx.Rollback()
+
 		if isContextDone(ctx, err) {
 			return err
 		}
+
 		return p.markFailed(ctx, row.UpdateID, err)
 	}
+
 	if err := store.NewTelegramUpdates(tx).MarkTerminal(
 		ctx, row.UpdateID, result.Status, "",
 	); err != nil {
 		_ = tx.Rollback()
+
 		if isContextDone(ctx, err) {
 			return err
 		}
+
 		return err
 	}
+
 	if err := tx.Commit(); err != nil {
 		if isContextDone(ctx, err) {
 			return err
 		}
+
 		return fmt.Errorf("commit telegram update tx2: %w", err)
 	}
 
 	p.deliverEffects(ctx, result.Effects)
+
 	return nil
 }
 
@@ -297,8 +335,11 @@ func (p *Poller) buildPreflight(
 		update.Message.Chat.Type != models.ChatTypePrivate {
 		return RoutePreflight{}, nil
 	}
+
 	msg := update.Message
+
 	var targetID int64
+
 	switch commandbot.CommandName(msg.Text) {
 	case "status":
 		targetID = msg.From.ID
@@ -306,22 +347,28 @@ func (p *Poller) buildPreflight(
 		if !containsID(p.ownerIDs, msg.From.ID) {
 			return RoutePreflight{}, nil
 		}
+
 		users := store.NewUsers(p.db)
+
 		target, err := commandbot.ResolveWhoisTarget(
 			ctx, users, msg.Text)
 		if err != nil || target.BadSyntax || target.NotFound {
 			return RoutePreflight{}, err
 		}
+
 		if _, err := users.Get(ctx, target.TGID); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				return RoutePreflight{}, nil
 			}
+
 			return RoutePreflight{}, err
 		}
+
 		targetID = target.TGID
 	default:
 		return RoutePreflight{}, nil
 	}
+
 	snapshot, err := p.statusEngine.LiveSnapshot(ctx, engine.Store{
 		Users:         store.NewUsers(p.db),
 		Subscriptions: store.NewSubscriptions(p.db),
@@ -330,16 +377,12 @@ func (p *Poller) buildPreflight(
 	if err != nil {
 		return RoutePreflight{}, err
 	}
+
 	return RoutePreflight{Snapshot: &snapshot}, nil
 }
 
 func containsID(ids []int64, want int64) bool {
-	for _, id := range ids {
-		if id == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(ids, want)
 }
 
 func (p *Poller) markFailed(ctx context.Context, updateID int64, cause error) error {
@@ -348,17 +391,22 @@ func (p *Poller) markFailed(ctx context.Context, updateID int64, cause error) er
 		if isContextDone(ctx, err) {
 			return err
 		}
+
 		return fmt.Errorf("begin telegram update tx3: %w", err)
 	}
+
 	if err := store.NewTelegramUpdates(tx).MarkTerminal(
 		ctx, updateID, store.TelegramUpdateFailed, cause.Error(),
 	); err != nil {
 		_ = tx.Rollback()
+
 		if isContextDone(ctx, err) {
 			return err
 		}
+
 		return err
 	}
+
 	if _, err := store.NewAlerts(tx).Create(ctx, store.AlertInput{
 		Severity: "error",
 		Kind:     "telegram_update_failed",
@@ -366,38 +414,48 @@ func (p *Poller) markFailed(ctx context.Context, updateID int64, cause error) er
 		Detail:   fmt.Sprintf("update_id=%d error=%s", updateID, cause.Error()),
 	}); err != nil {
 		_ = tx.Rollback()
+
 		if isContextDone(ctx, err) {
 			return err
 		}
+
 		return err
 	}
+
 	if err := tx.Commit(); err != nil {
 		if isContextDone(ctx, err) {
 			return err
 		}
+
 		return fmt.Errorf("commit telegram update tx3: %w", err)
 	}
+
 	p.logger.Error("telegram update failed",
 		slog.Int64("update_id", updateID),
 		slog.Any("error", cause))
+
 	return nil
 }
 
 func (p *Poller) deliverEffects(ctx context.Context, effects []OutboundMessage) {
 	for _, effect := range effects {
 		var err error
+
 		switch effect.Kind {
 		case OutboundDM:
 			if p.notifier == nil {
 				continue
 			}
+
 			err = p.notifier.SendDM(ctx, effect.TGID, effect.Text)
 		case OutboundChatMessage:
 			if p.client == nil {
 				continue
 			}
+
 			err = p.client.SendMessage(ctx, effect.ChatID, effect.Text)
 		}
+
 		if err != nil {
 			p.logger.Warn("failed to deliver telegram effect",
 				slog.String("kind", string(effect.Kind)),
@@ -413,22 +471,27 @@ func buildUpdateBatch(
 ) ([]store.TelegramUpdate, int64, error) {
 	batch := make([]store.TelegramUpdate, 0, len(updates))
 	nextOffset := currentOffset
+
 	for _, fetched := range updates {
 		update := fetched.Update
 		if update == nil {
 			continue
 		}
+
 		payload := fetched.Raw
 		if len(payload) == 0 {
 			var err error
+
 			payload, err = json.Marshal(update)
 			if err != nil {
 				return nil, 0, fmt.Errorf("encode update %d payload: %w", update.ID, err)
 			}
 		}
+
 		if update.ID+1 > nextOffset {
 			nextOffset = update.ID + 1
 		}
+
 		chatID, tgID := updateChatAndUser(update)
 		batch = append(batch, store.TelegramUpdate{
 			UpdateID:    update.ID,
@@ -439,6 +502,7 @@ func buildUpdateBatch(
 			ReceivedAt:  time.Now(),
 		})
 	}
+
 	return batch, nextOffset, nil
 }
 
@@ -468,18 +532,18 @@ func updateType(update *models.Update) string {
 func updateChatAndUser(update *models.Update) (*int64, *int64) {
 	switch {
 	case update.Message != nil:
-		return ptrInt64(update.Message.Chat.ID), messageUserID(update.Message)
+		return new(update.Message.Chat.ID), messageUserID(update.Message)
 	case update.CallbackQuery != nil:
-		return nil, ptrInt64(update.CallbackQuery.From.ID)
+		return nil, new(update.CallbackQuery.From.ID)
 	case update.MyChatMember != nil:
-		return ptrInt64(update.MyChatMember.Chat.ID),
-			ptrInt64(update.MyChatMember.From.ID)
+		return new(update.MyChatMember.Chat.ID),
+			new(update.MyChatMember.From.ID)
 	case update.ChatMember != nil:
-		return ptrInt64(update.ChatMember.Chat.ID),
-			ptrInt64(update.ChatMember.From.ID)
+		return new(update.ChatMember.Chat.ID),
+			new(update.ChatMember.From.ID)
 	case update.ChatJoinRequest != nil:
-		return ptrInt64(update.ChatJoinRequest.Chat.ID),
-			ptrInt64(update.ChatJoinRequest.From.ID)
+		return new(update.ChatJoinRequest.Chat.ID),
+			new(update.ChatJoinRequest.From.ID)
 	default:
 		return nil, nil
 	}
@@ -489,9 +553,6 @@ func messageUserID(msg *models.Message) *int64 {
 	if msg.From == nil {
 		return nil
 	}
-	return ptrInt64(msg.From.ID)
-}
 
-func ptrInt64(v int64) *int64 {
-	return &v
+	return new(msg.From.ID)
 }

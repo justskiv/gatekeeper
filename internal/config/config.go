@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -77,6 +78,7 @@ type Config struct {
 func Load() (Config, error) {
 	// Best-effort .env load; a missing file is not an error.
 	_ = godotenv.Load()
+
 	return LoadFromLookup(os.LookupEnv)
 }
 
@@ -91,10 +93,10 @@ func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 	cfg.OwnerTGIDs = l.idList("OWNER_TG_IDS")
 	cfg.DBPath = l.str("DB_PATH", "./data/gatekeeper.db")
 
-	cfg.BoostyGroupID = l.chatID("BOOSTY_GROUP_ID", true)
-	cfg.TributeChannelID = l.chatID("TRIBUTE_CHANNEL_ID", true)
-	cfg.ClubChatID = l.chatID("CLUB_CHAT_ID", true)
-	cfg.ClubChannelID = l.chatID("CLUB_CHANNEL_ID", true)
+	cfg.BoostyGroupID = l.chatID("BOOSTY_GROUP_ID")
+	cfg.TributeChannelID = l.chatID("TRIBUTE_CHANNEL_ID")
+	cfg.ClubChatID = l.chatID("CLUB_CHAT_ID")
+	cfg.ClubChannelID = l.chatID("CLUB_CHANNEL_ID")
 	cfg.AdminLogChatID = l.optionalChatID("ADMIN_LOG_CHAT_ID")
 
 	cfg.BoostySubscribeURL = l.required("BOOSTY_SUBSCRIBE_URL")
@@ -136,6 +138,7 @@ func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 		return Config{}, fmt.Errorf("invalid configuration:\n  - %s",
 			strings.Join(l.errs, "\n  - "))
 	}
+
 	return *cfg, nil
 }
 
@@ -156,6 +159,7 @@ func (l *loader) get(key string) string {
 	if !ok {
 		return ""
 	}
+
 	return strings.TrimSpace(v)
 }
 
@@ -163,6 +167,7 @@ func (l *loader) str(key, def string) string {
 	if v := l.get(key); v != "" {
 		return v
 	}
+
 	return def
 }
 
@@ -171,27 +176,31 @@ func (l *loader) required(key string) string {
 	if v == "" {
 		l.errf("%s is required", key)
 	}
+
 	return v
 }
 
 // chatID parses a Telegram chat ID, which must be a negative integer.
 // When required is false an empty value yields 0 without an error.
-func (l *loader) chatID(key string, required bool) int64 {
+func (l *loader) chatID(key string) int64 {
 	v := l.get(key)
 	if v == "" {
-		if required {
-			l.errf("%s is required", key)
-		}
+		l.errf("%s is required", key)
+
 		return 0
 	}
+
 	id, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
 		l.errf("%s must be an integer, got %q", key, v)
+
 		return 0
 	}
+
 	if id >= 0 {
 		l.errf("%s must be a negative chat ID, got %d", key, id)
 	}
+
 	return id
 }
 
@@ -201,15 +210,20 @@ func (l *loader) optionalChatID(key string) *int64 {
 	if v == "" {
 		return nil
 	}
+
 	id, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
 		l.errf("%s must be an integer, got %q", key, v)
+
 		return nil
 	}
+
 	if id >= 0 {
 		l.errf("%s must be a negative chat ID, got %d", key, id)
+
 		return nil
 	}
+
 	return &id
 }
 
@@ -217,52 +231,66 @@ func (l *loader) idList(key string) []int64 {
 	v := l.get(key)
 	if v == "" {
 		l.errf("%s is required", key)
+
 		return nil
 	}
+
 	var ids []int64
-	for _, part := range strings.Split(v, ",") {
+
+	for part := range strings.SplitSeq(v, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
 		}
+
 		id, err := strconv.ParseInt(part, 10, 64)
 		if err != nil {
 			l.errf("%s contains an invalid ID %q", key, part)
+
 			continue
 		}
+
 		if id <= 0 {
 			l.errf("%s must contain positive IDs, got %d", key, id)
+
 			continue
 		}
+
 		ids = append(ids, id)
 	}
+
 	if len(ids) == 0 {
 		l.errf("%s is required", key)
 	}
+
 	return ids
 }
 
 func (l *loader) enum(key, def string, allowed ...string) string {
 	v := l.str(key, def)
-	for _, a := range allowed {
-		if v == a {
-			return v
-		}
+	if slices.Contains(allowed, v) {
+		return v
 	}
+
 	l.errf("%s must be one of [%s], got %q", key, strings.Join(allowed, ", "), v)
+
 	return v
 }
 
 func (l *loader) duration(key, def string) time.Duration {
 	raw := l.str(key, def)
+
 	d, err := time.ParseDuration(raw)
 	if err != nil {
 		l.errf("%s must be a valid duration, got %q", key, raw)
+
 		return 0
 	}
+
 	if d <= 0 {
 		l.errf("%s must be a positive duration, got %q", key, raw)
 	}
+
 	return d
 }
 
@@ -271,11 +299,14 @@ func (l *loader) boolean(key string, def bool) bool {
 	if v == "" {
 		return def
 	}
+
 	b, err := strconv.ParseBool(v)
 	if err != nil {
 		l.errf("%s must be a boolean, got %q", key, v)
+
 		return def
 	}
+
 	return b
 }
 
@@ -284,11 +315,14 @@ func (l *loader) intVal(key string, def int) int {
 	if v == "" {
 		return def
 	}
+
 	n, err := strconv.Atoi(v)
 	if err != nil {
 		l.errf("%s must be an integer, got %q", key, v)
+
 		return def
 	}
+
 	return n
 }
 
@@ -296,8 +330,10 @@ func (l *loader) location(key, tz string) *time.Location {
 	loc, err := time.LoadLocation(tz)
 	if err != nil {
 		l.errf("%s is not a loadable IANA timezone, got %q", key, tz)
+
 		return time.UTC
 	}
+
 	return loc
 }
 
@@ -307,6 +343,7 @@ func (l *loader) httpURL(key, value string) {
 	if value == "" {
 		return
 	}
+
 	u, err := url.ParseRequestURI(value)
 	if err != nil || u.Host == "" ||
 		(u.Scheme != "http" && u.Scheme != "https") {
@@ -321,13 +358,14 @@ func (l *loader) validate(cfg *Config) {
 		name string
 		id   int64
 	}
+
 	chats := []namedID{
 		{"BOOSTY_GROUP_ID", cfg.BoostyGroupID},
 		{"TRIBUTE_CHANNEL_ID", cfg.TributeChannelID},
 		{"CLUB_CHAT_ID", cfg.ClubChatID},
 		{"CLUB_CHANNEL_ID", cfg.ClubChannelID},
 	}
-	for i := 0; i < len(chats); i++ {
+	for i := range chats {
 		for j := i + 1; j < len(chats); j++ {
 			// id == 0 means the value failed to parse; skip to avoid
 			// reporting the same problem twice.
@@ -346,6 +384,7 @@ func (l *loader) validate(cfg *Config) {
 		if cfg.TelegramWebhookPublicURL == "" {
 			l.errf("TELEGRAM_WEBHOOK_PUBLIC_URL is required when TELEGRAM_MODE=webhook")
 		}
+
 		if cfg.TelegramWebhookSecret == "" {
 			l.errf("TELEGRAM_WEBHOOK_SECRET is required when TELEGRAM_MODE=webhook")
 		}
@@ -378,6 +417,7 @@ func (l *loader) validate(cfg *Config) {
 		l.errf("TRIBUTE_WEBHOOK_PATH must start with /, got %q",
 			cfg.TributeWebhookPath)
 	}
+
 	if !strings.HasPrefix(cfg.TelegramWebhookPath, "/") {
 		l.errf("TELEGRAM_WEBHOOK_PATH must start with /, got %q",
 			cfg.TelegramWebhookPath)

@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -42,7 +43,7 @@ func run() error {
 	slog.SetDefault(logger)
 
 	if cfg.TelegramMode == "webhook" {
-		return fmt.Errorf("telegram webhook mode is not implemented in this phase")
+		return errors.New("telegram webhook mode is not implemented in this phase")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(),
@@ -68,10 +69,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
+
 	me, err := tgClient.GetMe(ctx)
 	if err != nil {
 		return err
 	}
+
 	logger.Info("getMe ok",
 		slog.Int64("bot_id", me.ID),
 		slog.String("username", me.Username))
@@ -81,6 +84,7 @@ func run() error {
 		TributeChannelID:   cfg.TributeChannelID,
 		TributeObservation: cfg.TributeMode == "observation",
 	}
+
 	sources := []engine.SubscriptionSource{
 		source.NewMembership(domain.PlatformBoosty, cfg.BoostyGroupID, tgClient),
 	}
@@ -92,6 +96,7 @@ func run() error {
 			source.WithLedger(store.NewSubscriptions(db)),
 		))
 	}
+
 	sources = append(sources,
 		source.NewManual(store.NewWhitelist(db), store.NewSubscriptions(db)))
 	statusEngine := engine.New(sources)
@@ -101,6 +106,7 @@ func run() error {
 	}
 
 	notifier := notify.New(store.NewUsers(db), tgClient, logger)
+
 	healthChats := telegram.HealthChatsFromConfig(cfg)
 	if err := telegram.CheckStartupHealth(
 		ctx, db, tgClient, notifier, healthChats, cfg.OwnerTGIDs, me.ID, logger,
@@ -113,6 +119,7 @@ func run() error {
 		db, tgClient, notifier, healthChats, cfg.OwnerTGIDs, logger,
 		telegram.WithPollerStatusEngine(statusEngine),
 		telegram.WithPollerSourceChats(sourceChats))
+
 	group.Go(func() error {
 		return poller.Run(groupCtx)
 	})
@@ -127,8 +134,10 @@ func run() error {
 	if ctx.Err() != nil {
 		logger.Info("shutdown signal received, stopping")
 	}
+
 	if err := group.Wait(); err != nil {
 		return err
 	}
+
 	return nil
 }

@@ -83,6 +83,7 @@ func CheckStartupHealth(
 ) error {
 	meta := store.NewMeta(db)
 	alerts := store.NewAlerts(db)
+
 	for _, chat := range chats {
 		info, err := client.GetChat(ctx, chat.ID)
 		if err != nil {
@@ -92,14 +93,17 @@ func CheckStartupHealth(
 			); err != nil {
 				return err
 			}
+
 			continue
 		}
+
 		if !chatTypeMatchesResource(chat, info.Type) {
 			if err := recordHealthFailure(
 				ctx, meta, alerts, notifier, ownerIDs, chat, "wrong_type", logger,
 			); err != nil {
 				return err
 			}
+
 			continue
 		}
 
@@ -111,6 +115,7 @@ func CheckStartupHealth(
 			); err != nil {
 				return err
 			}
+
 			continue
 		}
 
@@ -120,21 +125,25 @@ func CheckStartupHealth(
 			); err != nil {
 				return err
 			}
+
 			continue
 		}
 
 		if err := meta.SetHealth(ctx, chat.Key, healthOK); err != nil {
 			return err
 		}
+
 		if err := alerts.ResolveOpenByTitle(
 			ctx, alertKindBotRightsLost, alertTitle(chat),
 		); err != nil {
 			return err
 		}
+
 		logger.Info("chat health ok",
 			slog.String("chat_key", chat.Key),
 			slog.Int64("chat_id", chat.ID))
 	}
+
 	return nil
 }
 
@@ -151,6 +160,7 @@ func recordHealthFailure(
 	if err := meta.SetHealth(ctx, chat.Key, "fail:"+reason); err != nil {
 		return err
 	}
+
 	_, created, err := alerts.CreateOpenIfMissing(ctx, store.AlertInput{
 		Severity: chat.Severity,
 		Kind:     alertKindBotRightsLost,
@@ -161,14 +171,17 @@ func recordHealthFailure(
 	if err != nil {
 		return err
 	}
+
 	logger.Warn("chat health degraded",
 		slog.String("chat_key", chat.Key),
 		slog.Int64("chat_id", chat.ID),
 		slog.String("reason", reason))
+
 	if notifier != nil && created {
 		_ = notifier.SendOwners(ctx, ownerIDs,
 			messages.HealthFailure(chat.Name, chat.ID, reason))
 	}
+
 	return nil
 }
 
@@ -193,10 +206,12 @@ func handleMyChatMember(
 			if !errors.Is(err, store.ErrNotFound) {
 				return nil, err
 			}
+
 			if err := repos.users.Upsert(ctx, userFromTelegram(update.From, state)); err != nil {
 				return nil, err
 			}
 		}
+
 		return nil, nil
 	}
 
@@ -209,16 +224,19 @@ func handleMyChatMember(
 		if !memberIsPresent(update.NewChatMember) {
 			return nil, nil
 		}
+
 		return ownerEffects(ownerIDs,
 			messages.UnknownChat(update.Chat.ID, string(update.Chat.Type), update.Chat.Title)), nil
 	}
 
 	oldOK, _ := memberHasRequiredRights(chat, &update.OldChatMember)
+
 	newOK, reason := memberHasRequiredRights(chat, &update.NewChatMember)
 	if newOK {
 		if err := repos.meta.SetHealth(ctx, chat.Key, healthOK); err != nil {
 			return nil, err
 		}
+
 		if !oldOK {
 			if err := repos.audit.Append(ctx, store.AuditEntry{
 				Kind:     "bot_rights_restored",
@@ -228,20 +246,24 @@ func handleMyChatMember(
 			}); err != nil {
 				return nil, err
 			}
+
 			if err := repos.alerts.ResolveOpenByTitle(
 				ctx, alertKindBotRightsLost, alertTitle(chat),
 			); err != nil {
 				return nil, err
 			}
+
 			return ownerEffects(ownerIDs,
 				messages.HealthRestored(chat.Name, chat.ID)), nil
 		}
+
 		return nil, nil
 	}
 
 	if err := repos.meta.SetHealth(ctx, chat.Key, "fail:"+reason); err != nil {
 		return nil, err
 	}
+
 	if oldOK {
 		if err := repos.audit.Append(ctx, store.AuditEntry{
 			Kind:     "bot_rights_lost",
@@ -252,6 +274,7 @@ func handleMyChatMember(
 		}); err != nil {
 			return nil, err
 		}
+
 		if _, _, err := repos.alerts.CreateOpenIfMissing(ctx, store.AlertInput{
 			Severity: chat.Severity,
 			Kind:     alertKindBotRightsLost,
@@ -261,9 +284,11 @@ func handleMyChatMember(
 		}); err != nil {
 			return nil, err
 		}
+
 		return ownerEffects(ownerIDs,
 			messages.HealthFailure(chat.Name, chat.ID, reason)), nil
 	}
+
 	return nil, nil
 }
 
@@ -282,6 +307,7 @@ func memberHasRequiredRights(chat HealthChat, member *models.ChatMember) (bool, 
 	if member == nil {
 		return false, "not_member"
 	}
+
 	switch member.Type {
 	case models.ChatMemberTypeOwner:
 		return true, ""
@@ -289,11 +315,13 @@ func memberHasRequiredRights(chat HealthChat, member *models.ChatMember) (bool, 
 		if member.Administrator == nil {
 			return false, "not_admin"
 		}
+
 		if chat.RequiresManageRight &&
 			(!member.Administrator.CanInviteUsers ||
 				!member.Administrator.CanRestrictMembers) {
 			return false, "missing_required_rights"
 		}
+
 		return true, ""
 	case models.ChatMemberTypeLeft, models.ChatMemberTypeBanned:
 		return false, "not_member"
@@ -355,6 +383,7 @@ func findHealthChat(chats []HealthChat, id int64) (HealthChat, bool) {
 			return chat, true
 		}
 	}
+
 	return HealthChat{}, false
 }
 
@@ -367,6 +396,7 @@ func ownerEffects(ownerIDs []int64, text string) []OutboundMessage {
 			Text: text,
 		})
 	}
+
 	return effects
 }
 
@@ -375,6 +405,7 @@ func healthReason(err error) string {
 	if !errors.As(err, &apiErr) {
 		return "telegram_api"
 	}
+
 	switch apiErr.Category {
 	case ErrorCategoryPermanentRights, ErrorCategoryForbidden:
 		return "rights"

@@ -58,9 +58,11 @@ func Open(ctx context.Context, dbPath string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create database file: %w", err)
 	}
+
 	if err := f.Close(); err != nil {
 		return nil, fmt.Errorf("close database file: %w", err)
 	}
+
 	if err := os.Chmod(dbPath, 0o600); err != nil {
 		return nil, fmt.Errorf("set database file permissions: %w", err)
 	}
@@ -87,8 +89,10 @@ func Open(ctx context.Context, dbPath string) (*sql.DB, error) {
 
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
+
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
+
 	return db, nil
 }
 
@@ -105,6 +109,7 @@ func CheckSchema(ctx context.Context, db *sql.DB) error {
 	).Scan(&present); err != nil {
 		return fmt.Errorf("check schema: %w", err)
 	}
+
 	if present == 0 {
 		return ErrUnmigrated
 	}
@@ -118,9 +123,11 @@ func CheckSchema(ctx context.Context, db *sql.DB) error {
 	).Scan(&version); err != nil {
 		return fmt.Errorf("read schema version: %w", err)
 	}
+
 	if !version.Valid || version.Int64 < 1 {
 		return ErrUnmigrated
 	}
+
 	return nil
 }
 
@@ -136,6 +143,7 @@ func nullTime(t *time.Time) any {
 	if t == nil {
 		return nil
 	}
+
 	return rfc3339(*t)
 }
 
@@ -150,10 +158,12 @@ func parseNullTime(v sql.NullString) (*time.Time, error) {
 	if !v.Valid || v.String == "" {
 		return nil, nil
 	}
+
 	t, err := parseTime(v.String)
 	if err != nil {
 		return nil, err
 	}
+
 	return &t, nil
 }
 
@@ -163,5 +173,6 @@ func nullString(s string) any {
 	if s == "" {
 		return nil
 	}
+
 	return s
 }

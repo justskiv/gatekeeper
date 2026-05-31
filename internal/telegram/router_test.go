@@ -35,6 +35,7 @@ func TestRouterRoutesSourceChatMemberToEngine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
+
 	if result.Status != store.TelegramUpdateProcessed {
 		t.Fatalf("status = %s, want processed", result.Status)
 	}
@@ -44,6 +45,7 @@ func TestRouterRoutesSourceChatMemberToEngine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetActive: %v", err)
 	}
+
 	if !ok || sub.Platform != domain.PlatformBoosty {
 		t.Fatalf("subscription = (%+v, %v), want active boosty", sub, ok)
 	}
@@ -87,11 +89,13 @@ func TestRouterSourceEventSharesTerminalTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
+
 	if err := store.NewTelegramUpdates(tx).MarkTerminal(
 		ctx, updateID, result.Status, "",
 	); err != nil {
 		t.Fatalf("MarkTerminal: %v", err)
 	}
+
 	if err := tx.Rollback(); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
@@ -108,6 +112,7 @@ func TestRouterSourceEventSharesTerminalTransaction(t *testing.T) {
 	).Scan(&status); err != nil {
 		t.Fatalf("read update status: %v", err)
 	}
+
 	if status != string(store.TelegramUpdatePending) {
 		t.Fatalf("status after rollback = %q, want pending", status)
 	}
@@ -174,6 +179,7 @@ func TestRouterIgnoresBotAndRightsOnlyChatMemberEvents(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Route: %v", err)
 		}
+
 		if result.Status != store.TelegramUpdateProcessed {
 			t.Fatalf("status = %s, want processed", result.Status)
 		}
@@ -183,6 +189,7 @@ func TestRouterIgnoresBotAndRightsOnlyChatMemberEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListActiveByUser: %v", err)
 	}
+
 	if len(active) != 0 {
 		t.Fatalf("active subscriptions = %+v, want none", active)
 	}

@@ -20,10 +20,12 @@ import (
 // applies every migration from the top-level migrations/ directory.
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
+
 	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
+
 	t.Cleanup(func() { _ = db.Close() })
 
 	provider, err := goose.NewProvider(
@@ -31,9 +33,11 @@ func newTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("new goose provider: %v", err)
 	}
+
 	if _, err := provider.Up(context.Background()); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
+
 	return db
 }
 
@@ -42,10 +46,12 @@ func newTestDB(t *testing.T) *sql.DB {
 // `go test` invocation cwd.
 func migrationsDir(t *testing.T) string {
 	t.Helper()
+
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed; cannot resolve migrations dir")
 	}
+
 	return filepath.Join(filepath.Dir(file), "..", "..", "migrations")
 }
 
@@ -60,6 +66,7 @@ func TestMigrateCreatesSchema(t *testing.T) {
 	).Scan(&version); err != nil {
 		t.Fatalf("query goose_db_version: %v", err)
 	}
+
 	if !version.Valid || version.Int64 < 1 {
 		t.Fatalf("goose_db_version max = %v, want >= 1", version)
 	}
@@ -77,6 +84,7 @@ func TestMigrateCreatesSchema(t *testing.T) {
 			table).Scan(&n); err != nil {
 			t.Fatalf("check table %s: %v", table, err)
 		}
+
 		if n != 1 {
 			t.Errorf("table %s is missing", table)
 		}
@@ -89,12 +97,14 @@ func TestCheckSchemaErrorsOnEmptyDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
+
 	t.Cleanup(func() { _ = db.Close() })
 
 	err = CheckSchema(context.Background(), db)
 	if !errors.Is(err, ErrUnmigrated) {
 		t.Fatalf("CheckSchema on empty db = %v, want ErrUnmigrated", err)
 	}
+
 	if !strings.Contains(err.Error(), "task migrate:up") {
 		t.Errorf("error message %q lacks the migrate:up instruction",
 			err.Error())
@@ -116,6 +126,7 @@ func TestForeignKeysEnforced(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&fk); err != nil {
 		t.Fatalf("read foreign_keys pragma: %v", err)
 	}
+
 	if fk != 1 {
 		t.Fatalf("foreign_keys = %d, want 1", fk)
 	}
@@ -162,6 +173,7 @@ func TestActiveSubscriptionIsUnique(t *testing.T) {
 	// The index is partial (WHERE status='active'): an expired
 	// subscription for the same pair is allowed.
 	expired := active
+
 	expired.Status = domain.SubExpired
 	if _, err := subs.Create(ctx, expired); err != nil {
 		t.Fatalf("expired subscription should be allowed: %v", err)
@@ -169,6 +181,7 @@ func TestActiveSubscriptionIsUnique(t *testing.T) {
 
 	// An active subscription on a different platform is also allowed.
 	other := active
+
 	other.Platform = domain.PlatformTribute
 	if _, err := subs.Create(ctx, other); err != nil {
 		t.Fatalf("active subscription on another platform should be allowed: %v", err)
@@ -193,6 +206,7 @@ func TestUsersUpsertAndGet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
+
 	if got.Username != "bob" || got.DMState != domain.DMOpen {
 		t.Errorf("got %+v, want username=bob dm_state=open", got)
 	}
@@ -201,6 +215,7 @@ func TestUsersUpsertAndGet(t *testing.T) {
 	if err := users.Upsert(ctx, domain.User{TGID: 42, Username: "robert"}); err != nil {
 		t.Fatalf("re-upsert: %v", err)
 	}
+
 	if got, _ = users.Get(ctx, 42); got.Username != "robert" ||
 		got.DMState != domain.DMOpen {
 		t.Errorf("refreshed user = %+v, want username=robert dm_state preserved", got)
@@ -216,6 +231,7 @@ func TestUsersUpsertAndGet(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("upsert banned user: %v", err)
 	}
+
 	if err := users.Upsert(ctx, domain.User{
 		TGID:     99,
 		Username: "fresh",
@@ -223,10 +239,12 @@ func TestUsersUpsertAndGet(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("refresh banned user: %v", err)
 	}
+
 	got, err = users.Get(ctx, 99)
 	if err != nil {
 		t.Fatalf("get banned user: %v", err)
 	}
+
 	if got.Username != "fresh" ||
 		got.DMState != domain.DMOpen ||
 		!got.Banned ||
@@ -248,16 +266,20 @@ func TestMetaGetSet(t *testing.T) {
 	if _, ok, err := meta.Get(ctx, "offset"); err != nil || ok {
 		t.Fatalf("absent key: ok=%v err=%v", ok, err)
 	}
+
 	if err := meta.Set(ctx, "offset", "100"); err != nil {
 		t.Fatalf("set: %v", err)
 	}
+
 	v, ok, err := meta.Get(ctx, "offset")
 	if err != nil || !ok || v != "100" {
 		t.Fatalf("get = (%q, %v, %v), want (\"100\", true, nil)", v, ok, err)
 	}
+
 	if err := meta.Set(ctx, "offset", "200"); err != nil {
 		t.Fatalf("update: %v", err)
 	}
+
 	if v, _, _ = meta.Get(ctx, "offset"); v != "200" {
 		t.Errorf("value not updated: %q", v)
 	}
@@ -282,6 +304,7 @@ func TestSubscriptionsGetActive(t *testing.T) {
 	// RFC3339 storage rounds to seconds; truncate inputs to compare.
 	started := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
 	expires := started.Add(30 * 24 * time.Hour)
+
 	id, err := subs.Create(ctx, domain.Subscription{
 		TGID:       1,
 		Platform:   domain.PlatformBoosty,
@@ -301,21 +324,27 @@ func TestSubscriptionsGetActive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetActive: %v", err)
 	}
+
 	if !ok {
 		t.Fatal("GetActive ok = false after Create, want true")
 	}
+
 	if got.ID != id {
 		t.Errorf("ID = %d, want %d", got.ID, id)
 	}
+
 	if got.Status != domain.SubActive {
 		t.Errorf("Status = %s, want active", got.Status)
 	}
+
 	if got.ExternalID != "ext-1" || got.Tier != "gold" {
 		t.Errorf("fields mismatch: %+v", got)
 	}
+
 	if !got.StartedAt.Equal(started) {
 		t.Errorf("StartedAt = %v, want %v", got.StartedAt, started)
 	}
+
 	if got.ExpiresAt == nil || !got.ExpiresAt.Equal(expires) {
 		t.Errorf("ExpiresAt = %v, want %v", got.ExpiresAt, expires)
 	}
@@ -327,6 +356,7 @@ func TestSubscriptionsGetActive(t *testing.T) {
 		time.Now().UTC().Format(time.RFC3339), id); err != nil {
 		t.Fatalf("expire subscription: %v", err)
 	}
+
 	if _, ok, err := subs.GetActive(ctx, 1, domain.PlatformBoosty); err != nil || ok {
 		t.Fatalf("GetActive after expire: ok=%v err=%v", ok, err)
 	}
@@ -341,8 +371,10 @@ func TestSubscriptionsUpsertExpireAndList(t *testing.T) {
 	if err := users.Upsert(ctx, domain.User{TGID: 11, Username: "alice"}); err != nil {
 		t.Fatalf("upsert user: %v", err)
 	}
+
 	started := time.Now().UTC().Truncate(time.Second)
 	eventAt := started.Add(time.Minute)
+
 	id, err := subs.UpsertActive(ctx, domain.Subscription{
 		TGID:        11,
 		Platform:    domain.PlatformBoosty,
@@ -353,9 +385,11 @@ func TestSubscriptionsUpsertExpireAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first UpsertActive: %v", err)
 	}
+
 	if id == 0 {
 		t.Fatal("first UpsertActive returned id 0")
 	}
+
 	if id2, err := subs.UpsertActive(ctx, domain.Subscription{
 		TGID:          11,
 		Platform:      domain.PlatformBoosty,
@@ -372,13 +406,16 @@ func TestSubscriptionsUpsertExpireAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListActiveByUser: %v", err)
 	}
+
 	if len(active) != 1 {
 		t.Fatalf("active subscriptions = %+v, want one row", active)
 	}
+
 	if active[0].LastEventAt == nil || !active[0].LastEventAt.Equal(eventAt) {
 		t.Fatalf("last_event_at = %v, want preserved %v",
 			active[0].LastEventAt, eventAt)
 	}
+
 	if active[0].LastCheckedAt == nil ||
 		!active[0].LastCheckedAt.Equal(started) {
 		t.Fatalf("last_checked_at = %v, want %v",
@@ -386,31 +423,39 @@ func TestSubscriptionsUpsertExpireAndList(t *testing.T) {
 	}
 
 	ended := started.Add(2 * time.Hour)
+
 	ok, err := subs.ExpireActive(ctx, 11, domain.PlatformBoosty, ended, "event")
 	if err != nil {
 		t.Fatalf("ExpireActive: %v", err)
 	}
+
 	if !ok {
 		t.Fatal("ExpireActive ok = false, want true")
 	}
+
 	ok, err = subs.ExpireActive(ctx, 11, domain.PlatformBoosty, ended, "event")
 	if err != nil {
 		t.Fatalf("second ExpireActive: %v", err)
 	}
+
 	if ok {
 		t.Fatal("second ExpireActive ok = true, want false")
 	}
+
 	history, err := subs.ListByUser(ctx, 11)
 	if err != nil {
 		t.Fatalf("ListByUser: %v", err)
 	}
+
 	if len(history) != 1 || history[0].Status != domain.SubExpired {
 		t.Fatalf("history = %+v, want one expired row", history)
 	}
+
 	if history[0].LastEventAt == nil || !history[0].LastEventAt.Equal(ended) {
 		t.Fatalf("expired last_event_at = %v, want %v",
 			history[0].LastEventAt, ended)
 	}
+
 	if history[0].LastCheckedAt == nil ||
 		!history[0].LastCheckedAt.Equal(started) {
 		t.Fatalf("expired last_checked_at = %v, want preserved %v",
@@ -443,15 +488,19 @@ func TestGrantsUpsertAndGet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get grant: %v", err)
 	}
+
 	if got.State != domain.GrantJoined {
 		t.Errorf("State = %s, want joined", got.State)
 	}
+
 	if got.AdmittedBy != "bot" {
 		t.Errorf("AdmittedBy = %q, want bot (default)", got.AdmittedBy)
 	}
+
 	if got.JoinedAt == nil || !got.JoinedAt.Equal(joined) {
 		t.Errorf("JoinedAt = %v, want %v", got.JoinedAt, joined)
 	}
+
 	if got.RevokedAt != nil {
 		t.Errorf("RevokedAt = %v, want nil", got.RevokedAt)
 	}
@@ -472,10 +521,12 @@ func TestRepositoryLookupAndRecentLists(t *testing.T) {
 	if err := users.Upsert(ctx, domain.User{TGID: 12, Username: "Known"}); err != nil {
 		t.Fatalf("upsert user: %v", err)
 	}
+
 	if got, ok, err := users.FindByUsername(ctx, "@known"); err != nil || !ok ||
 		got.TGID != 12 {
 		t.Fatalf("FindByUsername = (%+v, %v, %v), want tg_id 12", got, ok, err)
 	}
+
 	if _, ok, err := users.FindByUsername(ctx, "@missing"); err != nil || ok {
 		t.Fatalf("FindByUsername missing = (_, %v, %v), want false nil", ok, err)
 	}
@@ -487,6 +538,7 @@ func TestRepositoryLookupAndRecentLists(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("upsert chat grant: %v", err)
 	}
+
 	if err := grants.Upsert(ctx, domain.AccessGrant{
 		TGID:     12,
 		Resource: domain.ResourceChannel,
@@ -494,10 +546,12 @@ func TestRepositoryLookupAndRecentLists(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("upsert channel grant: %v", err)
 	}
+
 	userGrants, err := grants.ListByUser(ctx, 12)
 	if err != nil {
 		t.Fatalf("ListByUser grants: %v", err)
 	}
+
 	if len(userGrants) != 2 {
 		t.Fatalf("grants = %+v, want two rows", userGrants)
 	}
@@ -511,10 +565,12 @@ func TestRepositoryLookupAndRecentLists(t *testing.T) {
 			t.Fatalf("append audit %s: %v", kind, err)
 		}
 	}
+
 	recent, err := audit.ListRecentByUser(ctx, 12, 1)
 	if err != nil {
 		t.Fatalf("ListRecentByUser: %v", err)
 	}
+
 	if len(recent) != 1 || recent[0].Kind != "new" {
 		t.Fatalf("recent audit = %+v, want newest only", recent)
 	}
@@ -522,6 +578,7 @@ func TestRepositoryLookupAndRecentLists(t *testing.T) {
 	if _, ok, err := revocations.Get(ctx, 12); err != nil || ok {
 		t.Fatalf("missing revocation = (_, %v, %v), want false nil", ok, err)
 	}
+
 	scheduled := time.Now().UTC().Add(time.Hour)
 	if err := revocations.Upsert(ctx, domain.PendingRevocation{
 		TGID:        12,
@@ -530,6 +587,7 @@ func TestRepositoryLookupAndRecentLists(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("upsert revocation: %v", err)
 	}
+
 	if got, ok, err := revocations.Get(ctx, 12); err != nil || !ok ||
 		got.Reason != "expired" {
 		t.Fatalf("revocation = (%+v, %v, %v), want reason expired", got, ok, err)
@@ -541,16 +599,19 @@ func TestRepositoryLookupAndRecentLists(t *testing.T) {
 // which sql.Open would otherwise leave at the default 0644.
 func TestDatabaseFileMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mode.db")
+
 	db, err := Open(context.Background(), path)
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
+
 	t.Cleanup(func() { _ = db.Close() })
 
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("stat database file: %v", err)
 	}
+
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Errorf("database file mode = %#o, want 0600", perm)
 	}
@@ -569,6 +630,7 @@ func TestInviteLinksPartialUniqueIndexes(t *testing.T) {
 	if err := users.Upsert(ctx, domain.User{TGID: 1001, Username: "alice"}); err != nil {
 		t.Fatalf("upsert user 1001: %v", err)
 	}
+
 	if err := users.Upsert(ctx, domain.User{TGID: 1002, Username: "bob"}); err != nil {
 		t.Fatalf("upsert user 1002: %v", err)
 	}
@@ -583,6 +645,7 @@ func TestInviteLinksPartialUniqueIndexes(t *testing.T) {
 			        '2026-05-22T00:00:00Z', '2026-05-22T00:00:00Z')`,
 			nullableInt64(tgID), resource, mode,
 			"https://t.me/+"+suffix, "hash-"+suffix, status)
+
 		return err
 	}
 
@@ -591,24 +654,31 @@ func TestInviteLinksPartialUniqueIndexes(t *testing.T) {
 	if err := insertInvite(nil, "chat", "shared_join_request", "created", "shared-1"); err != nil {
 		t.Fatalf("first shared invite: %v", err)
 	}
+
 	if err := insertInvite(nil, "chat", "shared_join_request", "sent", "shared-2"); err == nil {
 		t.Fatal("expected a unique-index violation for the second active shared invite")
 	}
+
 	if err := insertInvite(nil, "chat", "shared_join_request", "expired", "shared-3"); err != nil {
 		t.Fatalf("expired shared invite should be allowed: %v", err)
 	}
 
 	// personal_join_request: one active link per (tg_id, resource, mode).
 	alice := int64(1001)
-	if err := insertInvite(&alice, "chat", "personal_join_request", "created", "personal-1"); err != nil {
+	if err := insertInvite(
+		&alice, "chat", "personal_join_request", "created", "personal-1",
+	); err != nil {
 		t.Fatalf("first personal invite: %v", err)
 	}
+
 	if err := insertInvite(&alice, "chat", "personal_join_request", "sent", "personal-2"); err == nil {
 		t.Fatal("expected a unique-index violation for the second active personal invite")
 	}
 	// A different user does not share the slot.
 	bob := int64(1002)
-	if err := insertInvite(&bob, "chat", "personal_join_request", "created", "personal-3"); err != nil {
+	if err := insertInvite(
+		&bob, "chat", "personal_join_request", "created", "personal-3",
+	); err != nil {
 		t.Fatalf("personal invite for another user should be allowed: %v", err)
 	}
 
@@ -616,6 +686,7 @@ func TestInviteLinksPartialUniqueIndexes(t *testing.T) {
 	if err := insertInvite(&alice, "channel", "direct", "created", "direct-1"); err != nil {
 		t.Fatalf("first direct invite: %v", err)
 	}
+
 	if err := insertInvite(&alice, "channel", "direct", "sent", "direct-2"); err == nil {
 		t.Fatal("expected a unique-index violation for the second active direct invite")
 	}
@@ -626,5 +697,6 @@ func nullableInt64(v *int64) any {
 	if v == nil {
 		return nil
 	}
+
 	return *v
 }

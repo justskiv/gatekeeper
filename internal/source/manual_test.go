@@ -34,10 +34,12 @@ func (s fakeManualSubs) GetActive(
 
 func TestManualVerdictWhitelistActive(t *testing.T) {
 	source := NewManual(fakeWhitelist{has: true}, fakeManualSubs{})
+
 	got, err := source.Verdict(context.Background(), 42)
 	if err != nil {
 		t.Fatalf("Verdict: %v", err)
 	}
+
 	if got.Verdict != domain.VerdictActive {
 		t.Fatalf("verdict = %s, want active", got.Verdict)
 	}
@@ -54,19 +56,23 @@ func TestManualVerdictActiveSubscriptionOrNoSignal(t *testing.T) {
 		},
 		WithManualClock(func() time.Time { return now }),
 	)
+
 	got, err := source.Verdict(context.Background(), 42)
 	if err != nil {
 		t.Fatalf("Verdict active: %v", err)
 	}
+
 	if got.Verdict != domain.VerdictActive {
 		t.Fatalf("active verdict = %s, want active", got.Verdict)
 	}
 
 	source = NewManual(fakeWhitelist{}, fakeManualSubs{})
+
 	got, err = source.Verdict(context.Background(), 42)
 	if err != nil {
 		t.Fatalf("Verdict no signal: %v", err)
 	}
+
 	if got.Verdict != domain.VerdictNoSignal {
 		t.Fatalf("empty verdict = %s, want no_signal", got.Verdict)
 	}
@@ -82,6 +88,7 @@ func TestManualVerdictErrorsBecomeUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verdict whitelist error: %v", err)
 	}
+
 	if got.Verdict != domain.VerdictUnknown {
 		t.Fatalf("whitelist error verdict = %s, want unknown", got.Verdict)
 	}
@@ -95,6 +102,7 @@ func TestManualVerdictErrorsBecomeUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verdict subscription error: %v", err)
 	}
+
 	if got.Verdict != domain.VerdictUnknown {
 		t.Fatalf("subscription error verdict = %s, want unknown", got.Verdict)
 	}

@@ -21,15 +21,18 @@ func NewKeyedMutex() *KeyedMutex {
 // Lock locks one key and returns an unlock function.
 func (m *KeyedMutex) Lock(key int64) func() {
 	m.mu.Lock()
+
 	lock := m.locks[key]
 	if lock == nil {
 		lock = &keyedLock{}
 		m.locks[key] = lock
 	}
+
 	lock.refs++
 	m.mu.Unlock()
 
 	lock.mu.Lock()
+
 	return func() {
 		lock.mu.Unlock()
 

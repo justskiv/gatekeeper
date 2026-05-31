@@ -25,14 +25,17 @@ func NewMeta(db DBTX) *Meta {
 // key is absent.
 func (r *Meta) Get(ctx context.Context, key string) (string, bool, error) {
 	var value string
+
 	err := r.db.QueryRowContext(ctx,
 		`SELECT value FROM meta WHERE key = ?`, key).Scan(&value)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
+
 	if err != nil {
 		return "", false, fmt.Errorf("get meta %q: %w", key, err)
 	}
+
 	return value, true, nil
 }
 
@@ -48,6 +51,7 @@ func (r *Meta) Set(ctx context.Context, key, value string) error {
 	if err != nil {
 		return fmt.Errorf("set meta %q: %w", key, err)
 	}
+
 	return nil
 }
 
@@ -57,10 +61,12 @@ func (r *Meta) GetUpdateOffset(ctx context.Context) (int64, bool, error) {
 	if err != nil || !ok {
 		return 0, ok, err
 	}
+
 	offset, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
 		return 0, false, fmt.Errorf("parse update_offset %q: %w", value, err)
 	}
+
 	return offset, true, nil
 }
 
@@ -75,5 +81,6 @@ func (r *Meta) SetHealth(ctx context.Context, key, value string) error {
 	if !strings.HasPrefix(key, "health.") {
 		key = "health." + key
 	}
+
 	return r.Set(ctx, key, value)
 }

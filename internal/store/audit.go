@@ -36,10 +36,12 @@ func (r *Audit) Append(ctx context.Context, e AuditEntry) error {
 	if actor == "" {
 		actor = "system"
 	}
+
 	var tgID any
 	if e.TGID != nil {
 		tgID = *e.TGID
 	}
+
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO audit_log (tg_id, kind, source, resource, actor, detail, created_at)
 		VALUES (?,?,?,?,?,?,?)`,
@@ -48,6 +50,7 @@ func (r *Audit) Append(ctx context.Context, e AuditEntry) error {
 	if err != nil {
 		return fmt.Errorf("append audit %q: %w", e.Kind, err)
 	}
+
 	return nil
 }
 
@@ -58,6 +61,7 @@ func (r *Audit) ListRecentByUser(
 	if limit <= 0 {
 		return nil, nil
 	}
+
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, tg_id, kind, source, resource, actor, detail, created_at
 		FROM audit_log
@@ -67,9 +71,11 @@ func (r *Audit) ListRecentByUser(
 	if err != nil {
 		return nil, fmt.Errorf("list recent audit for %d: %w", tgID, err)
 	}
+
 	defer func() { _ = rows.Close() }()
 
 	var out []AuditEntry
+
 	for rows.Next() {
 		var (
 			e                AuditEntry
@@ -81,23 +87,30 @@ func (r *Audit) ListRecentByUser(
 			&e.Actor, &e.Detail, &createdAt); err != nil {
 			return nil, fmt.Errorf("scan audit row: %w", err)
 		}
+
 		if tgIDValue.Valid {
 			tgID := tgIDValue.Int64
 			e.TGID = &tgID
 		}
+
 		if source.Valid {
 			e.Source = source.String
 		}
+
 		if resource.Valid {
 			e.Resource = resource.String
 		}
+
 		if e.CreatedAt, err = parseTime(createdAt); err != nil {
 			return nil, fmt.Errorf("parse audit created_at: %w", err)
 		}
+
 		out = append(out, e)
 	}
+
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate audit for %d: %w", tgID, err)
 	}
+
 	return out, nil
 }

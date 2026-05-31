@@ -80,8 +80,9 @@ func NewClient(token string, opts ...ClientOption) (*Client, error) {
 	for _, opt := range opts {
 		opt(&options)
 	}
+
 	if strings.TrimSpace(token) == "" {
-		return nil, fmt.Errorf("empty telegram token")
+		return nil, errors.New("empty telegram token")
 	}
 
 	b, err := botapi.New(token,
@@ -113,6 +114,7 @@ func (c *Client) GetMe(ctx context.Context) (*models.User, error) {
 	if err != nil {
 		return nil, NormalizeError("getMe", err)
 	}
+
 	return user, nil
 }
 
@@ -122,6 +124,7 @@ func (c *Client) GetChat(ctx context.Context, chatID int64) (*models.ChatFullInf
 	if err != nil {
 		return nil, NormalizeError("getChat", err)
 	}
+
 	return chat, nil
 }
 
@@ -136,6 +139,7 @@ func (c *Client) GetChatMember(
 	if err != nil {
 		return nil, NormalizeError("getChatMember", err)
 	}
+
 	return member, nil
 }
 
@@ -149,8 +153,10 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) err
 		if chatID > 0 {
 			return NormalizeError("sendMessage", err)
 		}
+
 		return NormalizeError("sendChatMessage", err)
 	}
+
 	return nil
 }
 
@@ -170,6 +176,7 @@ func (c *Client) SetMyCommands(ctx context.Context, ownerIDs []int64) error {
 	}
 
 	ownerCommands := append([]models.BotCommand(nil), userCommands...)
+
 	ownerCommands = append(ownerCommands,
 		models.BotCommand{
 			Command:     "here",
@@ -187,6 +194,7 @@ func (c *Client) SetMyCommands(ctx context.Context, ownerIDs []int64) error {
 			return NormalizeError("setMyCommands", err)
 		}
 	}
+
 	return nil
 }
 
@@ -199,6 +207,7 @@ func (c *Client) GetUpdates(
 	if params.Timeout == 0 {
 		params.Timeout = 50
 	}
+
 	if len(params.AllowedUpdates) == 0 {
 		params.AllowedUpdates = append([]string(nil), c.allowedUpdates...)
 	}
@@ -207,17 +216,20 @@ func (c *Client) GetUpdates(
 	if err := c.rawRequest(ctx, "getUpdates", params, &rawUpdates); err != nil {
 		return nil, NormalizeError("getUpdates", err)
 	}
+
 	updates := make([]FetchedUpdate, 0, len(rawUpdates))
 	for _, raw := range rawUpdates {
 		var update models.Update
 		if err := json.Unmarshal(raw, &update); err != nil {
 			return nil, fmt.Errorf("decode telegram update: %w", err)
 		}
+
 		updates = append(updates, FetchedUpdate{
 			Raw:    append(json.RawMessage(nil), raw...),
 			Update: &update,
 		})
 	}
+
 	return updates, nil
 }
 
@@ -243,7 +255,7 @@ type apiResponse struct {
 	Parameters  struct {
 		RetryAfter      int `json:"retry_after,omitempty"`
 		MigrateToChatID int `json:"migrate_to_chat_id,omitempty"`
-	} `json:"parameters,omitempty"`
+	} `json:"parameters"`
 }
 
 func (c *Client) rawRequest(
@@ -253,12 +265,15 @@ func (c *Client) rawRequest(
 	if err != nil {
 		return fmt.Errorf("encode telegram %s request: %w", method, err)
 	}
+
 	url := c.serverURL + "/bot" + c.token + "/" + method
+
 	req, err := http.NewRequestWithContext(
 		ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create telegram %s request: %w", method, err)
 	}
+
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -272,14 +287,17 @@ func (c *Client) rawRequest(
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 		return fmt.Errorf("decode telegram %s response: %w", method, err)
 	}
+
 	if !apiResp.OK {
 		return telegramAPIError(method, apiResp)
 	}
+
 	if dest != nil {
 		if err := json.Unmarshal(apiResp.Result, dest); err != nil {
 			return fmt.Errorf("decode telegram %s result: %w", method, err)
 		}
 	}
+
 	return nil
 }
 
@@ -334,6 +352,7 @@ func (e *APIError) Error() string {
 		return fmt.Sprintf("%s: %s: retry_after=%d",
 			e.Method, e.Category, e.RetryAfter)
 	}
+
 	return fmt.Sprintf("%s: %s: %v", e.Method, e.Category, e.Err)
 }
 
@@ -364,6 +383,7 @@ func NormalizeError(method string, err error) error {
 	}
 
 	category := ErrorCategoryOther
+
 	switch {
 	case method == "sendMessage" && errors.Is(err, botapi.ErrorForbidden):
 		category = ErrorCategoryDMBlocked
@@ -380,6 +400,7 @@ func NormalizeError(method string, err error) error {
 	case errors.Is(err, botapi.ErrorNotFound):
 		category = ErrorCategoryNotFound
 	}
+
 	return &APIError{Method: method, Category: category, Err: err}
 }
 
@@ -388,12 +409,14 @@ func NormalizeActionError(action string, err error) error {
 	if err == nil || isExpectedNoop(action, err) {
 		return nil
 	}
+
 	return NormalizeError(action, err)
 }
 
 // IsRateLimited reports whether err is a normalized 429.
 func IsRateLimited(err error) bool {
 	var apiErr *APIError
+
 	return errors.As(err, &apiErr) &&
 		apiErr.Category == ErrorCategoryRateLimited
 }
@@ -401,6 +424,7 @@ func IsRateLimited(err error) bool {
 // IsDMBlocked reports whether err is a normalized blocked-DM response.
 func IsDMBlocked(err error) bool {
 	var apiErr *APIError
+
 	return errors.As(err, &apiErr) &&
 		apiErr.Category == ErrorCategoryDMBlocked
 }
@@ -408,12 +432,14 @@ func IsDMBlocked(err error) bool {
 // IsPermanentRights reports whether err is a non-retryable rights issue.
 func IsPermanentRights(err error) bool {
 	var apiErr *APIError
+
 	return errors.As(err, &apiErr) &&
 		apiErr.Category == ErrorCategoryPermanentRights
 }
 
 func isPermanentRightsText(err error) bool {
 	msg := strings.ToLower(err.Error())
+
 	patterns := []string{
 		"bot is not a member",
 		"not enough rights",
@@ -426,6 +452,7 @@ func isPermanentRightsText(err error) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -439,6 +466,7 @@ func isExpectedNoop(action string, err error) bool {
 	}
 
 	msg := strings.ToLower(err.Error())
+
 	patterns := []string{
 		"user_not_participant",
 		"user not found",
@@ -452,5 +480,6 @@ func isExpectedNoop(action string, err error) bool {
 			return true
 		}
 	}
+
 	return false
 }

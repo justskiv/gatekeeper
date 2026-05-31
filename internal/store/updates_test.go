@@ -40,6 +40,7 @@ func TestTelegramUpdatesInsertBatchAdvancesOffsetAtomically(t *testing.T) {
 	).Scan(&rows); err != nil {
 		t.Fatalf("count updates: %v", err)
 	}
+
 	if rows != 2 {
 		t.Fatalf("pending rows = %d, want 2", rows)
 	}
@@ -48,6 +49,7 @@ func TestTelegramUpdatesInsertBatchAdvancesOffsetAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetUpdateOffset: %v", err)
 	}
+
 	if !ok || offset != 43 {
 		t.Fatalf("offset = (%d, %v), want (43, true)", offset, ok)
 	}
@@ -61,6 +63,7 @@ func TestTelegramUpdatesInsertBatchParticipatesInCallerRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
+
 	if err := NewTelegramUpdates(tx).InsertBatch(ctx, []TelegramUpdate{
 		{
 			UpdateID:    50,
@@ -70,6 +73,7 @@ func TestTelegramUpdatesInsertBatchParticipatesInCallerRollback(t *testing.T) {
 	}, 51); err != nil {
 		t.Fatalf("InsertBatch in tx: %v", err)
 	}
+
 	if err := tx.Rollback(); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
@@ -80,9 +84,11 @@ func TestTelegramUpdatesInsertBatchParticipatesInCallerRollback(t *testing.T) {
 	).Scan(&rows); err != nil {
 		t.Fatalf("count updates: %v", err)
 	}
+
 	if rows != 0 {
 		t.Fatalf("updates after rollback = %d, want 0", rows)
 	}
+
 	if _, ok, err := NewMeta(db).GetUpdateOffset(ctx); err != nil || ok {
 		t.Fatalf("offset after rollback = (_, %v, %v), want absent", ok, err)
 	}
@@ -106,6 +112,7 @@ func TestTelegramUpdateTerminalStatusSharesHandlerTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
+
 	if err := NewUsers(tx).Upsert(ctx, domain.User{
 		TGID:     777,
 		Username: "rollback",
@@ -113,11 +120,13 @@ func TestTelegramUpdateTerminalStatusSharesHandlerTransaction(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Upsert in tx: %v", err)
 	}
+
 	if err := NewTelegramUpdates(tx).MarkTerminal(
 		ctx, 100, TelegramUpdateProcessed, "",
 	); err != nil {
 		t.Fatalf("MarkTerminal in tx: %v", err)
 	}
+
 	if err := tx.Rollback(); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
@@ -125,12 +134,14 @@ func TestTelegramUpdateTerminalStatusSharesHandlerTransaction(t *testing.T) {
 	if _, err := NewUsers(db).Get(ctx, 777); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("user after rollback err = %v, want ErrNotFound", err)
 	}
+
 	var status string
 	if err := db.QueryRowContext(ctx,
 		`SELECT status FROM telegram_updates WHERE update_id = 100`,
 	).Scan(&status); err != nil {
 		t.Fatalf("read update status: %v", err)
 	}
+
 	if status != string(TelegramUpdatePending) {
 		t.Fatalf("status after rollback = %q, want pending", status)
 	}

@@ -57,6 +57,7 @@ func NewCommands(deps CommandDeps, ownerIDs []int64) *UserCommands {
 	for _, id := range ownerIDs {
 		owners[id] = struct{}{}
 	}
+
 	return &UserCommands{deps: deps, owners: owners}
 }
 
@@ -74,6 +75,7 @@ func (h *UserCommands) HandlePrivate(
 		if err := h.rememberPrivateUser(ctx, *msg.From); err != nil {
 			return Result{}, err
 		}
+
 		return Result{Replies: []Reply{{
 			ChatID: msg.Chat.ID,
 			TGID:   msg.From.ID,
@@ -88,6 +90,7 @@ func (h *UserCommands) HandlePrivate(
 		if err := h.rememberPrivateUser(ctx, *msg.From); err != nil {
 			return Result{}, err
 		}
+
 		return Result{Replies: []Reply{{
 			ChatID: msg.Chat.ID,
 			TGID:   msg.From.ID,
@@ -114,6 +117,7 @@ func (h *UserCommands) handleStatus(
 	if err := h.rememberPrivateUser(ctx, *msg.From); err != nil {
 		return Result{}, err
 	}
+
 	tgID := msg.From.ID
 	if h.deps.StatusEngine != nil &&
 		h.deps.Preflight != nil &&
@@ -126,26 +130,34 @@ func (h *UserCommands) handleStatus(
 	}
 
 	var subs []domain.Subscription
+
 	if h.deps.Subscriptions != nil {
 		var err error
+
 		subs, err = h.deps.Subscriptions.ListActiveByUser(ctx, tgID)
 		if err != nil {
 			return Result{}, err
 		}
+
 		subs = currentSubscriptions(subs, time.Now())
 	}
+
 	var grants []domain.AccessGrant
+
 	if h.deps.Grants != nil {
 		var err error
+
 		grants, err = h.deps.Grants.ListByUser(ctx, tgID)
 		if err != nil {
 			return Result{}, err
 		}
 	}
+
 	decision, err := h.statusDecision(ctx, tgID)
 	if err != nil {
 		return Result{}, err
 	}
+
 	return Result{Replies: []Reply{{
 		ChatID: msg.Chat.ID,
 		TGID:   tgID,
@@ -159,9 +171,11 @@ func (h *UserCommands) HandleHere(msg *models.Message) Result {
 	if msg == nil || msg.From == nil || commandName(msg.Text) != "here" {
 		return Result{Ignored: true}
 	}
+
 	if _, ok := h.owners[msg.From.ID]; !ok {
 		return Result{Ignored: true}
 	}
+
 	return Result{Replies: []Reply{{
 		ChatID: msg.Chat.ID,
 		TGID:   msg.From.ID,
@@ -171,6 +185,7 @@ func (h *UserCommands) HandleHere(msg *models.Message) Result {
 
 func (h *UserCommands) isOwner(tgID int64) bool {
 	_, ok := h.owners[tgID]
+
 	return ok
 }
 
@@ -196,11 +211,14 @@ func CommandName(text string) string {
 	if text == "" || !strings.HasPrefix(text, "/") {
 		return ""
 	}
+
 	cmd := strings.Fields(text)[0]
+
 	cmd = strings.TrimPrefix(cmd, "/")
 	if at := strings.IndexByte(cmd, '@'); at >= 0 {
 		cmd = cmd[:at]
 	}
+
 	return strings.ToLower(cmd)
 }
 
@@ -211,9 +229,11 @@ func (h *UserCommands) statusDecision(
 	if h.deps.Preflight != nil && h.deps.Preflight.TGID == tgID {
 		return h.deps.Preflight.Decision, nil
 	}
+
 	if canReadPersistedDecision(h.deps) {
 		return h.deps.StatusEngine.PersistedDecision(ctx, engineStore(h.deps), tgID)
 	}
+
 	return domain.AccessDecision{
 		TGID:   tgID,
 		Status: domain.StatusUnknown,
@@ -242,6 +262,7 @@ func currentSubscriptions(
 			out = append(out, sub)
 		}
 	}
+
 	return out
 }
 

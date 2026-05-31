@@ -66,6 +66,7 @@ func NewMembership(
 	for _, opt := range opts {
 		opt(m)
 	}
+
 	return m
 }
 
@@ -82,7 +83,9 @@ func (m *Membership) Verdict(
 	if m.platform != domain.PlatformTribute || m.ledger == nil {
 		return memberVerdict, nil
 	}
+
 	ledgerVerdict := m.ledgerVerdict(ctx, tgID)
+
 	return combineTribute(memberVerdict, ledgerVerdict), nil
 }
 
@@ -97,6 +100,7 @@ func (m *Membership) memberVerdict(
 			Detail:  messages.ReasonMembershipCheckFailed(),
 		}
 	}
+
 	if MemberInChat(member) {
 		return domain.SourceVerdict{
 			Source:  m.platform,
@@ -104,6 +108,7 @@ func (m *Membership) memberVerdict(
 			Detail:  messages.ReasonMembershipInChat(m.chatID),
 		}
 	}
+
 	return domain.SourceVerdict{
 		Source:  m.platform,
 		Verdict: domain.VerdictInactive,
@@ -122,6 +127,7 @@ func (m *Membership) ledgerVerdict(
 			Detail:  messages.ReasonLedgerReadFailed(),
 		}
 	}
+
 	if !ok {
 		return domain.SourceVerdict{
 			Source:  m.platform,
@@ -129,6 +135,7 @@ func (m *Membership) ledgerVerdict(
 			Detail:  messages.ReasonLedgerNoActive(),
 		}
 	}
+
 	if sub.ExpiresAt != nil && !m.now().Before(*sub.ExpiresAt) {
 		return domain.SourceVerdict{
 			Source:  m.platform,
@@ -137,6 +144,7 @@ func (m *Membership) ledgerVerdict(
 			Until:   sub.ExpiresAt,
 		}
 	}
+
 	return domain.SourceVerdict{
 		Source:  m.platform,
 		Verdict: domain.VerdictActive,
@@ -179,6 +187,7 @@ func firstUntil(a, b *time.Time) *time.Time {
 	if a != nil {
 		return a
 	}
+
 	return b
 }
 
@@ -187,6 +196,7 @@ func MemberInChat(member *models.ChatMember) bool {
 	if member == nil {
 		return false
 	}
+
 	switch member.Type {
 	case models.ChatMemberTypeOwner, models.ChatMemberTypeAdministrator,
 		models.ChatMemberTypeMember:

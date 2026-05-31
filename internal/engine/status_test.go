@@ -50,17 +50,21 @@ func TestAggregatePriorities(t *testing.T) {
 					Detail:  string(verdict),
 				})
 			}
+
 			status, decision := Aggregate(verdicts, tt.banned)
 			if status != tt.want || decision.Status != tt.want {
 				t.Fatalf("status = %s/%s, want %s",
 					status, decision.Status, tt.want)
 			}
+
 			if decision.Allowed != (tt.want == domain.StatusActive) {
 				t.Fatalf("allowed = %v for status %s", decision.Allowed, tt.want)
 			}
+
 			if len(decision.Reasons) == 0 {
 				t.Fatal("decision has no reasons")
 			}
+
 			if tt.banned && len(decision.Reasons) != len(tt.verdicts)+1 {
 				t.Fatalf("reasons = %+v, want source reasons plus ban", decision.Reasons)
 			}

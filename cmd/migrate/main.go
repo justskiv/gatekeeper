@@ -38,11 +38,14 @@ func run() error {
 	dir := flag.String("migrations-dir", "./migrations",
 		"directory containing goose SQL migrations")
 	flag.Usage = usage
+
 	flag.Parse()
+
 	if flag.NArg() != 1 {
 		usage()
 		os.Exit(2)
 	}
+
 	cmd := flag.Arg(0)
 
 	cfg, err := config.Load()
@@ -82,6 +85,7 @@ func run() error {
 		usage()
 		os.Exit(2)
 	}
+
 	return nil
 }
 
@@ -90,15 +94,19 @@ func cmdUp(ctx context.Context, p *goose.Provider, log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("apply migrations: %w", err)
 	}
+
 	if len(results) == 0 {
 		log.Info("migrations: already up to date")
+
 		return nil
 	}
+
 	for _, r := range results {
 		log.Info("migration applied",
 			slog.Int64("version", r.Source.Version),
 			slog.String("source", r.Source.Path))
 	}
+
 	return nil
 }
 
@@ -107,18 +115,21 @@ func cmdStatus(ctx context.Context, p *goose.Provider, log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("read schema version: %w", err)
 	}
+
 	log.Info("schema version", slog.Int64("version", version))
 
 	statuses, err := p.Status(ctx)
 	if err != nil {
 		return fmt.Errorf("read migration status: %w", err)
 	}
+
 	for _, s := range statuses {
 		log.Info("migration",
 			slog.Int64("version", s.Source.Version),
 			slog.String("source", s.Source.Path),
 			slog.String("state", string(s.State)))
 	}
+
 	return nil
 }
 

@@ -25,11 +25,12 @@ func TestStartRegistersUserIdempotently(t *testing.T) {
 	handler := NewUserCommands(store.NewUsers(db), nil)
 	msg := privateMessage(1, 42, "/start")
 
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		result, err := handler.HandlePrivate(ctx, msg)
 		if err != nil {
 			t.Fatalf("HandlePrivate: %v", err)
 		}
+
 		if result.Ignored || len(result.Replies) != 1 {
 			t.Fatalf("result = %+v, want one reply", result)
 		}
@@ -39,13 +40,16 @@ func TestStartRegistersUserIdempotently(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}
+
 	if user.DMState != domain.DMOpen {
 		t.Fatalf("dm_state = %s, want open", user.DMState)
 	}
+
 	var rows int
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&rows); err != nil {
 		t.Fatalf("count users: %v", err)
 	}
+
 	if rows != 1 {
 		t.Fatalf("users rows = %d, want 1", rows)
 	}
@@ -60,9 +64,11 @@ func TestNonCommandPrivateTextBehavesLikeStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandlePrivate: %v", err)
 	}
+
 	if result.Ignored || len(result.Replies) != 1 {
 		t.Fatalf("result = %+v, want one reply", result)
 	}
+
 	if _, err := store.NewUsers(db).Get(ctx, 43); err != nil {
 		t.Fatalf("get user: %v", err)
 	}
@@ -79,13 +85,16 @@ func TestHelpReplies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandlePrivate: %v", err)
 	}
+
 	if result.Ignored || len(result.Replies) != 1 || result.Replies[0].Text == "" {
 		t.Fatalf("result = %+v, want help reply", result)
 	}
+
 	user, err := users.Get(ctx, 44)
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}
+
 	if user.DMState != domain.DMOpen {
 		t.Fatalf("dm_state = %s, want open", user.DMState)
 	}
@@ -142,12 +151,15 @@ func TestStatusEnsuresUserAndAppliesPreflight(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandlePrivate: %v", err)
 	}
+
 	if result.Ignored || len(result.Replies) != 1 {
 		t.Fatalf("result = %+v, want one status reply", result)
 	}
+
 	if !strings.Contains(result.Replies[0].Text, "Статус доступа") {
 		t.Fatalf("reply = %q, want status text", result.Replies[0].Text)
 	}
+
 	if !strings.Contains(result.Replies[0].Text, "Проверка источников") ||
 		!strings.Contains(result.Replies[0].Text, "активно") {
 		t.Fatalf("reply = %q, want localized source reasons", result.Replies[0].Text)
@@ -157,6 +169,7 @@ func TestStatusEnsuresUserAndAppliesPreflight(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}
+
 	if user.DMState != domain.DMOpen {
 		t.Fatalf("dm_state = %s, want open", user.DMState)
 	}
@@ -166,6 +179,7 @@ func TestStatusEnsuresUserAndAppliesPreflight(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetActive: %v", err)
 	}
+
 	if !ok || sub.LastSignal != "on_demand" {
 		t.Fatalf("subscription = (%+v, %v), want on-demand active", sub, ok)
 	}
@@ -179,6 +193,7 @@ func TestStatusFallsBackToPersistedDecision(t *testing.T) {
 	if err := users.Upsert(ctx, domain.User{TGID: 56}); err != nil {
 		t.Fatalf("upsert user: %v", err)
 	}
+
 	if err := store.NewWhitelist(db).Add(ctx, 56, 100, "test"); err != nil {
 		t.Fatalf("add whitelist: %v", err)
 	}
@@ -196,9 +211,11 @@ func TestStatusFallsBackToPersistedDecision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandlePrivate: %v", err)
 	}
+
 	if result.Ignored || len(result.Replies) != 1 {
 		t.Fatalf("result = %+v, want one status reply", result)
 	}
+
 	if !strings.Contains(result.Replies[0].Text, "Статус доступа: активен") ||
 		!strings.Contains(result.Replies[0].Text, "белый список") {
 		t.Fatalf("reply = %q, want persisted active decision", result.Replies[0].Text)
@@ -218,6 +235,7 @@ func TestWhoisOwnerByIDAndUsername(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("upsert target user: %v", err)
 	}
+
 	if err := users.Upsert(ctx, domain.User{TGID: 100, Username: "owner"}); err != nil {
 		t.Fatalf("upsert owner: %v", err)
 	}
@@ -263,12 +281,15 @@ func TestWhoisOwnerByIDAndUsername(t *testing.T) {
 		if err != nil {
 			t.Fatalf("HandlePrivate %q: %v", text, err)
 		}
+
 		if result.Ignored || len(result.Replies) != 1 {
 			t.Fatalf("result for %q = %+v, want one reply", text, result)
 		}
+
 		if !strings.Contains(result.Replies[0].Text, "Пользователь: 77") {
 			t.Fatalf("reply for %q = %q, want user card", text, result.Replies[0].Text)
 		}
+
 		if !strings.Contains(result.Replies[0].Text, "Tribute: активно") {
 			t.Fatalf("reply for %q = %q, want localized reasons", text,
 				result.Replies[0].Text)
@@ -291,6 +312,7 @@ func TestWhoisWithIncompleteDepsReturnsUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandlePrivate: %v", err)
 	}
+
 	if result.Ignored || len(result.Replies) != 1 ||
 		!strings.Contains(result.Replies[0].Text, "недоступна") {
 		t.Fatalf("result = %+v, want unavailable reply", result)
@@ -312,6 +334,7 @@ func TestWhoisUnknownUsernameAndNonOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandlePrivate missing: %v", err)
 	}
+
 	if result.Ignored || len(result.Replies) != 1 ||
 		!strings.Contains(result.Replies[0].Text, "не найден") {
 		t.Fatalf("missing result = %+v, want not-found reply", result)
@@ -321,6 +344,7 @@ func TestWhoisUnknownUsernameAndNonOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandlePrivate non-owner: %v", err)
 	}
+
 	if !result.Ignored || len(result.Replies) != 0 {
 		t.Fatalf("non-owner result = %+v, want ignored", result)
 	}
@@ -346,10 +370,12 @@ func groupMessage(updateID, chatID, tgID int64, text string) *models.Message {
 
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
+
 	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
+
 	t.Cleanup(func() { _ = db.Close() })
 
 	provider, err := goose.NewProvider(
@@ -357,17 +383,21 @@ func newTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("new goose provider: %v", err)
 	}
+
 	if _, err := provider.Up(context.Background()); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
+
 	return db
 }
 
 func migrationsDir(t *testing.T) string {
 	t.Helper()
+
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
+
 	return filepath.Join(filepath.Dir(file), "..", "..", "migrations")
 }

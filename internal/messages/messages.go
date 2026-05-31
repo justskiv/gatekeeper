@@ -16,7 +16,8 @@ const (
 	CommandStatusDescription = "показать статус подписки"
 	CommandWhoisDescription  = "показать карточку пользователя"
 
-	MsgNoSub = "Подписка пока не найдена. Проверьте оформление подписки и напишите боту с того же аккаунта Telegram."
+	MsgNoSub = "Подписка пока не найдена. " +
+		"Проверьте оформление подписки и напишите боту с того же аккаунта Telegram."
 )
 
 // AuditLine is the audit data needed for owner-facing /whois text.
@@ -39,12 +40,15 @@ type WhoisData struct {
 
 // Welcome returns the /start greeting.
 func Welcome() string {
-	return "Привет! Я помогу получить доступ в закрытое сообщество. Оформите подписку и пишите боту с того же аккаунта Telegram."
+	return "Привет! Я помогу получить доступ в закрытое сообщество. " +
+		"Оформите подписку и пишите боту с того же аккаунта Telegram."
 }
 
 // Help returns the /help text.
 func Help() string {
-	return "Бот проверяет подписку Boosty или Tribute и выдаёт доступ в закрытые чат и канал. Важно: пишите с того же аккаунта Telegram, которым оформляли подписку."
+	return "Бот проверяет подписку Boosty или Tribute и выдаёт доступ " +
+		"в закрытые чат и канал. Важно: пишите с того же аккаунта Telegram, " +
+		"которым оформляли подписку."
 }
 
 // Here returns a chat discovery response for owners.
@@ -60,25 +64,31 @@ func Status(
 ) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Статус доступа: %s\n", effectiveStatusText(decision.Status))
+
 	if len(subscriptions) == 0 {
 		b.WriteString(MsgNoSub)
 		b.WriteByte('\n')
 	} else {
 		b.WriteString("Активные подписки:\n")
+
 		for _, sub := range subscriptions {
 			fmt.Fprintf(&b, "- %s", platformText(sub.Platform))
+
 			if sub.ExpiresAt != nil {
 				fmt.Fprintf(&b, " до %s", dateText(*sub.ExpiresAt))
 			}
+
 			if sub.Tier != "" {
 				fmt.Fprintf(&b, " (%s)", sub.Tier)
 			}
+
 			b.WriteByte('\n')
 		}
 	}
 	// Access grants are populated by the later admit flow; live source
 	// membership is already visible through subscriptions and reasons.
 	b.WriteString("Клубные ресурсы:\n")
+
 	if len(grants) == 0 {
 		b.WriteString("- доступы в чат и канал ещё не выдавались\n")
 	} else {
@@ -87,10 +97,12 @@ func Status(
 				resourceText(grant.Resource), grantStateText(grant.State))
 		}
 	}
+
 	if len(decision.Reasons) > 0 {
 		b.WriteString("Проверка источников:\n")
 		appendReasons(&b, decision.Reasons)
 	}
+
 	return strings.TrimSpace(b.String())
 }
 
@@ -112,44 +124,56 @@ func WhoisNotFound(query string) string {
 // Whois returns the owner-facing user card.
 func Whois(data WhoisData) string {
 	var b strings.Builder
+
 	user := data.User
+
 	name := strings.TrimSpace(user.FirstName + " " + user.LastName)
 	if name == "" {
 		name = "(без имени)"
 	}
+
 	fmt.Fprintf(&b, "Пользователь: %d", user.TGID)
+
 	if user.Username != "" {
 		fmt.Fprintf(&b, " (@%s)", user.Username)
 	}
+
 	fmt.Fprintf(&b, "\nИмя: %s\n", name)
 	fmt.Fprintf(&b, "Личка: %s\n", dmStateText(user.DMState))
 	fmt.Fprintf(&b, "Белый список: %s\n", yesNo(data.Whitelisted))
 	fmt.Fprintf(&b, "Бан: %s", yesNo(user.Banned))
+
 	if user.BannedReason != "" {
 		fmt.Fprintf(&b, " (%s)", user.BannedReason)
 	}
+
 	b.WriteByte('\n')
 	fmt.Fprintf(&b, "Статус доступа: %s\n",
 		effectiveStatusText(data.Decision.Status))
 
 	b.WriteString("Подписки:\n")
+
 	if len(data.Subscriptions) == 0 {
 		b.WriteString("- нет записей\n")
 	} else {
 		for _, sub := range data.Subscriptions {
 			fmt.Fprintf(&b, "- %s: %s",
 				platformText(sub.Platform), subscriptionStatusText(sub.Status))
+
 			if sub.ExpiresAt != nil {
 				fmt.Fprintf(&b, " до %s", dateText(*sub.ExpiresAt))
 			}
+
 			if sub.EndedAt != nil {
 				fmt.Fprintf(&b, ", завершена %s", dateText(*sub.EndedAt))
 			}
+
 			b.WriteByte('\n')
 		}
 	}
 
 	b.WriteString("Доступы:\n")
+
 	if len(data.Grants) == 0 {
 		b.WriteString("- нет записей\n")
 	} else {
@@ -165,20 +189,25 @@ func Whois(data WhoisData) string {
 	}
 
 	b.WriteString("Последний аудит:\n")
+
 	if len(data.Audit) == 0 {
 		b.WriteString("- нет записей\n")
 	} else {
 		for _, audit := range data.Audit {
 			fmt.Fprintf(&b, "- %s %s", dateTimeText(audit.CreatedAt), audit.Kind)
+
 			if audit.Source != "" {
 				fmt.Fprintf(&b, " [%s]", audit.Source)
 			}
+
 			if audit.Detail != "" {
 				fmt.Fprintf(&b, ": %s", audit.Detail)
 			}
+
 			b.WriteByte('\n')
 		}
 	}
+
 	return strings.TrimSpace(b.String())
 }
 
@@ -187,6 +216,7 @@ func UnknownChat(chatID int64, chatType, title string) string {
 	if title == "" {
 		title = "(без названия)"
 	}
+
 	return fmt.Sprintf(
 		"Бот добавлен в новый чат.\nchat.id: %d\nchat.type: %s\nНазвание: %s",
 		chatID, chatType, title)
@@ -306,12 +336,15 @@ func appendReasons(b *strings.Builder, reasons []domain.AccessReason) {
 	for _, reason := range reasons {
 		fmt.Fprintf(b, "- %s: %s",
 			platformText(reason.Source), verdictText(reason.Verdict))
+
 		if reason.Detail != "" {
 			fmt.Fprintf(b, " — %s", reason.Detail)
 		}
+
 		if reason.Until != nil {
 			fmt.Fprintf(b, " до %s", dateText(*reason.Until))
 		}
+
 		b.WriteByte('\n')
 	}
 }
@@ -413,6 +446,7 @@ func yesNo(v bool) string {
 	if v {
 		return "да"
 	}
+
 	return "нет"
 }
 

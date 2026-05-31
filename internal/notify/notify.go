@@ -28,6 +28,7 @@ func New(users *store.Users, sender messageSender, logger *slog.Logger) *Notifie
 	if logger == nil {
 		logger = slog.Default()
 	}
+
 	return &Notifier{users: users, sender: sender, logger: logger}
 }
 
@@ -37,6 +38,7 @@ func (n *Notifier) SendDM(ctx context.Context, tgID int64, text string) error {
 	switch {
 	case err == nil && user.DMState == domain.DMBlocked:
 		n.logger.Debug("skip blocked dm", slog.Int64("tg_id", tgID))
+
 		return nil
 	case err == nil:
 	case errors.Is(err, store.ErrNotFound):
@@ -48,6 +50,7 @@ func (n *Notifier) SendDM(ctx context.Context, tgID int64, text string) error {
 	if err == nil {
 		return nil
 	}
+
 	if isDMBlocked(err) {
 		if setErr := n.users.SetDMState(ctx, tgID, domain.DMBlocked); setErr != nil {
 			if errors.Is(setErr, store.ErrNotFound) {
@@ -56,13 +59,17 @@ func (n *Notifier) SendDM(ctx context.Context, tgID int64, text string) error {
 					DMState: domain.DMBlocked,
 				})
 			}
+
 			if setErr != nil {
 				return fmt.Errorf("mark dm blocked for %d: %w", tgID, setErr)
 			}
 		}
+
 		n.logger.Info("dm blocked by user", slog.Int64("tg_id", tgID))
+
 		return nil
 	}
+
 	return fmt.Errorf("send dm to %d: %w", tgID, err)
 }
 
@@ -71,16 +78,19 @@ func (n *Notifier) SendOwners(
 	ctx context.Context, ownerIDs []int64, text string,
 ) error {
 	var firstErr error
+
 	for _, ownerID := range ownerIDs {
 		if err := n.SendDM(ctx, ownerID, text); err != nil {
 			n.logger.Warn("failed to send owner dm",
 				slog.Int64("owner_tg_id", ownerID),
 				slog.Any("error", err))
+
 			if firstErr == nil {
 				firstErr = err
 			}
 		}
 	}
+
 	return firstErr
 }
 
@@ -90,6 +100,7 @@ type categorizedTelegramError interface {
 
 func isDMBlocked(err error) bool {
 	var categorized categorizedTelegramError
+
 	return errors.As(err, &categorized) &&
 		categorized.TelegramCategory() == "dm_blocked"
 }

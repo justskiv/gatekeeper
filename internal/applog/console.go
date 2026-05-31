@@ -41,6 +41,7 @@ func newConsoleHandler(out io.Writer, opts consoleHandlerOptions) slog.Handler {
 	if opts.Level == nil {
 		opts.Level = slog.LevelInfo
 	}
+
 	return &consoleHandler{
 		out:  out,
 		opts: opts,
@@ -55,24 +56,30 @@ func (h *consoleHandler) Enabled(_ context.Context, level slog.Level) bool {
 func (h *consoleHandler) Handle(_ context.Context, record slog.Record) error {
 	var buf bytes.Buffer
 	h.appendHeader(&buf, record)
+
 	for _, attr := range h.attrs {
 		h.appendAttr(&buf, h.groups, attr)
 	}
+
 	record.Attrs(func(attr slog.Attr) bool {
 		h.appendAttr(&buf, h.groups, attr)
+
 		return true
 	})
 	buf.WriteByte('\n')
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
 	_, err := h.out.Write(buf.Bytes())
+
 	return err
 }
 
 func (h *consoleHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	next := h.clone()
 	next.attrs = append(next.attrs, attrs...)
+
 	return next
 }
 
@@ -80,8 +87,10 @@ func (h *consoleHandler) WithGroup(name string) slog.Handler {
 	if name == "" {
 		return h
 	}
+
 	next := h.clone()
 	next.groups = append(next.groups, name)
+
 	return next
 }
 
@@ -89,6 +98,7 @@ func (h *consoleHandler) clone() *consoleHandler {
 	next := *h
 	next.attrs = append([]slog.Attr(nil), h.attrs...)
 	next.groups = append([]string(nil), h.groups...)
+
 	return &next
 }
 
@@ -97,6 +107,7 @@ func (h *consoleHandler) appendHeader(buf *bytes.Buffer, record slog.Record) {
 	if t.IsZero() {
 		t = time.Now()
 	}
+
 	h.writeDim(buf, t.Format(timeLayout))
 	buf.WriteByte(' ')
 	h.writeLevel(buf, record.Level)
@@ -109,13 +120,16 @@ func (h *consoleHandler) appendAttr(buf *bytes.Buffer, groups []string, attr slo
 	if attr.Equal(slog.Attr{}) {
 		return
 	}
+
 	if attr.Value.Kind() == slog.KindGroup {
 		if attr.Key != "" {
 			groups = append(groups, attr.Key)
 		}
+
 		for _, nested := range attr.Value.Group() {
 			h.appendAttr(buf, groups, nested)
 		}
+
 		return
 	}
 
@@ -123,9 +137,11 @@ func (h *consoleHandler) appendAttr(buf *bytes.Buffer, groups []string, attr slo
 	if len(groups) > 0 {
 		key = strings.Join(append(append([]string(nil), groups...), key), ".")
 	}
+
 	if key == "" {
 		return
 	}
+
 	buf.WriteByte(' ')
 	h.writeDim(buf, key)
 	buf.WriteByte('=')
@@ -138,8 +154,10 @@ func (h *consoleHandler) writeLevel(buf *bytes.Buffer, level slog.Level) {
 		buf.WriteString(color)
 		buf.WriteString(label)
 		buf.WriteString(colorReset)
+
 		return
 	}
+
 	buf.WriteString(label)
 }
 
@@ -148,8 +166,10 @@ func (h *consoleHandler) writeDim(buf *bytes.Buffer, s string) {
 		buf.WriteString(colorDim)
 		buf.WriteString(s)
 		buf.WriteString(colorReset)
+
 		return
 	}
+
 	buf.WriteString(s)
 }
 
@@ -193,6 +213,7 @@ func quoteIfNeeded(s string) string {
 	if s == "" || strings.ContainsAny(s, " \t\r\n\"=") {
 		return strconv.Quote(s)
 	}
+
 	return s
 }
 
@@ -200,15 +221,19 @@ func shouldColor(file *os.File) bool {
 	if os.Getenv("NO_COLOR") != "" {
 		return false
 	}
+
 	if os.Getenv("FORCE_COLOR") != "" {
 		return true
 	}
+
 	if os.Getenv("TERM") == defaultTerm {
 		return false
 	}
+
 	info, err := file.Stat()
 	if err != nil {
 		return false
 	}
+
 	return info.Mode()&os.ModeCharDevice != 0
 }

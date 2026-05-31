@@ -54,6 +54,16 @@ tasks:
       - go vet ./...
       - go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@{{.GOLANGCI_LINT_VERSION}} run ./...
 
+  lint:fix:
+    desc: Run golangci-lint with auto-fix
+    cmds:
+      - go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@{{.GOLANGCI_LINT_VERSION}} run --fix ./...
+
+  fmt:
+    desc: Format Go source files with golangci-lint
+    cmds:
+      - go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@{{.GOLANGCI_LINT_VERSION}} fmt ./...
+
   tidy:
     desc: Tidy go module dependencies
     cmds:

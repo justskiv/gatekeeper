@@ -31,23 +31,29 @@ func ResolveWhoisTarget(
 	if arg == "" {
 		return WhoisTarget{BadSyntax: true}, nil
 	}
+
 	if strings.HasPrefix(arg, "@") {
 		if users == nil {
 			return WhoisTarget{Query: arg, NotFound: true}, nil
 		}
+
 		user, ok, err := users.FindByUsername(ctx, arg)
 		if err != nil {
 			return WhoisTarget{}, err
 		}
+
 		if !ok {
 			return WhoisTarget{Query: arg, NotFound: true}, nil
 		}
+
 		return WhoisTarget{TGID: user.TGID, Query: arg}, nil
 	}
+
 	tgID, err := strconv.ParseInt(arg, 10, 64)
 	if err != nil || tgID <= 0 {
 		return WhoisTarget{Query: arg, BadSyntax: true}, nil
 	}
+
 	return WhoisTarget{TGID: tgID, Query: arg}, nil
 }
 
@@ -57,6 +63,7 @@ func (h *UserCommands) handleWhois(
 	if !h.isOwner(msg.From.ID) {
 		return Result{Ignored: true}, nil
 	}
+
 	if !h.hasWhoisDeps() {
 		return h.ownerReply(msg, messages.WhoisUnavailable()), nil
 	}
@@ -65,9 +72,11 @@ func (h *UserCommands) handleWhois(
 	if err != nil {
 		return Result{}, err
 	}
+
 	if target.BadSyntax {
 		return h.ownerReply(msg, messages.WhoisUsage()), nil
 	}
+
 	if target.NotFound {
 		return h.ownerReply(msg, messages.WhoisNotFound(target.Query)), nil
 	}
@@ -76,9 +85,11 @@ func (h *UserCommands) handleWhois(
 	if isNotFound(err) {
 		return h.ownerReply(msg, messages.WhoisNotFound(target.Query)), nil
 	}
+
 	if err != nil {
 		return Result{}, err
 	}
+
 	if h.deps.StatusEngine != nil &&
 		h.deps.Preflight != nil &&
 		h.deps.Preflight.TGID == target.TGID {
@@ -93,14 +104,17 @@ func (h *UserCommands) handleWhois(
 	if err != nil {
 		return Result{}, err
 	}
+
 	grants, err := h.deps.Grants.ListByUser(ctx, target.TGID)
 	if err != nil {
 		return Result{}, err
 	}
+
 	whitelisted, err := h.deps.Whitelist.Has(ctx, target.TGID)
 	if err != nil {
 		return Result{}, err
 	}
+
 	auditRows, err := h.deps.Audit.ListRecentByUser(ctx, target.TGID, whoisAuditLimit)
 	if err != nil {
 		return Result{}, err
@@ -110,6 +124,7 @@ func (h *UserCommands) handleWhois(
 	if err != nil {
 		return Result{}, err
 	}
+
 	audit := make([]messages.AuditLine, 0, len(auditRows))
 	for _, row := range auditRows {
 		audit = append(audit, messages.AuditLine{
@@ -119,6 +134,7 @@ func (h *UserCommands) handleWhois(
 			CreatedAt: row.CreatedAt,
 		})
 	}
+
 	return h.ownerReply(msg, messages.Whois(messages.WhoisData{
 		User:          user,
 		Subscriptions: subs,
@@ -151,5 +167,6 @@ func commandArg(text string) string {
 	if len(fields) < 2 {
 		return ""
 	}
+
 	return fields[1]
 }

@@ -28,6 +28,7 @@ func (s *recordingSender) SendMessage(
 	_ context.Context, _ int64, _ string,
 ) error {
 	s.calls++
+
 	return nil
 }
 
@@ -41,6 +42,7 @@ func (s *cancelingSender) SendMessage(
 ) error {
 	s.calls++
 	s.cancel()
+
 	return nil
 }
 
@@ -73,6 +75,7 @@ func (s *countingSource) Verdict(
 
 func TestPollerRunFetchesAllowedUpdatesAndPersistsRawPayload(t *testing.T) {
 	db := newTestDB(t)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -88,16 +91,22 @@ func TestPollerRunFetchesAllowedUpdatesAndPersistsRawPayload(t *testing.T) {
 		"unknown_future_field": {"keep": true}
 	}`)
 
-	var captured GetUpdatesParams
-	var calls int
+	var (
+		captured GetUpdatesParams
+		calls    int
+	)
+
 	client := newBotAPITestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if methodName(r.URL.Path) != "getUpdates" {
 			t.Fatalf("unexpected method %s", methodName(r.URL.Path))
 		}
+
 		calls++
+
 		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
 			t.Fatalf("decode getUpdates request: %v", err)
 		}
+
 		writeTelegramResult(w, []json.RawMessage{rawUpdate, rawUpdate})
 	})
 
@@ -125,16 +134,20 @@ func TestPollerRunFetchesAllowedUpdatesAndPersistsRawPayload(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("getUpdates calls = %d, want 1", calls)
 	}
+
 	if !slices.Equal(captured.AllowedUpdates, DefaultAllowedUpdates) {
 		t.Fatalf("allowed_updates = %#v, want %#v",
 			captured.AllowedUpdates, DefaultAllowedUpdates)
 	}
+
 	if sender.calls != 1 {
 		t.Fatalf("send calls = %d, want 1", sender.calls)
 	}
 
-	var rows, offset int
-	var payload string
+	var (
+		rows, offset int
+		payload      string
+	)
 	if err := db.QueryRowContext(context.Background(), `
 		SELECT count(*), max(payload_json)
 		FROM telegram_updates
@@ -142,17 +155,21 @@ func TestPollerRunFetchesAllowedUpdatesAndPersistsRawPayload(t *testing.T) {
 	).Scan(&rows, &payload); err != nil {
 		t.Fatalf("read processed updates: %v", err)
 	}
+
 	if rows != 1 {
 		t.Fatalf("processed rows = %d, want 1", rows)
 	}
+
 	if !strings.Contains(payload, "unknown_future_field") {
 		t.Fatalf("payload_json lost raw future field: %s", payload)
 	}
+
 	if err := db.QueryRowContext(context.Background(), `
 		SELECT value FROM meta WHERE key = 'update_offset'`,
 	).Scan(&offset); err != nil {
 		t.Fatalf("read update_offset: %v", err)
 	}
+
 	if offset != 31 {
 		t.Fatalf("update_offset = %d, want 31", offset)
 	}
@@ -164,11 +181,13 @@ func TestPollerProcessesDuplicateUpdateIDOnce(t *testing.T) {
 	sender := &recordingSender{}
 
 	update := privateTextUpdate(10, 1001, "/start")
+
 	batch, nextOffset, err := buildUpdateBatch(
 		[]FetchedUpdate{fetchedUpdate(t, update), fetchedUpdate(t, update)}, 0)
 	if err != nil {
 		t.Fatalf("buildUpdateBatch: %v", err)
 	}
+
 	if err := store.NewTelegramUpdates(db).InsertBatch(ctx, batch, nextOffset); err != nil {
 		t.Fatalf("InsertBatch: %v", err)
 	}
@@ -183,19 +202,23 @@ func TestPollerProcessesDuplicateUpdateIDOnce(t *testing.T) {
 	if sender.calls != 1 {
 		t.Fatalf("send calls = %d, want 1", sender.calls)
 	}
+
 	user, err := store.NewUsers(db).Get(ctx, 1001)
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}
+
 	if user.DMState != domain.DMOpen {
 		t.Fatalf("dm_state = %s, want open", user.DMState)
 	}
+
 	var processed int
 	if err := db.QueryRowContext(ctx, `
 		SELECT count(*) FROM telegram_updates WHERE status = 'processed'`,
 	).Scan(&processed); err != nil {
 		t.Fatalf("count processed: %v", err)
 	}
+
 	if processed != 1 {
 		t.Fatalf("processed rows = %d, want 1", processed)
 	}
@@ -207,11 +230,13 @@ func TestPollerRecoversPendingOnStartup(t *testing.T) {
 	sender := &recordingSender{}
 
 	update := privateTextUpdate(20, 2002, "hello")
+
 	batch, nextOffset, err := buildUpdateBatch(
 		[]FetchedUpdate{fetchedUpdate(t, update)}, 0)
 	if err != nil {
 		t.Fatalf("buildUpdateBatch: %v", err)
 	}
+
 	if err := store.NewTelegramUpdates(db).InsertBatch(ctx, batch, nextOffset); err != nil {
 		t.Fatalf("InsertBatch: %v", err)
 	}
@@ -226,12 +251,14 @@ func TestPollerRecoversPendingOnStartup(t *testing.T) {
 	if sender.calls != 1 {
 		t.Fatalf("send calls = %d, want 1", sender.calls)
 	}
+
 	var status string
 	if err := db.QueryRowContext(ctx,
 		`SELECT status FROM telegram_updates WHERE update_id = 20`,
 	).Scan(&status); err != nil {
 		t.Fatalf("read update status: %v", err)
 	}
+
 	if status != string(store.TelegramUpdateProcessed) {
 		t.Fatalf("status = %q, want processed", status)
 	}
@@ -301,6 +328,7 @@ func TestPollerStatusPreflightRunsSourceOutsideHandlerTransaction(t *testing.T) 
 			if err != nil {
 				t.Fatalf("buildUpdateBatch: %v", err)
 			}
+
 			if err := store.NewTelegramUpdates(db).InsertBatch(
 				ctx, batch, nextOffset,
 			); err != nil {
@@ -315,9 +343,11 @@ func TestPollerStatusPreflightRunsSourceOutsideHandlerTransaction(t *testing.T) 
 				t.Fatalf("source calls = %d, want exactly one preflight call",
 					source.calls)
 			}
+
 			if calledInTx.Load() {
 				t.Fatal("source was called after tx2 began")
 			}
+
 			if sender.calls != 1 {
 				t.Fatalf("send calls = %d, want one command reply", sender.calls)
 			}
@@ -327,6 +357,7 @@ func TestPollerStatusPreflightRunsSourceOutsideHandlerTransaction(t *testing.T) 
 			if err != nil {
 				t.Fatalf("GetActive: %v", err)
 			}
+
 			if !ok || sub.LastSignal != "on_demand" {
 				t.Fatalf("subscription = (%+v, %v), want on-demand active", sub, ok)
 			}
@@ -338,6 +369,7 @@ func TestPollerStatusPreflightRunsSourceOutsideHandlerTransaction(t *testing.T) 
 			).Scan(&status); err != nil {
 				t.Fatalf("read update status: %v", err)
 			}
+
 			if status != string(store.TelegramUpdateProcessed) {
 				t.Fatalf("status = %q, want processed", status)
 			}
@@ -349,6 +381,7 @@ func TestShouldAbortPollingKeepsConflictRetryable(t *testing.T) {
 	if shouldAbortPolling(&APIError{Category: ErrorCategoryConflict}) {
 		t.Fatal("conflict should be retryable")
 	}
+
 	if !shouldAbortPolling(&APIError{Category: ErrorCategoryUnauthorized}) {
 		t.Fatal("unauthorized should abort polling")
 	}
@@ -356,10 +389,12 @@ func TestShouldAbortPollingKeepsConflictRetryable(t *testing.T) {
 
 func fetchedUpdate(t *testing.T, update *models.Update) FetchedUpdate {
 	t.Helper()
+
 	raw, err := json.Marshal(update)
 	if err != nil {
 		t.Fatalf("marshal update: %v", err)
 	}
+
 	return FetchedUpdate{Raw: raw, Update: update}
 }
 

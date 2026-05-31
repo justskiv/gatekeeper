@@ -27,6 +27,7 @@ func NewSubscriptions(db DBTX) *Subscriptions {
 // second active subscription for the same (user, platform) pair.
 func (r *Subscriptions) Create(ctx context.Context, s domain.Subscription) (int64, error) {
 	now := rfc3339(time.Now())
+
 	res, err := r.db.ExecContext(ctx, `
 		INSERT INTO subscriptions (
 			tg_id, platform, status, external_id, external_period_id,
@@ -40,6 +41,7 @@ func (r *Subscriptions) Create(ctx context.Context, s domain.Subscription) (int6
 	if err != nil {
 		return 0, fmt.Errorf("create subscription for %d: %w", s.TGID, err)
 	}
+
 	return res.LastInsertId()
 }
 
@@ -51,6 +53,7 @@ func (r *Subscriptions) UpsertActive(
 ) (int64, error) {
 	nowTime := time.Now()
 	now := rfc3339(nowTime)
+
 	startedAt := s.StartedAt
 	if startedAt.IsZero() {
 		startedAt = nowTime
@@ -79,10 +82,12 @@ func (r *Subscriptions) UpsertActive(
 		return 0, fmt.Errorf("update active subscription for %d/%s: %w",
 			s.TGID, s.Platform, err)
 	}
+
 	affected, err := res.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("read active subscription rows affected: %w", err)
 	}
+
 	if affected > 0 {
 		var id int64
 		if err := r.db.QueryRowContext(ctx, `
@@ -91,15 +96,18 @@ func (r *Subscriptions) UpsertActive(
 			s.TGID, string(s.Platform)).Scan(&id); err != nil {
 			return 0, fmt.Errorf("read active subscription id: %w", err)
 		}
+
 		return id, nil
 	}
 
 	s.Status = domain.SubActive
 	s.StartedAt = startedAt
+
 	id, err := r.Create(ctx, s)
 	if err != nil {
 		return 0, err
 	}
+
 	return id, nil
 }
 
@@ -112,6 +120,7 @@ func (r *Subscriptions) ExpireActive(
 	signal string,
 ) (bool, error) {
 	now := rfc3339(time.Now())
+
 	res, err := r.db.ExecContext(ctx, `
 		UPDATE subscriptions
 		SET status = 'expired',
@@ -136,10 +145,12 @@ func (r *Subscriptions) ExpireActive(
 		return false, fmt.Errorf("expire active subscription for %d/%s: %w",
 			tgID, platform, err)
 	}
+
 	affected, err := res.RowsAffected()
 	if err != nil {
 		return false, fmt.Errorf("read expired subscription rows affected: %w", err)
 	}
+
 	return affected > 0, nil
 }
 
@@ -161,10 +172,12 @@ func (r *Subscriptions) GetActive(
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Subscription{}, false, nil
 	}
+
 	if err != nil {
 		return domain.Subscription{}, false,
 			fmt.Errorf("get active subscription for %d/%s: %w", tgID, platform, err)
 	}
+
 	return s, true, nil
 }
 
@@ -189,6 +202,7 @@ func (r *Subscriptions) listByUser(
 	if activeOnly {
 		whereStatus = " AND status = 'active'"
 	}
+
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, tg_id, platform, status, external_id, external_period_id,
 		       tier, started_at, expires_at, ended_at, last_signal,
@@ -200,19 +214,24 @@ func (r *Subscriptions) listByUser(
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions for %d: %w", tgID, err)
 	}
+
 	defer func() { _ = rows.Close() }()
 
 	var out []domain.Subscription
+
 	for rows.Next() {
 		s, err := scanSubscription(rows)
 		if err != nil {
 			return nil, err
 		}
+
 		out = append(out, s)
 	}
+
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate subscriptions for %d: %w", tgID, err)
 	}
+
 	return out, nil
 }
 
@@ -226,6 +245,7 @@ func scanSubscription(scanner subscriptionScanner) (domain.Subscription, error) 
 		platformStr, statusStr, startedAt              string
 		expiresAt, endedAt, lastEventAt, lastCheckedAt sql.NullString
 	)
+
 	err := scanner.Scan(&s.ID, &s.TGID, &platformStr, &statusStr, &s.ExternalID,
 		&s.PeriodID, &s.Tier, &startedAt, &expiresAt, &endedAt,
 		&s.LastSignal, &lastEventAt, &lastCheckedAt)
@@ -234,21 +254,27 @@ func scanSubscription(scanner subscriptionScanner) (domain.Subscription, error) 
 	}
 
 	s.Platform = domain.Platform(platformStr)
+
 	s.Status = domain.SubscriptionStatus(statusStr)
 	if s.StartedAt, err = parseTime(startedAt); err != nil {
 		return domain.Subscription{}, fmt.Errorf("parse subscription started_at: %w", err)
 	}
+
 	if s.ExpiresAt, err = parseNullTime(expiresAt); err != nil {
 		return domain.Subscription{}, fmt.Errorf("parse subscription expires_at: %w", err)
 	}
+
 	if s.EndedAt, err = parseNullTime(endedAt); err != nil {
 		return domain.Subscription{}, fmt.Errorf("parse subscription ended_at: %w", err)
 	}
+
 	if s.LastEventAt, err = parseNullTime(lastEventAt); err != nil {
 		return domain.Subscription{}, fmt.Errorf("parse subscription last_event_at: %w", err)
 	}
+
 	if s.LastCheckedAt, err = parseNullTime(lastCheckedAt); err != nil {
 		return domain.Subscription{}, fmt.Errorf("parse subscription last_checked_at: %w", err)
 	}
+
 	return s, nil
 }

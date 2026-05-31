@@ -25,6 +25,7 @@ func TestHandleEventActivatedIsIdempotentAndCancelsRevocation(t *testing.T) {
 	if err := repos.Users.Upsert(ctx, domain.User{TGID: 42}); err != nil {
 		t.Fatalf("upsert user: %v", err)
 	}
+
 	if err := store.NewRevocations(db).Upsert(ctx, domain.PendingRevocation{
 		TGID:        42,
 		Reason:      "expired",
@@ -40,14 +41,16 @@ func TestHandleEventActivatedIsIdempotentAndCancelsRevocation(t *testing.T) {
 		TGUsername: "alice",
 		OccurredAt: now,
 	}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		effects, err := e.HandleEvent(ctx, repos, event)
 		if err != nil {
 			t.Fatalf("HandleEvent #%d: %v", i+1, err)
 		}
+
 		if i == 0 && len(effects) != 1 {
 			t.Fatalf("effects on first activation = %+v, want access-kept dm", effects)
 		}
+
 		if i == 1 && len(effects) != 0 {
 			t.Fatalf("effects on repeated activation = %+v, want none", effects)
 		}
@@ -57,9 +60,11 @@ func TestHandleEventActivatedIsIdempotentAndCancelsRevocation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list active subscriptions: %v", err)
 	}
+
 	if len(subs) != 1 || subs[0].Platform != domain.PlatformBoosty {
 		t.Fatalf("active subscriptions = %+v, want one boosty row", subs)
 	}
+
 	if _, ok, err := repos.Revocations.Get(ctx, 42); err != nil || ok {
 		t.Fatalf("revocation = (_, %v, %v), want absent", ok, err)
 	}
@@ -81,10 +86,12 @@ func TestHandleEventDeactivatedAndCancelledAreIdempotent(t *testing.T) {
 	if _, err := e.HandleEvent(ctx, repos, activated); err != nil {
 		t.Fatalf("activate: %v", err)
 	}
+
 	deactivated := activated
 	deactivated.Kind = domain.EventDeactivated
+
 	deactivated.OccurredAt = now.Add(time.Hour)
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if _, err := e.HandleEvent(ctx, repos, deactivated); err != nil {
 			t.Fatalf("deactivate #%d: %v", i+1, err)
 		}
@@ -94,25 +101,31 @@ func TestHandleEventDeactivatedAndCancelledAreIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list active: %v", err)
 	}
+
 	if len(active) != 0 {
 		t.Fatalf("active subscriptions = %+v, want none", active)
 	}
+
 	history, err := store.NewSubscriptions(db).ListByUser(ctx, 77)
 	if err != nil {
 		t.Fatalf("list history: %v", err)
 	}
+
 	if len(history) != 1 || history[0].Status != domain.SubExpired {
 		t.Fatalf("history = %+v, want one expired row", history)
 	}
 
 	cancelled := activated
+
 	cancelled.Kind = domain.EventCancelledSubscription
 	if _, err := e.HandleEvent(ctx, repos, cancelled); err != nil {
 		t.Fatalf("cancelled: %v", err)
 	}
+
 	if active, err = repos.Subscriptions.ListActiveByUser(ctx, 77); err != nil {
 		t.Fatalf("list active after cancelled: %v", err)
 	}
+
 	if len(active) != 0 {
 		t.Fatalf("cancelled recreated active subscription: %+v", active)
 	}
@@ -128,6 +141,7 @@ func TestApplyObservationsKeepsActiveOnUnknownAndNoSignal(t *testing.T) {
 	if err := repos.Users.Upsert(ctx, domain.User{TGID: 88}); err != nil {
 		t.Fatalf("upsert user: %v", err)
 	}
+
 	if _, err := repos.Subscriptions.UpsertActive(ctx, domain.Subscription{
 		TGID:       88,
 		Platform:   domain.PlatformBoosty,
@@ -150,6 +164,7 @@ func TestApplyObservationsKeepsActiveOnUnknownAndNoSignal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetActive: %v", err)
 	}
+
 	if !ok || sub.Status != domain.SubActive {
 		t.Fatalf("subscription = (%+v, %v), want active preserved", sub, ok)
 	}
@@ -163,9 +178,11 @@ func TestPersistedDecisionIgnoresExpiredActiveRows(t *testing.T) {
 	repos := engineStore(db)
 
 	expires := now.Add(-time.Hour)
+
 	if err := repos.Users.Upsert(ctx, domain.User{TGID: 90}); err != nil {
 		t.Fatalf("upsert user: %v", err)
 	}
+
 	if _, err := repos.Subscriptions.UpsertActive(ctx, domain.Subscription{
 		TGID:       90,
 		Platform:   domain.PlatformBoosty,
@@ -180,9 +197,11 @@ func TestPersistedDecisionIgnoresExpiredActiveRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PersistedDecision: %v", err)
 	}
+
 	if decision.Status != domain.StatusInactive || decision.Allowed {
 		t.Fatalf("decision = %+v, want inactive denied", decision)
 	}
+
 	if len(decision.Reasons) != 1 ||
 		decision.Reasons[0].Verdict != domain.VerdictInactive {
 		t.Fatalf("reasons = %+v, want inactive expired reason", decision.Reasons)
@@ -241,10 +260,12 @@ func engineStore(db *sql.DB) Store {
 
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
+
 	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
+
 	t.Cleanup(func() { _ = db.Close() })
 
 	provider, err := goose.NewProvider(
@@ -252,17 +273,21 @@ func newTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("new goose provider: %v", err)
 	}
+
 	if _, err := provider.Up(context.Background()); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
+
 	return db
 }
 
 func migrationsDir(t *testing.T) string {
 	t.Helper()
+
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
+
 	return filepath.Join(filepath.Dir(file), "..", "..", "migrations")
 }

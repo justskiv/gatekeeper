@@ -113,6 +113,7 @@ func NewRouter(
 	if logger == nil {
 		logger = slog.Default()
 	}
+
 	r := &Router{
 		users:         deps.Users,
 		subscriptions: deps.Subscriptions,
@@ -129,6 +130,7 @@ func NewRouter(
 	for _, opt := range opts {
 		opt(r)
 	}
+
 	return r
 }
 
@@ -149,6 +151,7 @@ func (r *Router) Route(ctx context.Context, update *models.Update) (RouteResult,
 		if err != nil {
 			return RouteResult{}, err
 		}
+
 		return processed(effects), nil
 	case update.ChatMember != nil:
 		return r.routeChatMember(ctx, update.ChatMember)
@@ -178,8 +181,10 @@ func (r *Router) routeMessage(
 		if err != nil {
 			return RouteResult{}, err
 		}
+
 		return fromCommandResult(result), nil
 	}
+
 	return fromCommandResult(commands.HandleHere(msg)), nil
 }
 
@@ -191,13 +196,16 @@ func (r *Router) routeChatMember(
 	if !ok {
 		return ignored(), nil
 	}
+
 	if r.statusEngine == nil {
 		return processed(nil), nil
 	}
+
 	event, ok := normalizeSubscriptionEvent(update, platform)
 	if !ok {
 		return processed(nil), nil
 	}
+
 	effects, err := r.statusEngine.HandleEvent(ctx, engine.Store{
 		Users:         r.users,
 		Subscriptions: r.subscriptions,
@@ -208,6 +216,7 @@ func (r *Router) routeChatMember(
 	if err != nil {
 		return RouteResult{}, err
 	}
+
 	return processed(fromEngineEffects(effects)), nil
 }
 
@@ -232,19 +241,24 @@ func normalizeSubscriptionEvent(
 	if user == nil || user.IsBot {
 		return domain.SubscriptionEvent{}, false
 	}
+
 	oldInChat := source.MemberInChat(&update.OldChatMember)
+
 	newInChat := source.MemberInChat(&update.NewChatMember)
 	if oldInChat == newInChat {
 		return domain.SubscriptionEvent{}, false
 	}
+
 	kind := domain.EventDeactivated
 	if newInChat {
 		kind = domain.EventActivated
 	}
+
 	occurredAt := time.Now()
 	if update.Date > 0 {
 		occurredAt = time.Unix(int64(update.Date), 0)
 	}
+
 	return domain.SubscriptionEvent{
 		Platform:       platform,
 		Kind:           kind,
@@ -262,36 +276,43 @@ func chatMemberUser(member *models.ChatMember) *models.User {
 	if member == nil {
 		return nil
 	}
+
 	switch member.Type {
 	case models.ChatMemberTypeOwner:
 		if member.Owner == nil {
 			return nil
 		}
+
 		return member.Owner.User
 	case models.ChatMemberTypeAdministrator:
 		if member.Administrator == nil {
 			return nil
 		}
+
 		return &member.Administrator.User
 	case models.ChatMemberTypeMember:
 		if member.Member == nil {
 			return nil
 		}
+
 		return member.Member.User
 	case models.ChatMemberTypeRestricted:
 		if member.Restricted == nil {
 			return nil
 		}
+
 		return member.Restricted.User
 	case models.ChatMemberTypeLeft:
 		if member.Left == nil {
 			return nil
 		}
+
 		return member.Left.User
 	case models.ChatMemberTypeBanned:
 		if member.Banned == nil {
 			return nil
 		}
+
 		return member.Banned.User
 	default:
 		return nil
@@ -307,6 +328,7 @@ func fromEngineEffects(effects []engine.Effect) []OutboundMessage {
 			Text: effect.Text,
 		})
 	}
+
 	return out
 }
 
@@ -314,12 +336,14 @@ func fromCommandResult(result commandbot.Result) RouteResult {
 	if result.Ignored {
 		return ignored()
 	}
+
 	effects := make([]OutboundMessage, 0, len(result.Replies))
 	for _, reply := range result.Replies {
 		kind := OutboundChatMessage
 		if reply.DM {
 			kind = OutboundDM
 		}
+
 		effects = append(effects, OutboundMessage{
 			Kind:   kind,
 			ChatID: reply.ChatID,
@@ -327,6 +351,7 @@ func fromCommandResult(result commandbot.Result) RouteResult {
 			Text:   reply.Text,
 		})
 	}
+
 	return processed(effects)
 }
 

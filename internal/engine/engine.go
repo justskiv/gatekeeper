@@ -48,6 +48,7 @@ func New(sources []SubscriptionSource, opts ...Option) *Engine {
 	for _, opt := range opts {
 		opt(e)
 	}
+
 	return e
 }
 
@@ -62,10 +63,12 @@ func (e *Engine) ApplyObservations(
 	defer unlock()
 
 	now := e.now()
+
 	for _, verdict := range verdicts {
 		if verdict.Source == domain.PlatformManual {
 			continue
 		}
+
 		switch verdict.Verdict {
 		case domain.VerdictActive:
 			if _, err := repos.Subscriptions.UpsertActive(ctx, domain.Subscription{
@@ -88,6 +91,7 @@ func (e *Engine) ApplyObservations(
 		case domain.VerdictUnknown, domain.VerdictNoSignal:
 		}
 	}
+
 	return nil
 }
 
@@ -115,6 +119,7 @@ func (e *Engine) HandleEvent(
 	if now.IsZero() {
 		now = e.now()
 	}
+
 	tgID := event.TGUserID
 	switch event.Kind {
 	case domain.EventActivated:
@@ -132,6 +137,7 @@ func (e *Engine) HandleEvent(
 		}); err != nil {
 			return nil, err
 		}
+
 		if err := repos.Audit.Append(ctx, store.AuditEntry{
 			TGID:   &tgID,
 			Kind:   auditSubscriptionActivated,
@@ -147,6 +153,7 @@ func (e *Engine) HandleEvent(
 		if err != nil {
 			return nil, err
 		}
+
 		if ok {
 			if err := repos.Audit.Append(ctx, store.AuditEntry{
 				TGID:   &tgID,
@@ -176,6 +183,7 @@ func (e *Engine) HandleEvent(
 	if err != nil {
 		return nil, err
 	}
+
 	return effects, nil
 }
 
@@ -197,6 +205,7 @@ func (e *Engine) recomputeAccess(
 			if err := repos.Revocations.Delete(ctx, tgID); err != nil {
 				return nil, err
 			}
+
 			if err := repos.Audit.Append(ctx, store.AuditEntry{
 				TGID:   &tgID,
 				Kind:   auditRevocationCancelled,
@@ -205,6 +214,7 @@ func (e *Engine) recomputeAccess(
 			}); err != nil {
 				return nil, err
 			}
+
 			return []Effect{{TGID: tgID, Text: messages.AccessKept()}}, nil
 		}
 	case domain.StatusUnknown:
@@ -222,6 +232,7 @@ func (e *Engine) recomputeAccess(
 	case domain.StatusInactive:
 		// TODO: Phase 06 will enqueue durable revoke actions.
 	}
+
 	return nil, nil
 }
 

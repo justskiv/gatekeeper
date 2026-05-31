@@ -113,10 +113,12 @@ func TestMembershipVerdictMapsTelegramStatuses(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			source := NewMembership(domain.PlatformBoosty, -1001,
 				fakeMemberChecker{member: tt.member})
+
 			got, err := source.Verdict(context.Background(), 42)
 			if err != nil {
 				t.Fatalf("Verdict: %v", err)
 			}
+
 			if got.Verdict != tt.want {
 				t.Fatalf("verdict = %s, want %s", got.Verdict, tt.want)
 			}
@@ -127,10 +129,12 @@ func TestMembershipVerdictMapsTelegramStatuses(t *testing.T) {
 func TestMembershipVerdictReturnsUnknownOnCheckerError(t *testing.T) {
 	source := NewMembership(domain.PlatformBoosty, -1001,
 		fakeMemberChecker{err: errors.New("telegram unavailable")})
+
 	got, err := source.Verdict(context.Background(), 42)
 	if err != nil {
 		t.Fatalf("Verdict: %v", err)
 	}
+
 	if got.Verdict != domain.VerdictUnknown {
 		t.Fatalf("verdict = %s, want unknown", got.Verdict)
 	}
@@ -173,7 +177,7 @@ func TestTributeVerdictCombinesMembershipAndLedger(t *testing.T) {
 			name:   "inactive membership and expired ledger is inactive",
 			member: leftChatMember(),
 			ledger: fakeLedger{
-				sub: domain.Subscription{ExpiresAt: ptrTime(now.Add(-time.Hour))},
+				sub: domain.Subscription{ExpiresAt: new(now.Add(-time.Hour))},
 				ok:  true,
 			},
 			want: domain.VerdictInactive,
@@ -198,6 +202,7 @@ func TestTributeVerdictCombinesMembershipAndLedger(t *testing.T) {
 			if tt.member == nil {
 				checker.err = errors.New("telegram unavailable")
 			}
+
 			source := NewMembership(
 				domain.PlatformTribute,
 				-1002,
@@ -210,9 +215,11 @@ func TestTributeVerdictCombinesMembershipAndLedger(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Verdict: %v", err)
 			}
+
 			if got.Verdict != tt.want {
 				t.Fatalf("verdict = %s, want %s", got.Verdict, tt.want)
 			}
+
 			if tt.wantUntil != nil &&
 				(got.Until == nil || !got.Until.Equal(*tt.wantUntil)) {
 				t.Fatalf("until = %v, want %v", got.Until, *tt.wantUntil)
@@ -237,8 +244,4 @@ func leftChatMember() *models.ChatMember {
 			User: &models.User{ID: 42},
 		},
 	}
-}
-
-func ptrTime(t time.Time) *time.Time {
-	return &t
 }

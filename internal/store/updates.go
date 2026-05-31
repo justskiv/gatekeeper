@@ -55,13 +55,17 @@ func (r *TelegramUpdates) InsertBatch(
 		if err != nil {
 			return fmt.Errorf("begin telegram update batch: %w", err)
 		}
+
 		if err := insertBatch(ctx, tx, updates, nextOffset); err != nil {
 			_ = tx.Rollback()
+
 			return err
 		}
+
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit telegram update batch: %w", err)
 		}
+
 		return nil
 	}
 
@@ -77,6 +81,7 @@ func insertBatch(
 		if !upd.ReceivedAt.IsZero() {
 			receivedAt = rfc3339(upd.ReceivedAt)
 		}
+
 		_, err := q.ExecContext(ctx, `
 			INSERT OR IGNORE INTO telegram_updates (
 				update_id, update_type, chat_id, tg_id, payload_json,
@@ -88,9 +93,11 @@ func insertBatch(
 			return fmt.Errorf("insert telegram update %d: %w", upd.UpdateID, err)
 		}
 	}
+
 	if err := NewMeta(q).SetUpdateOffset(ctx, nextOffset); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -101,6 +108,7 @@ func (r *TelegramUpdates) ListPending(
 	if limit <= 0 {
 		limit = 100
 	}
+
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT update_id, update_type, chat_id, tg_id, payload_json,
 		       status, error, received_at, processed_at
@@ -111,9 +119,11 @@ func (r *TelegramUpdates) ListPending(
 	if err != nil {
 		return nil, fmt.Errorf("list pending telegram updates: %w", err)
 	}
+
 	defer func() { _ = rows.Close() }()
 
 	var out []TelegramUpdate
+
 	for rows.Next() {
 		var (
 			upd             TelegramUpdate
@@ -126,22 +136,28 @@ func (r *TelegramUpdates) ListPending(
 			&payload, &status, &upd.Error, &receivedAt, &processedAt); err != nil {
 			return nil, fmt.Errorf("scan pending telegram update: %w", err)
 		}
+
 		upd.ChatID = int64Ptr(chatID)
 		upd.TGID = int64Ptr(tgID)
 		upd.PayloadJSON = []byte(payload)
 		upd.Status = TelegramUpdateStatus(status)
+
 		var err error
 		if upd.ReceivedAt, err = parseTime(receivedAt); err != nil {
 			return nil, fmt.Errorf("parse telegram update received_at: %w", err)
 		}
+
 		if upd.ProcessedAt, err = parseNullTime(processedAt); err != nil {
 			return nil, fmt.Errorf("parse telegram update processed_at: %w", err)
 		}
+
 		out = append(out, upd)
 	}
+
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate pending telegram updates: %w", err)
 	}
+
 	return out, nil
 }
 
@@ -163,42 +179,50 @@ func (r *TelegramUpdates) MarkTerminal(
 	if err != nil {
 		return fmt.Errorf("mark telegram update %d %s: %w", updateID, status, err)
 	}
+
 	affected, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("read telegram update %d rows affected: %w", updateID, err)
 	}
+
 	if affected == 0 {
 		return ErrNotFound
 	}
+
 	return nil
 }
 
 // MaxUpdateID returns the largest update_id recorded in the inbox.
 func (r *TelegramUpdates) MaxUpdateID(ctx context.Context) (int64, bool, error) {
-	var max sql.NullInt64
+	var maxID sql.NullInt64
 	if err := r.db.QueryRowContext(ctx,
-		`SELECT max(update_id) FROM telegram_updates`).Scan(&max); err != nil {
+		`SELECT max(update_id) FROM telegram_updates`).Scan(&maxID); err != nil {
 		return 0, false, fmt.Errorf("read max telegram update id: %w", err)
 	}
-	if !max.Valid {
+
+	if !maxID.Valid {
 		return 0, false, nil
 	}
-	return max.Int64, true, nil
+
+	return maxID.Int64, true, nil
 }
 
 // ResolveOffset returns max(meta.update_offset, max(update_id)+1).
 func (r *TelegramUpdates) ResolveOffset(ctx context.Context, meta *Meta) (int64, error) {
 	var resolved int64
+
 	if offset, ok, err := meta.GetUpdateOffset(ctx); err != nil {
 		return 0, err
 	} else if ok {
 		resolved = offset
 	}
+
 	if maxID, ok, err := r.MaxUpdateID(ctx); err != nil {
 		return 0, err
 	} else if ok && maxID+1 > resolved {
 		resolved = maxID + 1
 	}
+
 	return resolved, nil
 }
 
@@ -206,6 +230,7 @@ func nullableUpdateInt64(v *int64) any {
 	if v == nil {
 		return nil
 	}
+
 	return *v
 }
 
@@ -213,6 +238,7 @@ func int64Ptr(v sql.NullInt64) *int64 {
 	if !v.Valid {
 		return nil
 	}
+
 	return &v.Int64
 }
 

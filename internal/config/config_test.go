@@ -1,5 +1,7 @@
 package config
 
+import "maps"
+
 import "testing"
 
 // baseEnv is a complete, valid environment. Every variable the loader
@@ -48,6 +50,7 @@ func baseEnv() map[string]string {
 func lookup(env map[string]string) func(string) (string, bool) {
 	return func(key string) (string, bool) {
 		v, ok := env[key]
+
 		return v, ok
 	}
 }
@@ -110,20 +113,21 @@ func TestLoad(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			env := baseEnv()
-			for k, v := range tt.mutate {
-				env[k] = v
-			}
+			maps.Copy(env, tt.mutate)
 
 			cfg, err := LoadFromLookup(lookup(env))
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got nil (cfg=%+v)", cfg)
 				}
+
 				return
 			}
+
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
+
 			if cfg.BotToken == "" {
 				t.Fatal("expected a populated config, got the zero value")
 			}
@@ -140,18 +144,23 @@ func TestLoadParsesValues(t *testing.T) {
 	if cfg.BotToken != "123456:ABC-DEF" {
 		t.Errorf("BotToken = %q", cfg.BotToken)
 	}
+
 	if len(cfg.OwnerTGIDs) != 2 || cfg.OwnerTGIDs[0] != 11111111 {
 		t.Errorf("OwnerTGIDs = %v", cfg.OwnerTGIDs)
 	}
+
 	if cfg.ClubChatID != -1003333333333 {
 		t.Errorf("ClubChatID = %d", cfg.ClubChatID)
 	}
+
 	if cfg.AdminLogChatID != nil {
 		t.Errorf("AdminLogChatID = %v, want nil when unset", cfg.AdminLogChatID)
 	}
+
 	if cfg.GracePeriod.Hours() != 72 {
 		t.Errorf("GracePeriod = %v", cfg.GracePeriod)
 	}
+
 	if cfg.Location == nil || cfg.Location.String() != "UTC" {
 		t.Errorf("Location = %v", cfg.Location)
 	}
@@ -165,6 +174,7 @@ func TestLoadParsesOptionalAdminLogChatID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+
 	if cfg.AdminLogChatID == nil || *cfg.AdminLogChatID != -1005555555555 {
 		t.Errorf("AdminLogChatID = %v, want -1005555555555", cfg.AdminLogChatID)
 	}
@@ -185,16 +195,20 @@ func TestLoadTrimsWhitespace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+
 	if cfg.BotToken != "123456:ABC-DEF" {
 		t.Errorf("BotToken = %q", cfg.BotToken)
 	}
+
 	if cfg.BoostySubscribeURL != "https://boosty.to/author" {
 		t.Errorf("BoostySubscribeURL = %q", cfg.BoostySubscribeURL)
 	}
+
 	if len(cfg.OwnerTGIDs) != 2 ||
 		cfg.OwnerTGIDs[0] != 11111111 || cfg.OwnerTGIDs[1] != 22222222 {
 		t.Errorf("OwnerTGIDs = %v", cfg.OwnerTGIDs)
 	}
+
 	if cfg.GracePeriod.Hours() != 72 {
 		t.Errorf("GracePeriod = %v", cfg.GracePeriod)
 	}

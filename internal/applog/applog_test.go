@@ -13,6 +13,7 @@ import (
 
 func TestConsoleHandlerFormatsHumanLine(t *testing.T) {
 	var buf bytes.Buffer
+
 	logger := newWithWriter(config.Config{
 		LogFormat: "text",
 		LogLevel:  "debug",
@@ -26,6 +27,7 @@ func TestConsoleHandlerFormatsHumanLine(t *testing.T) {
 	if !strings.Contains(got, "\x1b[32mINFO ") {
 		t.Fatalf("console log %q does not contain colored info level", got)
 	}
+
 	plain := stripANSI(got)
 	for _, want := range []string{"getMe ok", "bot_id=123", `username="test bot"`} {
 		if !strings.Contains(plain, want) {
@@ -36,6 +38,7 @@ func TestConsoleHandlerFormatsHumanLine(t *testing.T) {
 
 func TestJSONFormatStillEmitsJSON(t *testing.T) {
 	var buf bytes.Buffer
+
 	logger := newWithWriter(config.Config{
 		LogFormat: "json",
 		LogLevel:  "info",
@@ -47,6 +50,7 @@ func TestJSONFormatStillEmitsJSON(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &record); err != nil {
 		t.Fatalf("decode json log %q: %v", buf.String(), err)
 	}
+
 	if record["msg"] != "started" || record["mode"] != "polling" {
 		t.Fatalf("record = %#v, want msg and mode", record)
 	}

@@ -34,10 +34,12 @@ func Aggregate(
 			seenUnknown = true
 		case domain.VerdictInactive:
 			seenInactive = true
+		case domain.VerdictNoSignal:
 		}
 	}
 
 	var status domain.EffectiveStatus
+
 	switch {
 	case banned:
 		status = domain.StatusInactive
@@ -50,6 +52,7 @@ func Aggregate(
 	default:
 		status = domain.StatusInactive
 	}
+
 	if banned {
 		reasons = append(reasons, domain.AccessReason{
 			Source:  sourceBan,
@@ -81,10 +84,12 @@ func (e *Engine) LiveSnapshot(
 				Detail:  messages.ReasonSourceError(),
 			}
 		}
+
 		verdicts = append(verdicts, verdict)
 	}
 
 	banned := false
+
 	user, err := repos.Users.Get(ctx, tgID)
 	switch {
 	case err == nil:
@@ -97,6 +102,7 @@ func (e *Engine) LiveSnapshot(
 	status, decision := Aggregate(verdicts, banned)
 	decision.TGID = tgID
 	decision.Status = status
+
 	return Snapshot{TGID: tgID, Verdicts: verdicts, Decision: decision}, nil
 }
 
@@ -106,6 +112,7 @@ func (e *Engine) persistedDecision(
 	tgID int64,
 ) (domain.AccessDecision, error) {
 	banned := false
+
 	user, err := repos.Users.Get(ctx, tgID)
 	switch {
 	case err == nil:
@@ -116,10 +123,12 @@ func (e *Engine) persistedDecision(
 	}
 
 	verdicts := make([]domain.SourceVerdict, 0, 3)
+
 	whitelisted, err := repos.Whitelist.Has(ctx, tgID)
 	if err != nil {
 		return domain.AccessDecision{}, err
 	}
+
 	if whitelisted {
 		verdicts = append(verdicts, domain.SourceVerdict{
 			Source:  sourceWhitelist,
@@ -132,13 +141,16 @@ func (e *Engine) persistedDecision(
 	if err != nil {
 		return domain.AccessDecision{}, err
 	}
+
 	for _, sub := range subs {
 		verdict := domain.VerdictActive
 		detail := messages.ReasonLocalActiveSubscription()
+
 		if sub.ExpiresAt != nil && !e.now().Before(*sub.ExpiresAt) {
 			verdict = domain.VerdictInactive
 			detail = messages.ReasonLocalExpiredSubscription()
 		}
+
 		verdicts = append(verdicts, domain.SourceVerdict{
 			Source:  sub.Platform,
 			Verdict: verdict,
@@ -146,6 +158,7 @@ func (e *Engine) persistedDecision(
 			Until:   sub.ExpiresAt,
 		})
 	}
+
 	if len(verdicts) == 0 {
 		verdicts = append(verdicts, domain.SourceVerdict{
 			Source:  domain.PlatformManual,
@@ -156,6 +169,7 @@ func (e *Engine) persistedDecision(
 
 	_, decision := Aggregate(verdicts, banned)
 	decision.TGID = tgID
+
 	return decision, nil
 }
 

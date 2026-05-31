@@ -15,6 +15,7 @@ func TestNormalizeErrorCategories(t *testing.T) {
 		Message:    "too many requests",
 		RetryAfter: 12,
 	})
+
 	var apiErr *APIError
 	if !errors.As(rateErr, &apiErr) ||
 		apiErr.Category != ErrorCategoryRateLimited ||
@@ -58,6 +59,7 @@ func TestSendMessageClassifiesForbiddenByTarget(t *testing.T) {
 	}
 
 	groupErr := client.SendMessage(context.Background(), -1001, "hello")
+
 	var apiErr *APIError
 	if !errors.As(groupErr, &apiErr) ||
 		apiErr.Category != ErrorCategoryForbidden {

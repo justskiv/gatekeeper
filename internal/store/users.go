@@ -26,11 +26,14 @@ func NewUsers(db DBTX) *Users {
 // created_at is preserved; updated_at and last_seen_at are set to now.
 func (r *Users) Upsert(ctx context.Context, u domain.User) error {
 	now := rfc3339(time.Now())
+
 	dmState := u.DMState
 	if dmState == "" {
 		dmState = domain.DMUnknown
 	}
+
 	dmStateUpdate := string(u.DMState)
+
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO users (
 			tg_id, username, first_name, last_name, language_code,
@@ -52,6 +55,7 @@ func (r *Users) Upsert(ctx context.Context, u domain.User) error {
 	if err != nil {
 		return fmt.Errorf("upsert user %d: %w", u.TGID, err)
 	}
+
 	return nil
 }
 
@@ -67,9 +71,11 @@ func (r *Users) Get(ctx context.Context, tgID int64) (domain.User, error) {
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.User{}, ErrNotFound
 	}
+
 	if err != nil {
 		return domain.User{}, fmt.Errorf("get user %d: %w", tgID, err)
 	}
+
 	return u, nil
 }
 
@@ -81,6 +87,7 @@ func (r *Users) FindByUsername(
 	if username == "" {
 		return domain.User{}, false, nil
 	}
+
 	row := r.db.QueryRowContext(ctx, `
 		SELECT tg_id, username, first_name, last_name, language_code,
 			is_bot, dm_state, banned, banned_reason, notes,
@@ -91,10 +98,12 @@ func (r *Users) FindByUsername(
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.User{}, false, nil
 	}
+
 	if err != nil {
 		return domain.User{}, false,
 			fmt.Errorf("find user by username %q: %w", username, err)
 	}
+
 	return user, true, nil
 }
 
@@ -104,6 +113,7 @@ func (r *Users) SetDMState(
 	ctx context.Context, tgID int64, state domain.DMState,
 ) error {
 	now := rfc3339(time.Now())
+
 	res, err := r.db.ExecContext(ctx, `
 		UPDATE users
 		SET dm_state = ?,
@@ -114,13 +124,16 @@ func (r *Users) SetDMState(
 	if err != nil {
 		return fmt.Errorf("set user %d dm_state: %w", tgID, err)
 	}
+
 	affected, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("read user %d dm_state rows affected: %w", tgID, err)
 	}
+
 	if affected == 0 {
 		return ErrNotFound
 	}
+
 	return nil
 }
 
@@ -134,6 +147,7 @@ func scanUser(scanner userScanner) (domain.User, error) {
 		dmState                        string
 		createdAt, updatedAt, lastSeen string
 	)
+
 	err := scanner.Scan(&u.TGID, &u.Username, &u.FirstName, &u.LastName,
 		&u.LanguageCode, &u.IsBot, &dmState, &u.Banned, &u.BannedReason,
 		&u.Notes, &createdAt, &updatedAt, &lastSeen)
@@ -145,11 +159,14 @@ func scanUser(scanner userScanner) (domain.User, error) {
 	if u.CreatedAt, err = parseTime(createdAt); err != nil {
 		return domain.User{}, fmt.Errorf("parse user %d created_at: %w", u.TGID, err)
 	}
+
 	if u.UpdatedAt, err = parseTime(updatedAt); err != nil {
 		return domain.User{}, fmt.Errorf("parse user %d updated_at: %w", u.TGID, err)
 	}
+
 	if u.LastSeenAt, err = parseTime(lastSeen); err != nil {
 		return domain.User{}, fmt.Errorf("parse user %d last_seen_at: %w", u.TGID, err)
 	}
+
 	return u, nil
 }

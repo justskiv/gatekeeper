@@ -25,10 +25,12 @@ func NewGrants(db DBTX) *Grants {
 // pair. created_at is preserved on update; updated_at is set to now.
 func (r *Grants) Upsert(ctx context.Context, g domain.AccessGrant) error {
 	now := rfc3339(time.Now())
+
 	admittedBy := g.AdmittedBy
 	if admittedBy == "" {
 		admittedBy = "bot"
 	}
+
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO access_grants (
 			tg_id, resource, state, admitted_by, joined_at, revoked_at,
@@ -47,6 +49,7 @@ func (r *Grants) Upsert(ctx context.Context, g domain.AccessGrant) error {
 	if err != nil {
 		return fmt.Errorf("upsert grant %d/%s: %w", g.TGID, g.Resource, err)
 	}
+
 	return nil
 }
 
@@ -65,10 +68,12 @@ func (r *Grants) Get(
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.AccessGrant{}, ErrNotFound
 	}
+
 	if err != nil {
 		return domain.AccessGrant{}, fmt.Errorf(
 			"get grant %d/%s: %w", tgID, resource, err)
 	}
+
 	return g, nil
 }
 
@@ -88,16 +93,20 @@ func (r *Grants) ListByUser(
 	defer func() { _ = rows.Close() }()
 
 	var out []domain.AccessGrant
+
 	for rows.Next() {
 		g, err := scanGrant(rows)
 		if err != nil {
 			return nil, err
 		}
+
 		out = append(out, g)
 	}
+
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate grants for %d: %w", tgID, err)
 	}
+
 	return out, nil
 }
 
@@ -111,6 +120,7 @@ func scanGrant(scanner grantScanner) (domain.AccessGrant, error) {
 		resourceStr, stateStr string
 		joinedAt, revokedAt   sql.NullString
 	)
+
 	err := scanner.Scan(&g.ID, &g.TGID, &resourceStr, &stateStr, &g.AdmittedBy,
 		&joinedAt, &revokedAt, &g.RevokedReason)
 	if err != nil {
@@ -118,12 +128,15 @@ func scanGrant(scanner grantScanner) (domain.AccessGrant, error) {
 	}
 
 	g.Resource = domain.Resource(resourceStr)
+
 	g.State = domain.GrantState(stateStr)
 	if g.JoinedAt, err = parseNullTime(joinedAt); err != nil {
 		return domain.AccessGrant{}, fmt.Errorf("parse grant joined_at: %w", err)
 	}
+
 	if g.RevokedAt, err = parseNullTime(revokedAt); err != nil {
 		return domain.AccessGrant{}, fmt.Errorf("parse grant revoked_at: %w", err)
 	}
+
 	return g, nil
 }

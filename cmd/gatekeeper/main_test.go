@@ -14,6 +14,7 @@ func TestRunFailsFastForTelegramWebhookMode(t *testing.T) {
 	env := validEnv(dbPath)
 	env["TELEGRAM_MODE"] = "webhook"
 	env["TELEGRAM_WEBHOOK_PUBLIC_URL"] = "https://bot.example.com"
+
 	env["TELEGRAM_WEBHOOK_SECRET"] = "secret"
 	for key, value := range env {
 		t.Setenv(key, value)
@@ -23,9 +24,11 @@ func TestRunFailsFastForTelegramWebhookMode(t *testing.T) {
 	if err == nil {
 		t.Fatal("run returned nil, want webhook not implemented error")
 	}
+
 	if !strings.Contains(err.Error(), "telegram webhook mode is not implemented") {
 		t.Fatalf("run error = %v, want webhook not implemented", err)
 	}
+
 	if _, statErr := os.Stat(dbPath); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("webhook mode touched db path: %v", statErr)
 	}

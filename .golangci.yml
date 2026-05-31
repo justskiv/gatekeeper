@@ -1,0 +1,117 @@
+version: "2"
+
+run:
+  go: "1.26"
+  tests: true
+  timeout: 5m
+
+linters:
+  default: all
+  disable:
+    - err113      # separate error taxonomy pass; too noisy for this setup step
+    - exhaustruct # requires all fields, impractical with external types
+    - funcorder   # method grouping follows call flow in this codebase
+    - gochecknoglobals # package-level sentinel/default values are used deliberately
+    - goconst     # pushes test literals and env keys into low-value constants
+    - godox       # roadmap TODOs are tracked separately
+    - gomodguard  # deprecated, replaced by gomodguard_v2
+    - gosmopolitan # local time formatting is intentional in user messages
+    - iface       # identical tiny interfaces are clearer at their local boundary
+    - mnd         # defaults, permissions, and small protocol values stay explicit
+    - modernize   # Go 1.26 rewrites need a separate review pass
+    - nestif      # readability refactors should not block tooling adoption
+    - nilerr      # value-level unknown/no-signal results intentionally swallow errors
+    - nilnil      # optional SQL values use nil, nil for absent values
+    - noinlineerr # forbids idiomatic `if err := ...; err != nil`
+    - paralleltest # parallelizing DB-heavy tests needs a dedicated pass
+    - tagliatelle # Telegram API uses snake_case JSON fields
+    - testpackage # current tests intentionally exercise unexported helpers
+    - varnamelen  # conflicts with short idiomatic Go names
+    - wrapcheck   # error-boundary policy needs a separate architecture pass
+    - wsl         # deprecated, replaced by wsl_v5
+  settings:
+    cyclop:
+      max-complexity: 20
+    depguard:
+      rules:
+        commands:
+          list-mode: strict
+          files:
+            - "**/cmd/**/*.go"
+          allow:
+            - $gostd
+            - github.com/justskiv/gatekeeper/internal
+            - github.com/pressly/goose/v3
+            - golang.org/x/sync/errgroup
+        domain:
+          list-mode: strict
+          files:
+            - "**/internal/domain/**/*.go"
+          allow:
+            - $gostd
+        internal:
+          list-mode: strict
+          files:
+            - "**/internal/**/*.go"
+            - "!**/internal/domain/**/*.go"
+          allow:
+            - $gostd
+            - github.com/go-telegram/bot
+            - github.com/joho/godotenv
+            - github.com/justskiv/gatekeeper/internal
+            - modernc.org/sqlite
+    exhaustive:
+      default-signifies-exhaustive: true
+    funlen:
+      lines: 120
+      statements: 60
+    gocognit:
+      min-complexity: 40
+    gocyclo:
+      min-complexity: 20
+    lll:
+      line-length: 100
+    revive:
+      rules:
+        - name: exported
+        - name: var-naming
+        - name: error-strings
+        - name: unused-parameter
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - depguard
+          - funlen
+          - cyclop
+          - gocyclo
+          - gocognit
+          - gosec
+          - revive
+        path: _test\.go
+      - linters:
+          - gocritic
+        path: cmd/.*main\.go
+        text: exitAfterDefer
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+
+formatters:
+  enable:
+    - gofmt
+  settings:
+    gofmt:
+      simplify: true
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

@@ -34,6 +34,7 @@ func (r *Revocations) Upsert(ctx context.Context, p domain.PendingRevocation) er
 	if err != nil {
 		return fmt.Errorf("upsert revocation %d: %w", p.TGID, err)
 	}
+
 	return nil
 }
 
@@ -50,22 +51,27 @@ func (r *Revocations) Get(
 		p                      domain.PendingRevocation
 		scheduledAt, createdAt string
 	)
+
 	err := row.Scan(&p.TGID, &p.Reason, &scheduledAt, &p.Notified, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.PendingRevocation{}, false, nil
 	}
+
 	if err != nil {
 		return domain.PendingRevocation{}, false,
 			fmt.Errorf("get revocation %d: %w", tgID, err)
 	}
+
 	if p.ScheduledAt, err = parseTime(scheduledAt); err != nil {
 		return domain.PendingRevocation{}, false,
 			fmt.Errorf("parse revocation scheduled_at: %w", err)
 	}
+
 	if p.CreatedAt, err = parseTime(createdAt); err != nil {
 		return domain.PendingRevocation{}, false,
 			fmt.Errorf("parse revocation created_at: %w", err)
 	}
+
 	return p, true, nil
 }
 
@@ -75,5 +81,6 @@ func (r *Revocations) Delete(ctx context.Context, tgID int64) error {
 		`DELETE FROM pending_revocations WHERE tg_id = ?`, tgID); err != nil {
 		return fmt.Errorf("delete revocation %d: %w", tgID, err)
 	}
+
 	return nil
 }

@@ -52,6 +52,7 @@ func TestCheckStartupHealthRecordsHealthyChat(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create stale alert: %v", err)
 	}
+
 	if err := CheckStartupHealth(
 		context.Background(), db, client, nil,
 		[]HealthChat{chat}, nil, 123, slog.Default(),
@@ -63,9 +64,11 @@ func TestCheckStartupHealthRecordsHealthyChat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get health: %v", err)
 	}
+
 	if !ok || value != "ok" {
 		t.Fatalf("health = (%q, %v), want ok", value, ok)
 	}
+
 	var openAlerts int
 	if err := db.QueryRowContext(context.Background(), `
 		SELECT count(*)
@@ -74,6 +77,7 @@ func TestCheckStartupHealthRecordsHealthyChat(t *testing.T) {
 	).Scan(&openAlerts); err != nil {
 		t.Fatalf("count open alerts: %v", err)
 	}
+
 	if openAlerts != 0 {
 		t.Fatalf("open alerts = %d, want 0", openAlerts)
 	}
@@ -106,7 +110,7 @@ func TestCheckStartupHealthDegradesMissingRights(t *testing.T) {
 		Resource: string(domain.ResourceChat),
 		Severity: "critical",
 	}
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if err := CheckStartupHealth(
 			context.Background(), db, client, nil,
 			[]HealthChat{chat}, nil, 123, slog.Default(),
@@ -119,15 +123,18 @@ func TestCheckStartupHealthDegradesMissingRights(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get health: %v", err)
 	}
+
 	if value != "fail:not_admin" {
 		t.Fatalf("health = %q, want fail:not_admin", value)
 	}
+
 	var alerts int
 	if err := db.QueryRowContext(context.Background(),
 		`SELECT count(*) FROM admin_alerts WHERE severity = 'critical'`,
 	).Scan(&alerts); err != nil {
 		t.Fatalf("count alerts: %v", err)
 	}
+
 	if alerts != 1 {
 		t.Fatalf("alerts = %d, want 1", alerts)
 	}
@@ -139,6 +146,7 @@ func TestCheckStartupHealthRejectsWrongChatType(t *testing.T) {
 		if methodName(r.URL.Path) != "getChat" {
 			t.Fatalf("unexpected method %s", methodName(r.URL.Path))
 		}
+
 		writeTelegramResult(w, map[string]any{
 			"id": -1003, "type": "supergroup", "title": "not a channel",
 		})
@@ -162,6 +170,7 @@ func TestCheckStartupHealthRejectsWrongChatType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get health: %v", err)
 	}
+
 	if value != "fail:wrong_type" {
 		t.Fatalf("health = %q, want fail:wrong_type", value)
 	}
@@ -172,6 +181,7 @@ func TestGetMeUnauthorizedIsFatalSignal(t *testing.T) {
 		if methodName(r.URL.Path) != "getMe" {
 			t.Fatalf("unexpected method %s", methodName(r.URL.Path))
 		}
+
 		writeTelegramError(w, http.StatusUnauthorized, "Unauthorized")
 	})
 
@@ -204,6 +214,7 @@ func TestMyChatMemberPrivateUpdatesDMStateAndEnsuresUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}
+
 	if user.DMState != domain.DMBlocked {
 		t.Fatalf("dm_state = %s, want blocked", user.DMState)
 	}
@@ -212,6 +223,7 @@ func TestMyChatMemberPrivateUpdatesDMStateAndEnsuresUser(t *testing.T) {
 func TestMyChatMemberPrivatePreservesAdminOwnedUserFields(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
+
 	users := store.NewUsers(db)
 	if err := users.Upsert(ctx, domain.User{
 		TGID:         77,
@@ -244,6 +256,7 @@ func TestMyChatMemberPrivatePreservesAdminOwnedUserFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}
+
 	if user.DMState != domain.DMBlocked ||
 		!user.Banned ||
 		user.BannedReason != "manual" ||
@@ -284,6 +297,7 @@ func TestMyChatMemberKnownChatUpdatesHealthAndAlerts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleMyChatMember: %v", err)
 	}
+
 	if len(effects) != 1 || effects[0].Kind != OutboundDM {
 		t.Fatalf("effects = %+v, want one owner dm", effects)
 	}
@@ -292,15 +306,18 @@ func TestMyChatMemberKnownChatUpdatesHealthAndAlerts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get health: %v", err)
 	}
+
 	if value != "fail:not_admin" {
 		t.Fatalf("health = %q, want fail:not_admin", value)
 	}
+
 	var alerts int
 	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM admin_alerts WHERE kind = 'bot_rights_lost'`,
 	).Scan(&alerts); err != nil {
 		t.Fatalf("count alerts: %v", err)
 	}
+
 	if alerts != 1 {
 		t.Fatalf("alerts = %d, want 1", alerts)
 	}
@@ -308,6 +325,7 @@ func TestMyChatMemberKnownChatUpdatesHealthAndAlerts(t *testing.T) {
 
 func TestMyChatMemberUnknownChatReturnsDiscoveryDM(t *testing.T) {
 	db := newTestDB(t)
+
 	effects, err := handleMyChatMember(context.Background(), healthRepos{
 		users:  store.NewUsers(db),
 		meta:   store.NewMeta(db),
@@ -327,6 +345,7 @@ func TestMyChatMemberUnknownChatReturnsDiscoveryDM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleMyChatMember: %v", err)
 	}
+
 	if len(effects) != 1 || effects[0].TGID != 1 || effects[0].Text == "" {
 		t.Fatalf("effects = %+v, want owner discovery dm", effects)
 	}
@@ -334,6 +353,7 @@ func TestMyChatMemberUnknownChatReturnsDiscoveryDM(t *testing.T) {
 
 func TestMyChatMemberUnknownChatIgnoresRemoval(t *testing.T) {
 	db := newTestDB(t)
+
 	effects, err := handleMyChatMember(context.Background(), healthRepos{
 		users:  store.NewUsers(db),
 		meta:   store.NewMeta(db),
@@ -353,6 +373,7 @@ func TestMyChatMemberUnknownChatIgnoresRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleMyChatMember: %v", err)
 	}
+
 	if len(effects) != 0 {
 		t.Fatalf("effects = %+v, want none", effects)
 	}
@@ -362,18 +383,22 @@ func newBotAPITestClient(
 	t *testing.T, handler http.HandlerFunc,
 ) *Client {
 	t.Helper()
+
 	httpClient := &http.Client{Transport: roundTripFunc(
 		func(req *http.Request) (*http.Response, error) {
 			recorder := httptest.NewRecorder()
 			handler.ServeHTTP(recorder, req)
+
 			return recorder.Result(), nil
 		})}
+
 	client, err := NewClient("123:ABC",
 		WithServerURL("http://telegram.test"),
 		WithHTTPClient(httpClient))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
+
 	return client
 }
 
@@ -389,23 +414,30 @@ func methodName(path string) string {
 			return path[i+1:]
 		}
 	}
+
 	return path
 }
 
 func writeTelegramResult(w http.ResponseWriter, result any) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+
+	if err := json.NewEncoder(w).Encode(map[string]any{
 		"ok":     true,
 		"result": result,
-	})
+	}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func writeTelegramError(w http.ResponseWriter, code int, description string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+
+	if err := json.NewEncoder(w).Encode(map[string]any{
 		"ok":          false,
 		"error_code":  code,
 		"description": description,
-	})
+	}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }

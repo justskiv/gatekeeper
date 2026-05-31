@@ -51,6 +51,7 @@ func NewManual(
 	for _, opt := range opts {
 		opt(m)
 	}
+
 	return m
 }
 
@@ -71,6 +72,7 @@ func (m *Manual) Verdict(
 			Detail:  messages.ReasonWhitelistReadFailed(),
 		}, nil
 	}
+
 	if whitelisted {
 		return domain.SourceVerdict{
 			Source:  domain.PlatformManual,
@@ -87,6 +89,7 @@ func (m *Manual) Verdict(
 			Detail:  messages.ReasonManualSubscriptionReadFailed(),
 		}, nil
 	}
+
 	if ok && (sub.ExpiresAt == nil || m.now().Before(*sub.ExpiresAt)) {
 		return domain.SourceVerdict{
 			Source:  domain.PlatformManual,
@@ -95,6 +98,7 @@ func (m *Manual) Verdict(
 			Until:   sub.ExpiresAt,
 		}, nil
 	}
+
 	return domain.SourceVerdict{
 		Source:  domain.PlatformManual,
 		Verdict: domain.VerdictNoSignal,
