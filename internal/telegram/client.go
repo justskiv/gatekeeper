@@ -160,6 +160,108 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) err
 	return nil
 }
 
+// CreateChatInviteLink creates a managed invite link.
+func (c *Client) CreateChatInviteLink(
+	ctx context.Context,
+	params CreateChatInviteLinkParams,
+) (*models.ChatInviteLink, error) {
+	var expireDate int
+	if params.ExpireAt != nil {
+		expireDate = int(params.ExpireAt.Unix())
+	}
+
+	wire := createChatInviteLinkRequest{
+		ChatID:             params.ChatID,
+		Name:               params.Name,
+		ExpireDate:         expireDate,
+		MemberLimit:        params.MemberLimit,
+		CreatesJoinRequest: params.CreatesJoinRequest,
+	}
+
+	var link models.ChatInviteLink
+	if err := c.rawRequest(ctx, "createChatInviteLink", wire, &link); err != nil {
+		return nil, NormalizeError("createChatInviteLink", err)
+	}
+
+	return &link, nil
+}
+
+// RevokeChatInviteLink revokes one managed invite link.
+func (c *Client) RevokeChatInviteLink(
+	ctx context.Context,
+	chatID int64,
+	inviteLink string,
+) (*models.ChatInviteLink, error) {
+	var link models.ChatInviteLink
+	if err := c.rawRequest(ctx, "revokeChatInviteLink", map[string]any{
+		"chat_id":     chatID,
+		"invite_link": inviteLink,
+	}, &link); err != nil {
+		return nil, NormalizeError("revokeChatInviteLink", err)
+	}
+
+	return &link, nil
+}
+
+// ApproveChatJoinRequest approves one pending join request.
+func (c *Client) ApproveChatJoinRequest(
+	ctx context.Context,
+	chatID, userID int64,
+) error {
+	if err := c.rawRequest(ctx, "approveChatJoinRequest", map[string]any{
+		"chat_id": chatID,
+		"user_id": userID,
+	}, nil); err != nil {
+		return NormalizeError("approveChatJoinRequest", err)
+	}
+
+	return nil
+}
+
+// DeclineChatJoinRequest declines one pending join request.
+func (c *Client) DeclineChatJoinRequest(
+	ctx context.Context,
+	chatID, userID int64,
+) error {
+	if err := c.rawRequest(ctx, "declineChatJoinRequest", map[string]any{
+		"chat_id": chatID,
+		"user_id": userID,
+	}, nil); err != nil {
+		return NormalizeError("declineChatJoinRequest", err)
+	}
+
+	return nil
+}
+
+// BanChatMember bans one user from a chat or channel.
+func (c *Client) BanChatMember(ctx context.Context, chatID, userID int64) error {
+	if err := c.rawRequest(ctx, "banChatMember", map[string]any{
+		"chat_id": chatID,
+		"user_id": userID,
+	}, nil); err != nil {
+		return NormalizeError("banChatMember", err)
+	}
+
+	return nil
+}
+
+// UnbanChatMember unbans one user from a chat or channel.
+func (c *Client) UnbanChatMember(
+	ctx context.Context,
+	chatID, userID int64,
+	onlyIfBanned bool,
+) error {
+	if err := c.rawRequest(ctx, "unbanChatMember", map[string]any{
+		"chat_id":        chatID,
+		"user_id":        userID,
+		"only_if_banned": onlyIfBanned,
+	}, nil); err != nil {
+		return NormalizeError("unbanChatMember", err)
+	}
+
+	return nil
+}
+
 // SetMyCommands registers user commands globally and owner commands in
 // each owner private chat scope.
 func (c *Client) SetMyCommands(ctx context.Context, ownerIDs []int64) error {
@@ -245,6 +347,23 @@ type GetUpdatesParams struct {
 	Limit          int      `json:"limit,omitempty"`
 	Timeout        int      `json:"timeout,omitempty"`
 	AllowedUpdates []string `json:"allowed_updates,omitempty"`
+}
+
+// CreateChatInviteLinkParams is the Bot API surface needed by invite service.
+type CreateChatInviteLinkParams struct {
+	ChatID             int64
+	Name               string
+	ExpireAt           *time.Time
+	MemberLimit        int
+	CreatesJoinRequest bool
+}
+
+type createChatInviteLinkRequest struct {
+	ChatID             int64  `json:"chat_id"`
+	Name               string `json:"name,omitempty"`
+	ExpireDate         int    `json:"expire_date,omitempty"`
+	MemberLimit        int    `json:"member_limit,omitempty"`
+	CreatesJoinRequest bool   `json:"creates_join_request"`
 }
 
 type apiResponse struct {
@@ -404,15 +523,6 @@ func NormalizeError(method string, err error) error {
 	return &APIError{Method: method, Category: category, Err: err}
 }
 
-// NormalizeActionError treats expected action no-ops as success.
-func NormalizeActionError(action string, err error) error {
-	if err == nil || isExpectedNoop(action, err) {
-		return nil
-	}
-
-	return NormalizeError(action, err)
-}
-
 // IsRateLimited reports whether err is a normalized 429.
 func IsRateLimited(err error) bool {
 	var apiErr *APIError
@@ -437,6 +547,26 @@ func IsPermanentRights(err error) bool {
 		apiErr.Category == ErrorCategoryPermanentRights
 }
 
+// IsForbidden reports whether err is a normalized Telegram 403.
+func IsForbidden(err error) bool {
+	var apiErr *APIError
+
+	return errors.As(err, &apiErr) &&
+		apiErr.Category == ErrorCategoryForbidden
+}
+
+// RetryAfter returns Telegram retry_after when err is a normalized 429.
+func RetryAfter(err error) (time.Duration, bool) {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) ||
+		apiErr.Category != ErrorCategoryRateLimited ||
+		apiErr.RetryAfter <= 0 {
+		return 0, false
+	}
+
+	return time.Duration(apiErr.RetryAfter) * time.Second, true
+}
+
 func isPermanentRightsText(err error) bool {
 	msg := strings.ToLower(err.Error())
 
@@ -456,11 +586,16 @@ func isPermanentRightsText(err error) bool {
 	return false
 }
 
-func isExpectedNoop(action string, err error) bool {
+// IsExpectedNoop reports whether a Bot API error means the action is
+// already satisfied or no longer meaningful.
+func IsExpectedNoop(action string, err error) bool {
 	action = strings.ToLower(action)
 	switch action {
-	case "ban_chat_member", "unban_chat_member",
-		"approve_chat_join_request", "decline_chat_join_request":
+	case "ban_chat_member", "banchatmember", "soft_kick",
+		"unban_chat_member", "unbanchatmember", "unban",
+		"approve_chat_join_request", "approvechatjoinrequest", "approve_join",
+		"decline_chat_join_request", "declinechatjoinrequest", "decline_join",
+		"revoke_chat_invite_link", "revokechatinvitelink", "revoke_invite":
 	default:
 		return false
 	}
@@ -471,9 +606,14 @@ func isExpectedNoop(action string, err error) bool {
 		"user_not_participant",
 		"user not found",
 		"user is not a member",
-		"already",
+		"user is already",
+		"already a member",
+		"already banned",
+		"already unbanned",
+		"invite link is already revoked",
 		"request not found",
 		"invite request not found",
+		"invite link not found",
 	}
 	for _, pattern := range patterns {
 		if strings.Contains(msg, pattern) {

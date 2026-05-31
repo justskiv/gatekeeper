@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	commandbot "github.com/justskiv/gatekeeper/internal/bot"
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/engine"
+	"github.com/justskiv/gatekeeper/internal/notify"
 	"github.com/justskiv/gatekeeper/internal/source"
 	"github.com/justskiv/gatekeeper/internal/store"
 )
@@ -46,6 +48,8 @@ type Router struct {
 	alerts        *store.Alerts
 	whitelist     *store.Whitelist
 	revocations   *store.Revocations
+	outbox        *store.Outbox
+	updateID      int64
 	statusEngine  *engine.Engine
 	sourceChats   SourceChats
 	preflight     RoutePreflight
@@ -64,6 +68,8 @@ type RouterDeps struct {
 	Alerts        *store.Alerts
 	Whitelist     *store.Whitelist
 	Revocations   *store.Revocations
+	Outbox        *store.Outbox
+	UpdateID      int64
 }
 
 // SourceChats identifies configured subscription source chats.
@@ -123,6 +129,8 @@ func NewRouter(
 		alerts:        deps.Alerts,
 		whitelist:     deps.Whitelist,
 		revocations:   deps.Revocations,
+		outbox:        deps.Outbox,
+		updateID:      deps.UpdateID,
 		chats:         chats,
 		ownerIDs:      ownerIDs,
 		logger:        logger,
@@ -152,7 +160,7 @@ func (r *Router) Route(ctx context.Context, update *models.Update) (RouteResult,
 			return RouteResult{}, err
 		}
 
-		return processed(effects), nil
+		return r.processedEffects(ctx, effects)
 	case update.ChatMember != nil:
 		return r.routeChatMember(ctx, update.ChatMember)
 	case update.ChatJoinRequest != nil:
@@ -182,10 +190,10 @@ func (r *Router) routeMessage(
 			return RouteResult{}, err
 		}
 
-		return fromCommandResult(result), nil
+		return r.fromCommandResult(ctx, result)
 	}
 
-	return fromCommandResult(commands.HandleHere(msg)), nil
+	return r.fromCommandResult(ctx, commands.HandleHere(msg))
 }
 
 func (r *Router) routeChatMember(
@@ -217,7 +225,7 @@ func (r *Router) routeChatMember(
 		return RouteResult{}, err
 	}
 
-	return processed(fromEngineEffects(effects)), nil
+	return r.processedEffects(ctx, fromEngineEffects(effects))
 }
 
 func (r *Router) sourcePlatform(chatID int64) (domain.Platform, bool) {
@@ -332,9 +340,12 @@ func fromEngineEffects(effects []engine.Effect) []OutboundMessage {
 	return out
 }
 
-func fromCommandResult(result commandbot.Result) RouteResult {
+func (r *Router) fromCommandResult(
+	ctx context.Context,
+	result commandbot.Result,
+) (RouteResult, error) {
 	if result.Ignored {
-		return ignored()
+		return ignored(), nil
 	}
 
 	effects := make([]OutboundMessage, 0, len(result.Replies))
@@ -352,7 +363,48 @@ func fromCommandResult(result commandbot.Result) RouteResult {
 		})
 	}
 
-	return processed(effects)
+	return r.processedEffects(ctx, effects)
+}
+
+func (r *Router) processedEffects(
+	ctx context.Context,
+	effects []OutboundMessage,
+) (RouteResult, error) {
+	direct, err := r.durableDMEffects(ctx, effects)
+	if err != nil {
+		return RouteResult{}, err
+	}
+
+	return processed(direct), nil
+}
+
+func (r *Router) durableDMEffects(
+	ctx context.Context,
+	effects []OutboundMessage,
+) ([]OutboundMessage, error) {
+	if r.outbox == nil {
+		return effects, nil
+	}
+
+	notifier := notify.NewDurable(r.users, r.outbox, r.logger)
+	direct := make([]OutboundMessage, 0, len(effects))
+
+	for i, effect := range effects {
+		if effect.Kind != OutboundDM {
+			direct = append(direct, effect)
+
+			continue
+		}
+
+		marker := fmt.Sprintf("telegram_update:%d:%d", r.updateID, i)
+		if err := notifier.SendDurableDM(
+			ctx, effect.TGID, effect.Text, marker,
+		); err != nil {
+			return nil, err
+		}
+	}
+
+	return direct, nil
 }
 
 func processed(effects []OutboundMessage) RouteResult {

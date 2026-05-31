@@ -26,6 +26,21 @@ func (s *fakeSender) SendMessage(context.Context, int64, string) error {
 	return s.err
 }
 
+type fakeOutbox struct {
+	calls int
+	input store.AccessActionInput
+}
+
+func (o *fakeOutbox) Enqueue(
+	_ context.Context,
+	input store.AccessActionInput,
+) (domain.AccessAction, bool, error) {
+	o.calls++
+	o.input = input
+
+	return domain.AccessAction{ID: int64(o.calls)}, true, nil
+}
+
 type blockedDMError struct{}
 
 func (blockedDMError) Error() string {
@@ -56,6 +71,61 @@ func TestSendDMSkipsKnownBlockedUser(t *testing.T) {
 
 	if sender.calls != 0 {
 		t.Fatalf("send calls = %d, want 0", sender.calls)
+	}
+}
+
+func TestDurableSendDMEnqueuesInsteadOfSending(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tgID := int64(10)
+
+	users := store.NewUsers(db)
+	if err := users.Upsert(ctx, domain.User{
+		TGID:    tgID,
+		DMState: domain.DMOpen,
+	}); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+
+	outbox := &fakeOutbox{}
+	if err := NewDurable(users, outbox, nil).SendDurableDM(
+		ctx, tgID, "hello", "update:1:0",
+	); err != nil {
+		t.Fatalf("SendDurableDM: %v", err)
+	}
+
+	if outbox.calls != 1 {
+		t.Fatalf("enqueue calls = %d, want 1", outbox.calls)
+	}
+
+	if outbox.input.Type != domain.ActionSendDM || outbox.input.TGID == nil ||
+		*outbox.input.TGID != tgID {
+		t.Fatalf("outbox input = %+v, want send_dm for user", outbox.input)
+	}
+}
+
+func TestDurableSendDMSkipsKnownBlockedUser(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tgID := int64(11)
+
+	users := store.NewUsers(db)
+	if err := users.Upsert(ctx, domain.User{
+		TGID:    tgID,
+		DMState: domain.DMBlocked,
+	}); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+
+	outbox := &fakeOutbox{}
+	if err := NewDurable(users, outbox, nil).SendDurableDM(
+		ctx, tgID, "hello", "update:1:0",
+	); err != nil {
+		t.Fatalf("SendDurableDM: %v", err)
+	}
+
+	if outbox.calls != 0 {
+		t.Fatalf("enqueue calls = %d, want 0 for blocked user", outbox.calls)
 	}
 }
 

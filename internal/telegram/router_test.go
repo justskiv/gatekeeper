@@ -51,6 +51,42 @@ func TestRouterRoutesSourceChatMemberToEngine(t *testing.T) {
 	}
 }
 
+func TestRouterEnqueuesCommandDMInOutbox(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	updateID := int64(800)
+
+	router := NewRouter(RouterDeps{
+		Users:         store.NewUsers(db),
+		Subscriptions: store.NewSubscriptions(db),
+		Grants:        store.NewGrants(db),
+		Meta:          store.NewMeta(db),
+		Audit:         store.NewAudit(db),
+		Alerts:        store.NewAlerts(db),
+		Whitelist:     store.NewWhitelist(db),
+		Revocations:   store.NewRevocations(db),
+		Outbox:        store.NewOutbox(db),
+		UpdateID:      updateID,
+	}, nil, nil, nil)
+
+	result, err := router.Route(ctx, privateTextUpdate(updateID, 9001, "/start"))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+
+	if result.Status != store.TelegramUpdateProcessed {
+		t.Fatalf("status = %s, want processed", result.Status)
+	}
+
+	if len(result.Effects) != 0 {
+		t.Fatalf("effects = %+v, want no direct DM effects", result.Effects)
+	}
+
+	if got := countSendDMActions(t, db); got != 1 {
+		t.Fatalf("send_dm actions = %d, want 1", got)
+	}
+}
+
 func TestRouterSourceEventSharesTerminalTransaction(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()

@@ -32,20 +32,6 @@ func (s *recordingSender) SendMessage(
 	return nil
 }
 
-type cancelingSender struct {
-	cancel context.CancelFunc
-	calls  int
-}
-
-func (s *cancelingSender) SendMessage(
-	_ context.Context, _ int64, _ string,
-) error {
-	s.calls++
-	s.cancel()
-
-	return nil
-}
-
 type countingSource struct {
 	calls      int
 	platform   domain.Platform
@@ -102,15 +88,22 @@ func TestPollerRunFetchesAllowedUpdatesAndPersistsRawPayload(t *testing.T) {
 		}
 
 		calls++
+		if calls > 1 {
+			<-r.Context().Done()
+			writeTelegramResult(w, []json.RawMessage{})
+
+			return
+		}
 
 		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
 			t.Fatalf("decode getUpdates request: %v", err)
 		}
 
 		writeTelegramResult(w, []json.RawMessage{rawUpdate, rawUpdate})
+		time.AfterFunc(50*time.Millisecond, cancel)
 	})
 
-	sender := &cancelingSender{cancel: cancel}
+	sender := &recordingSender{}
 	poller := NewPoller(db, client,
 		notify.New(store.NewUsers(db), sender, slog.Default()),
 		nil, nil, slog.Default())
@@ -131,8 +124,8 @@ func TestPollerRunFetchesAllowedUpdatesAndPersistsRawPayload(t *testing.T) {
 		t.Fatal("poller did not stop after delivering update")
 	}
 
-	if calls != 1 {
-		t.Fatalf("getUpdates calls = %d, want 1", calls)
+	if calls == 0 {
+		t.Fatal("getUpdates was not called")
 	}
 
 	if !slices.Equal(captured.AllowedUpdates, DefaultAllowedUpdates) {
@@ -140,8 +133,12 @@ func TestPollerRunFetchesAllowedUpdatesAndPersistsRawPayload(t *testing.T) {
 			captured.AllowedUpdates, DefaultAllowedUpdates)
 	}
 
-	if sender.calls != 1 {
-		t.Fatalf("send calls = %d, want 1", sender.calls)
+	if sender.calls != 0 {
+		t.Fatalf("send calls = %d, want 0 with durable outbox", sender.calls)
+	}
+
+	if got := countSendDMActions(t, db); got != 1 {
+		t.Fatalf("send_dm actions = %d, want 1", got)
 	}
 
 	var (
@@ -199,8 +196,12 @@ func TestPollerProcessesDuplicateUpdateIDOnce(t *testing.T) {
 		t.Fatalf("processPending: %v", err)
 	}
 
-	if sender.calls != 1 {
-		t.Fatalf("send calls = %d, want 1", sender.calls)
+	if sender.calls != 0 {
+		t.Fatalf("send calls = %d, want 0 with durable outbox", sender.calls)
+	}
+
+	if got := countSendDMActions(t, db); got != 1 {
+		t.Fatalf("send_dm actions = %d, want 1", got)
 	}
 
 	user, err := store.NewUsers(db).Get(ctx, 1001)
@@ -248,8 +249,12 @@ func TestPollerRecoversPendingOnStartup(t *testing.T) {
 		t.Fatalf("processPending: %v", err)
 	}
 
-	if sender.calls != 1 {
-		t.Fatalf("send calls = %d, want 1", sender.calls)
+	if sender.calls != 0 {
+		t.Fatalf("send calls = %d, want 0 with durable outbox", sender.calls)
+	}
+
+	if got := countSendDMActions(t, db); got != 1 {
+		t.Fatalf("send_dm actions = %d, want 1", got)
 	}
 
 	var status string
@@ -348,8 +353,12 @@ func TestPollerStatusPreflightRunsSourceOutsideHandlerTransaction(t *testing.T) 
 				t.Fatal("source was called after tx2 began")
 			}
 
-			if sender.calls != 1 {
-				t.Fatalf("send calls = %d, want one command reply", sender.calls)
+			if sender.calls != 0 {
+				t.Fatalf("send calls = %d, want durable outbox", sender.calls)
+			}
+
+			if got := countSendDMActions(t, db); got != 1 {
+				t.Fatalf("send_dm actions = %d, want one command reply", got)
 			}
 
 			sub, ok, err := store.NewSubscriptions(db).GetActive(
@@ -411,4 +420,17 @@ func privateTextUpdate(updateID, tgID int64, text string) *models.Update {
 			Text: text,
 		},
 	}
+}
+
+func countSendDMActions(t *testing.T, db *sql.DB) int {
+	t.Helper()
+
+	var n int
+	if err := db.QueryRowContext(context.Background(), `
+		SELECT count(*) FROM access_actions WHERE action_type = ?`,
+		string(domain.ActionSendDM)).Scan(&n); err != nil {
+		t.Fatalf("count actions: %v", err)
+	}
+
+	return n
 }

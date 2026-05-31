@@ -283,6 +283,8 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 		Alerts:        store.NewAlerts(tx),
 		Whitelist:     store.NewWhitelist(tx),
 		Revocations:   store.NewRevocations(tx),
+		Outbox:        store.NewOutbox(tx),
+		UpdateID:      row.UpdateID,
 	}, p.chats, p.ownerIDs, p.logger,
 		WithStatusEngine(p.statusEngine),
 		WithSourceChats(p.sourceChats),

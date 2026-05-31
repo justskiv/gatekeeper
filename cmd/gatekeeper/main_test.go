@@ -1,11 +1,19 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/pressly/goose/v3"
+
+	"github.com/justskiv/gatekeeper/internal/domain"
+	"github.com/justskiv/gatekeeper/internal/store"
 )
 
 func TestRunFailsFastForTelegramWebhookMode(t *testing.T) {
@@ -32,6 +40,158 @@ func TestRunFailsFastForTelegramWebhookMode(t *testing.T) {
 	if _, statErr := os.Stat(dbPath); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("webhook mode touched db path: %v", statErr)
 	}
+}
+
+func TestRunFailsFastForDirectWithoutAllowBeforeDB(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "gatekeeper.db")
+
+	env := validEnv(dbPath)
+	env["INVITE_MODE"] = "direct"
+
+	env["ALLOW_DIRECT_INVITES"] = "false"
+	for key, value := range env {
+		t.Setenv(key, value)
+	}
+
+	err := run()
+	if err == nil {
+		t.Fatal("run returned nil, want direct invite config error")
+	}
+
+	if !strings.Contains(err.Error(), "ALLOW_DIRECT_INVITES") {
+		t.Fatalf("run error = %v, want ALLOW_DIRECT_INVITES", err)
+	}
+
+	if _, statErr := os.Stat(dbPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("invalid direct config touched db path: %v", statErr)
+	}
+}
+
+func TestCreateDirectModeAlert(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	if err := createDirectModeAlert(ctx, store.NewAlerts(db)); err != nil {
+		t.Fatalf("createDirectModeAlert: %v", err)
+	}
+
+	if err := createDirectModeAlert(ctx, store.NewAlerts(db)); err != nil {
+		t.Fatalf("createDirectModeAlert second call: %v", err)
+	}
+
+	var alerts int
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*) FROM admin_alerts
+		WHERE kind = 'invite_mode_degraded'`,
+	).Scan(&alerts); err != nil {
+		t.Fatalf("count alerts: %v", err)
+	}
+
+	if alerts != 1 {
+		t.Fatalf("alerts = %d, want one open degraded alert", alerts)
+	}
+}
+
+func TestEnqueueSharedInvitesIsIdempotent(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	outbox := store.NewOutbox(db)
+
+	if err := enqueueSharedInvites(ctx, outbox); err != nil {
+		t.Fatalf("enqueueSharedInvites: %v", err)
+	}
+
+	if err := enqueueSharedInvites(ctx, outbox); err != nil {
+		t.Fatalf("enqueueSharedInvites second call: %v", err)
+	}
+
+	var actions int
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*) FROM access_actions
+		WHERE action_type = 'ensure_invite'`,
+	).Scan(&actions); err != nil {
+		t.Fatalf("count actions: %v", err)
+	}
+
+	if actions != 2 {
+		t.Fatalf("ensure_invite actions = %d, want chat and channel", actions)
+	}
+}
+
+func TestSharedInvitesReadyRequiresChatAndChannel(t *testing.T) {
+	ctx := context.Background()
+	readiness := fakeReadiness{
+		domain.ResourceChat: {
+			CreatesJoinRequest: true,
+		},
+	}
+
+	ok, err := sharedInvitesReady(ctx, readiness)
+	if err != nil {
+		t.Fatalf("sharedInvitesReady: %v", err)
+	}
+
+	if ok {
+		t.Fatal("shared readiness succeeded with channel missing")
+	}
+
+	readiness[domain.ResourceChannel] = domain.InviteLink{
+		CreatesJoinRequest: true,
+	}
+
+	ok, err = sharedInvitesReady(ctx, readiness)
+	if err != nil {
+		t.Fatalf("sharedInvitesReady complete: %v", err)
+	}
+
+	if !ok {
+		t.Fatal("shared readiness failed with both links present")
+	}
+}
+
+type fakeReadiness map[domain.Resource]domain.InviteLink
+
+func (r fakeReadiness) ActiveShared(
+	_ context.Context,
+	resource domain.Resource,
+) (domain.InviteLink, bool, error) {
+	link, ok := r[resource]
+
+	return link, ok, nil
+}
+
+func newTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+
+	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+
+	t.Cleanup(func() { _ = db.Close() })
+
+	provider, err := goose.NewProvider(
+		goose.DialectSQLite3, db, os.DirFS(migrationsDir(t)))
+	if err != nil {
+		t.Fatalf("new goose provider: %v", err)
+	}
+
+	if _, err := provider.Up(context.Background()); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	return db
+}
+
+func migrationsDir(t *testing.T) string {
+	t.Helper()
+
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+
+	return filepath.Join(filepath.Dir(file), "..", "..", "migrations")
 }
 
 func validEnv(dbPath string) map[string]string {

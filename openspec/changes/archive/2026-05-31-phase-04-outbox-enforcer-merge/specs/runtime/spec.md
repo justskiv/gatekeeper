@@ -1,11 +1,5 @@
-# runtime Specification
+## MODIFIED Requirements
 
-## Purpose
-
-Описывает жизненный цикл процесса `gatekeeper`: загрузку конфигурации,
-проверку готовности БД, запуск Telegram-подсистем и остановку по
-сигналу.
-## Requirements
 ### Requirement: The `gatekeeper` binary follows a fixed startup order
 
 `cmd/gatekeeper` MUST управлять стартом в таком порядке:
@@ -122,66 +116,3 @@
 - **THEN** контекст отменяется, горутины Enforcer и поллера
   возвращаются
 - **AND** `db.Close()` выполняется только после остановки горутин
-
-### Requirement: Unsupported Telegram webhook mode fails fast
-
-`gatekeeper` MUST при `TELEGRAM_MODE=webhook` завершаться с понятной
-fatal-ошибкой, а не молча уходить в polling. Webhook-транспорт Telegram
-в этой фазе не реализован, и тихий запуск в нём не обрабатывал бы
-обновления.
-
-#### Scenario: Запрошен webhook-транспорт
-- **WHEN** конфигурация загрузилась с `TELEGRAM_MODE=webhook`
-- **THEN** `gatekeeper` завершается с ненулевым кодом и ошибкой о том,
-  что webhook-режим Telegram в этой фазе не поддержан
-- **AND** поллер не запускается
-
-### Requirement: Default polling runtime starts no HTTP server
-
-`gatekeeper` MUST NOT поднимать HTTP-сервер в дефолтном режиме. При
-`TELEGRAM_MODE=polling`, `TRIBUTE_MODE=observation` и
-`METRICS_ENABLED=false` единственная долгоживущая внешняя подсистема —
-поллер; readiness фазы выражается через startup health-checks,
-`meta.health.*`, `admin_alerts` и DM владельцу. `/healthz`/`/readyz`
-появятся в Фазе 07 и переиспользуют эти сигналы.
-
-#### Scenario: Чистый polling-режим не открывает HTTP-listener
-- **WHEN** процесс стартует с polling, observation и выключенными
-  метриками
-- **THEN** HTTP-listener не открывается
-- **AND** поллер — единственная запущенная фоновая интеграция
-
-### Requirement: Both binaries share log configuration via `applog`
-
-Пакет `applog` MUST строить `log/slog.Logger` из `Config.LogLevel`
-(`debug`/`info`/`warn`/`error`) и `Config.LogFormat` (`json`/`text`).
-Один и тот же построитель MUST использоваться бинарями `gatekeeper` и
-`migrate`, чтобы все процессы писали логи в согласованном формате.
-
-#### Scenario: Настроенный уровень логирования
-- **WHEN** `LOG_LEVEL=debug`
-- **THEN** `applog.New` возвращает логгер, чей handler пропускает записи
-  уровня `Debug` и выше
-
-#### Scenario: Настроенный формат логирования
-- **WHEN** `LOG_FORMAT=text`
-- **THEN** `applog.New` возвращает логгер с текстовым handler'ом,
-  пишущим в stdout; иначе handler использует JSON
-
-### Requirement: Fatal errors print to stderr and exit non-zero
-
-Оба бинаря MUST использовать единый формат fatal-ошибки:
-
-```
-fatal: <error>
-```
-
-Строка пишется в stderr, затем процесс вызывает `os.Exit(1)`. В момент
-обнаружения fatal-ошибки логгер может ещё не быть настроен, поэтому
-stderr MUST оставаться надёжным каналом.
-
-#### Scenario: Любая неустранимая ошибка из `run`
-- **WHEN** внутренняя функция `run()` возвращает ненулевую ошибку
-- **THEN** `main` пишет `"fatal: <message>"` в stderr и выходит с
-  кодом `1`
-

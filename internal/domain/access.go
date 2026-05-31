@@ -1,6 +1,11 @@
 package domain
 
-import "time"
+import (
+	"crypto/sha256"
+	"fmt"
+	"strconv"
+	"time"
+)
 
 // Resource is a bot-managed club resource.
 type Resource string
@@ -31,6 +36,76 @@ const (
 	InviteExpired     InviteStatus = "expired"
 	InviteFailed      InviteStatus = "failed"
 )
+
+// ActionType is a durable Telegram side effect recorded in access_actions.
+type ActionType string
+
+const (
+	ActionEnsureInvite ActionType = "ensure_invite"
+	ActionSendInvite   ActionType = "send_invite"
+	ActionApproveJoin  ActionType = "approve_join"
+	ActionDeclineJoin  ActionType = "decline_join"
+	ActionSoftKick     ActionType = "soft_kick"
+	ActionHardBan      ActionType = "hard_ban"
+	ActionUnban        ActionType = "unban"
+	ActionSendDM       ActionType = "send_dm"
+	ActionVerifyMember ActionType = "verify_member"
+	ActionRevokeInvite ActionType = "revoke_invite"
+)
+
+// ActionStatus is the access_actions execution state machine.
+type ActionStatus string
+
+const (
+	ActionQueued  ActionStatus = "queued"
+	ActionRunning ActionStatus = "running"
+	ActionDone    ActionStatus = "done"
+	ActionFailed  ActionStatus = "failed"
+	ActionDead    ActionStatus = "dead"
+)
+
+// AccessAction is one durable Telegram action owned by the Enforcer.
+type AccessAction struct {
+	ID             int64
+	Type           ActionType
+	TGID           *int64
+	Resource       *Resource
+	IdempotencyKey string
+	PayloadJSON    []byte
+	Status         ActionStatus
+	RunAfter       time.Time
+	Attempts       int
+	MaxAttempts    int
+	LockedUntil    *time.Time
+	LastError      string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+// AccessActionKey builds the canonical idempotency key for outbox rows.
+// The marker is hashed so callers can include verbose payload-derived
+// context without leaking message text or invite URLs into the key.
+func AccessActionKey(
+	action ActionType,
+	tgID *int64,
+	resource *Resource,
+	marker string,
+) string {
+	tgPart := "-"
+	if tgID != nil {
+		tgPart = strconv.FormatInt(*tgID, 10)
+	}
+
+	resourcePart := "-"
+	if resource != nil {
+		resourcePart = string(*resource)
+	}
+
+	markerHash := sha256.Sum256([]byte(marker))
+
+	return fmt.Sprintf("%s:%s:%s:%x",
+		action, tgPart, resourcePart, markerHash[:12])
+}
 
 // GrantState is the state of access to a single resource.
 type GrantState string
