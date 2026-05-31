@@ -160,6 +160,7 @@ func (c *Client) SetMyCommands(ctx context.Context, ownerIDs []int64) error {
 	userCommands := []models.BotCommand{
 		{Command: "start", Description: messages.CommandStartDescription},
 		{Command: "help", Description: messages.CommandHelpDescription},
+		{Command: "status", Description: messages.CommandStatusDescription},
 	}
 	if _, err := c.bot.SetMyCommands(ctx, &botapi.SetMyCommandsParams{
 		Commands: userCommands,
@@ -173,6 +174,10 @@ func (c *Client) SetMyCommands(ctx context.Context, ownerIDs []int64) error {
 		models.BotCommand{
 			Command:     "here",
 			Description: messages.CommandHereDescription,
+		},
+		models.BotCommand{
+			Command:     "whois",
+			Description: messages.CommandWhoisDescription,
 		})
 	for _, ownerID := range ownerIDs {
 		if _, err := c.bot.SetMyCommands(ctx, &botapi.SetMyCommandsParams{

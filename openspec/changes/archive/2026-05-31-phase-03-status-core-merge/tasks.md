@@ -88,12 +88,12 @@
 ## 7. Верификация
 
 - [x] 7.1 `task test` зелёный
-- [ ] 7.2 Тестовый аккаунт вступает в Boosty-группу → строка
+- [x] 7.2 Тестовый аккаунт вступает в Boosty-группу → строка
   `subscriptions` `platform='boosty'`, `status='active'`; выход → строка
   `expired` с `ended_at`
-- [ ] 7.3 `/whois <tg_id>` → карточка с `AccessDecision.Reasons`;
+- [x] 7.3 `/whois <tg_id>` → карточка с `AccessDecision.Reasons`;
   `/status` → список подписок и членства
-- [ ] 7.4 Потеря ботом админ-прав в источнике-чате → вердикт `unknown`,
+- [x] 7.4 Потеря ботом админ-прав в источнике-чате → вердикт `unknown`,
   `effectiveStatus` не становится `inactive` (fail-open)
 - [x] 7.5 `task lint` и `openspec validate phase-03-status-core-merge
   --strict` зелёные

@@ -15,7 +15,10 @@ import (
 
 	"github.com/justskiv/gatekeeper/internal/applog"
 	"github.com/justskiv/gatekeeper/internal/config"
+	"github.com/justskiv/gatekeeper/internal/domain"
+	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/notify"
+	"github.com/justskiv/gatekeeper/internal/source"
 	"github.com/justskiv/gatekeeper/internal/store"
 	"github.com/justskiv/gatekeeper/internal/telegram"
 	"golang.org/x/sync/errgroup"
@@ -73,6 +76,26 @@ func run() error {
 		slog.Int64("bot_id", me.ID),
 		slog.String("username", me.Username))
 
+	sourceChats := telegram.SourceChats{
+		BoostyGroupID:      cfg.BoostyGroupID,
+		TributeChannelID:   cfg.TributeChannelID,
+		TributeObservation: cfg.TributeMode == "observation",
+	}
+	sources := []engine.SubscriptionSource{
+		source.NewMembership(domain.PlatformBoosty, cfg.BoostyGroupID, tgClient),
+	}
+	if sourceChats.TributeObservation {
+		sources = append(sources, source.NewMembership(
+			domain.PlatformTribute,
+			cfg.TributeChannelID,
+			tgClient,
+			source.WithLedger(store.NewSubscriptions(db)),
+		))
+	}
+	sources = append(sources,
+		source.NewManual(store.NewWhitelist(db), store.NewSubscriptions(db)))
+	statusEngine := engine.New(sources)
+
 	if err := tgClient.SetMyCommands(ctx, cfg.OwnerTGIDs); err != nil {
 		logger.Warn("failed to set bot commands", slog.Any("error", err))
 	}
@@ -87,7 +110,9 @@ func run() error {
 
 	group, groupCtx := errgroup.WithContext(ctx)
 	poller := telegram.NewPoller(
-		db, tgClient, notifier, healthChats, cfg.OwnerTGIDs, logger)
+		db, tgClient, notifier, healthChats, cfg.OwnerTGIDs, logger,
+		telegram.WithPollerStatusEngine(statusEngine),
+		telegram.WithPollerSourceChats(sourceChats))
 	group.Go(func() error {
 		return poller.Run(groupCtx)
 	})

@@ -19,21 +19,26 @@ const (
 type EventKind string
 
 const (
-	EventActivated   EventKind = "activated"   // subscription appeared / is active
-	EventDeactivated EventKind = "deactivated" // subscription gone / expired
+	EventActivated             EventKind = "activated"              // subscription appeared / is active
+	EventDeactivated           EventKind = "deactivated"            // subscription gone / expired
+	EventCancelledSubscription EventKind = "cancelled_subscription" // provider cancellation notice
 )
 
 // SubscriptionEvent is a normalized subscription event from any source.
 // The core of the system does not know where the event came from.
 type SubscriptionEvent struct {
-	Platform   Platform
-	Kind       EventKind
-	TGUserID   int64
-	TGUsername string     // optional
-	Tier       string     // optional (subscription_name for Tribute)
-	ExpiresAt  *time.Time // known only for Tribute mode B and for manual
-	ExternalID string     // tribute subscription_id, etc.
-	PeriodID   string     // tribute period_id
-	OccurredAt time.Time
-	Raw        []byte // raw payload for auditing
+	Platform       Platform
+	Kind           EventKind
+	TGUserID       int64
+	TGUsername     string     // optional
+	TGFirstName    string     // optional Telegram profile cache
+	TGLastName     string     // optional Telegram profile cache
+	TGLanguageCode string     // optional Telegram profile cache
+	TGIsBot        bool       // source events for bots are ignored before engine
+	Tier           string     // optional (subscription_name for Tribute)
+	ExpiresAt      *time.Time // known only for Tribute mode B and for manual
+	ExternalID     string     // tribute subscription_id, etc.
+	PeriodID       string     // tribute period_id
+	OccurredAt     time.Time
+	Raw            []byte // raw payload for auditing
 }

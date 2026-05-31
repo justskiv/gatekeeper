@@ -102,3 +102,11 @@ type AccessReason struct {
 	Detail  string     // human-readable: "member of the Boosty group", "expires_at passed"
 	Until   *time.Time // if known
 }
+
+// SourceVerdict is one source observation before aggregation.
+type SourceVerdict struct {
+	Source  Platform
+	Verdict Verdict
+	Detail  string
+	Until   *time.Time
+}

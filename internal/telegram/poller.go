@@ -11,6 +11,8 @@ import (
 
 	"github.com/go-telegram/bot/models"
 
+	commandbot "github.com/justskiv/gatekeeper/internal/bot"
+	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/notify"
 	"github.com/justskiv/gatekeeper/internal/store"
 )
@@ -28,12 +30,33 @@ type Poller struct {
 	client   *Client
 	notifier *notify.Notifier
 
-	chats    []HealthChat
-	ownerIDs []int64
-	logger   *slog.Logger
+	statusEngine *engine.Engine
+	sourceChats  SourceChats
+	chats        []HealthChat
+	ownerIDs     []int64
+	logger       *slog.Logger
+
+	afterBeginTx func() // test hook for tx-boundary assertions
 
 	limit   int
 	timeout int
+}
+
+// PollerOption configures optional poller integrations.
+type PollerOption func(*Poller)
+
+// WithPollerStatusEngine attaches the status engine.
+func WithPollerStatusEngine(statusEngine *engine.Engine) PollerOption {
+	return func(p *Poller) {
+		p.statusEngine = statusEngine
+	}
+}
+
+// WithPollerSourceChats attaches source chat routing config.
+func WithPollerSourceChats(sourceChats SourceChats) PollerOption {
+	return func(p *Poller) {
+		p.sourceChats = sourceChats
+	}
 }
 
 // NewPoller returns a durable sequential Telegram update poller.
@@ -44,11 +67,12 @@ func NewPoller(
 	chats []HealthChat,
 	ownerIDs []int64,
 	logger *slog.Logger,
+	opts ...PollerOption,
 ) *Poller {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Poller{
+	poller := &Poller{
 		db:       db,
 		client:   client,
 		notifier: notifier,
@@ -58,6 +82,10 @@ func NewPoller(
 		limit:    defaultPollLimit,
 		timeout:  defaultPollTimeout,
 	}
+	for _, opt := range opts {
+		opt(poller)
+	}
+	return poller
 }
 
 // Run recovers pending rows, then polls Telegram until ctx is cancelled.
@@ -197,6 +225,13 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 	if err := json.Unmarshal(row.PayloadJSON, &update); err != nil {
 		return p.markFailed(ctx, row.UpdateID, fmt.Errorf("decode update payload: %w", err))
 	}
+	preflight, err := p.buildPreflight(ctx, &update)
+	if err != nil {
+		if isContextDone(ctx, err) {
+			return err
+		}
+		return p.markFailed(ctx, row.UpdateID, err)
+	}
 
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -205,13 +240,23 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 		}
 		return fmt.Errorf("begin telegram update tx2: %w", err)
 	}
+	if p.afterBeginTx != nil {
+		p.afterBeginTx()
+	}
 
 	router := NewRouter(RouterDeps{
-		Users:  store.NewUsers(tx),
-		Meta:   store.NewMeta(tx),
-		Audit:  store.NewAudit(tx),
-		Alerts: store.NewAlerts(tx),
-	}, p.chats, p.ownerIDs, p.logger)
+		Users:         store.NewUsers(tx),
+		Subscriptions: store.NewSubscriptions(tx),
+		Grants:        store.NewGrants(tx),
+		Meta:          store.NewMeta(tx),
+		Audit:         store.NewAudit(tx),
+		Alerts:        store.NewAlerts(tx),
+		Whitelist:     store.NewWhitelist(tx),
+		Revocations:   store.NewRevocations(tx),
+	}, p.chats, p.ownerIDs, p.logger,
+		WithStatusEngine(p.statusEngine),
+		WithSourceChats(p.sourceChats),
+		WithPreflight(preflight))
 
 	result, err := router.Route(ctx, &update)
 	if err != nil {
@@ -239,6 +284,62 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 
 	p.deliverEffects(ctx, result.Effects)
 	return nil
+}
+
+func (p *Poller) buildPreflight(
+	ctx context.Context,
+	update *models.Update,
+) (RoutePreflight, error) {
+	if p.statusEngine == nil ||
+		update == nil ||
+		update.Message == nil ||
+		update.Message.From == nil ||
+		update.Message.Chat.Type != models.ChatTypePrivate {
+		return RoutePreflight{}, nil
+	}
+	msg := update.Message
+	var targetID int64
+	switch commandbot.CommandName(msg.Text) {
+	case "status":
+		targetID = msg.From.ID
+	case "whois":
+		if !containsID(p.ownerIDs, msg.From.ID) {
+			return RoutePreflight{}, nil
+		}
+		users := store.NewUsers(p.db)
+		target, err := commandbot.ResolveWhoisTarget(
+			ctx, users, msg.Text)
+		if err != nil || target.BadSyntax || target.NotFound {
+			return RoutePreflight{}, err
+		}
+		if _, err := users.Get(ctx, target.TGID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return RoutePreflight{}, nil
+			}
+			return RoutePreflight{}, err
+		}
+		targetID = target.TGID
+	default:
+		return RoutePreflight{}, nil
+	}
+	snapshot, err := p.statusEngine.LiveSnapshot(ctx, engine.Store{
+		Users:         store.NewUsers(p.db),
+		Subscriptions: store.NewSubscriptions(p.db),
+		Whitelist:     store.NewWhitelist(p.db),
+	}, targetID)
+	if err != nil {
+		return RoutePreflight{}, err
+	}
+	return RoutePreflight{Snapshot: &snapshot}, nil
+}
+
+func containsID(ids []int64, want int64) bool {
+	for _, id := range ids {
+		if id == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Poller) markFailed(ctx context.Context, updateID int64, cause error) error {
@@ -292,6 +393,9 @@ func (p *Poller) deliverEffects(ctx context.Context, effects []OutboundMessage) 
 			}
 			err = p.notifier.SendDM(ctx, effect.TGID, effect.Text)
 		case OutboundChatMessage:
+			if p.client == nil {
+				continue
+			}
 			err = p.client.SendMessage(ctx, effect.ChatID, effect.Text)
 		}
 		if err != nil {

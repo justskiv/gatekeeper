@@ -63,8 +63,8 @@ MUST определяться архетипом:
 #### Scenario: Вердикт Tribute комбинирует membership и ledger
 - **WHEN** membership-сигнал `a` и ledger-сигнал `b` вычислены
 - **THEN** результат `active`, если активен `a` **или** `b`
-- **AND** `inactive`, если `a` неактивен **и** `b` не активен; иначе
-  `unknown`
+- **AND** `inactive`, если `a` неактивен, а `b` равен `inactive` или
+  `no_signal`; иначе `unknown`
 
 #### Scenario: Probe не пишет в БД
 - **WHEN** источник вычисляет вердикт

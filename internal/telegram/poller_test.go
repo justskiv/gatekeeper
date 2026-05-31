@@ -2,17 +2,20 @@ package telegram
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/go-telegram/bot/models"
 
 	"github.com/justskiv/gatekeeper/internal/domain"
+	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/notify"
 	"github.com/justskiv/gatekeeper/internal/store"
 )
@@ -39,6 +42,33 @@ func (s *cancelingSender) SendMessage(
 	s.calls++
 	s.cancel()
 	return nil
+}
+
+type countingSource struct {
+	calls      int
+	platform   domain.Platform
+	inTx       *atomic.Bool
+	calledInTx *atomic.Bool
+}
+
+func (s *countingSource) Platform() domain.Platform {
+	return s.platform
+}
+
+func (s *countingSource) Verdict(
+	ctx context.Context,
+	tgID int64,
+) (domain.SourceVerdict, error) {
+	s.calls++
+	if s.inTx != nil && s.inTx.Load() && s.calledInTx != nil {
+		s.calledInTx.Store(true)
+	}
+
+	return domain.SourceVerdict{
+		Source:  s.platform,
+		Verdict: domain.VerdictActive,
+		Detail:  "preflight probe",
+	}, nil
 }
 
 func TestPollerRunFetchesAllowedUpdatesAndPersistsRawPayload(t *testing.T) {
@@ -204,6 +234,114 @@ func TestPollerRecoversPendingOnStartup(t *testing.T) {
 	}
 	if status != string(store.TelegramUpdateProcessed) {
 		t.Fatalf("status = %q, want processed", status)
+	}
+}
+
+func TestPollerStatusPreflightRunsSourceOutsideHandlerTransaction(t *testing.T) {
+	tests := []struct {
+		name   string
+		update *models.Update
+		seed   func(context.Context, *sql.DB)
+		owners []int64
+		tgID   int64
+	}{
+		{
+			name:   "status",
+			update: privateTextUpdate(60, 6060, "/status"),
+			tgID:   6060,
+		},
+		{
+			name:   "whois",
+			update: privateTextUpdate(61, 100, "/whois 7070"),
+			seed: func(ctx context.Context, db *sql.DB) {
+				if err := store.NewUsers(db).Upsert(
+					ctx, domain.User{TGID: 7070},
+				); err != nil {
+					t.Fatalf("upsert target user: %v", err)
+				}
+			},
+			owners: []int64{100},
+			tgID:   7070,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := newTestDB(t)
+			ctx := context.Background()
+			sender := &recordingSender{}
+
+			if tt.seed != nil {
+				tt.seed(ctx, db)
+			}
+
+			inTx := &atomic.Bool{}
+			calledInTx := &atomic.Bool{}
+			source := &countingSource{
+				platform:   domain.PlatformBoosty,
+				inTx:       inTx,
+				calledInTx: calledInTx,
+			}
+			statusEngine := engine.New([]engine.SubscriptionSource{source})
+			poller := NewPoller(
+				db,
+				nil,
+				notify.New(store.NewUsers(db), sender, slog.Default()),
+				nil,
+				tt.owners,
+				slog.Default(),
+				WithPollerStatusEngine(statusEngine),
+			)
+			poller.afterBeginTx = func() {
+				inTx.Store(true)
+			}
+
+			batch, nextOffset, err := buildUpdateBatch(
+				[]FetchedUpdate{fetchedUpdate(t, tt.update)}, 0)
+			if err != nil {
+				t.Fatalf("buildUpdateBatch: %v", err)
+			}
+			if err := store.NewTelegramUpdates(db).InsertBatch(
+				ctx, batch, nextOffset,
+			); err != nil {
+				t.Fatalf("InsertBatch: %v", err)
+			}
+
+			if err := poller.processPending(ctx); err != nil {
+				t.Fatalf("processPending: %v", err)
+			}
+
+			if source.calls != 1 {
+				t.Fatalf("source calls = %d, want exactly one preflight call",
+					source.calls)
+			}
+			if calledInTx.Load() {
+				t.Fatal("source was called after tx2 began")
+			}
+			if sender.calls != 1 {
+				t.Fatalf("send calls = %d, want one command reply", sender.calls)
+			}
+
+			sub, ok, err := store.NewSubscriptions(db).GetActive(
+				ctx, tt.tgID, domain.PlatformBoosty)
+			if err != nil {
+				t.Fatalf("GetActive: %v", err)
+			}
+			if !ok || sub.LastSignal != "on_demand" {
+				t.Fatalf("subscription = (%+v, %v), want on-demand active", sub, ok)
+			}
+
+			var status string
+			if err := db.QueryRowContext(ctx,
+				`SELECT status FROM telegram_updates WHERE update_id = ?`,
+				tt.update.ID,
+			).Scan(&status); err != nil {
+				t.Fatalf("read update status: %v", err)
+			}
+			if status != string(store.TelegramUpdateProcessed) {
+				t.Fatalf("status = %q, want processed", status)
+			}
+		})
 	}
 }
 

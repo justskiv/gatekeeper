@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -33,6 +35,38 @@ func (r *Revocations) Upsert(ctx context.Context, p domain.PendingRevocation) er
 		return fmt.Errorf("upsert revocation %d: %w", p.TGID, err)
 	}
 	return nil
+}
+
+// Get returns a pending revocation, or ok=false when none exists.
+func (r *Revocations) Get(
+	ctx context.Context, tgID int64,
+) (domain.PendingRevocation, bool, error) {
+	row := r.db.QueryRowContext(ctx, `
+		SELECT tg_id, reason, scheduled_at, notified, created_at
+		FROM pending_revocations
+		WHERE tg_id = ?`, tgID)
+
+	var (
+		p                      domain.PendingRevocation
+		scheduledAt, createdAt string
+	)
+	err := row.Scan(&p.TGID, &p.Reason, &scheduledAt, &p.Notified, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.PendingRevocation{}, false, nil
+	}
+	if err != nil {
+		return domain.PendingRevocation{}, false,
+			fmt.Errorf("get revocation %d: %w", tgID, err)
+	}
+	if p.ScheduledAt, err = parseTime(scheduledAt); err != nil {
+		return domain.PendingRevocation{}, false,
+			fmt.Errorf("parse revocation scheduled_at: %w", err)
+	}
+	if p.CreatedAt, err = parseTime(createdAt); err != nil {
+		return domain.PendingRevocation{}, false,
+			fmt.Errorf("parse revocation created_at: %w", err)
+	}
+	return p, true, nil
 }
 
 // Delete cancels a pending revocation. Removing a missing row is a no-op.

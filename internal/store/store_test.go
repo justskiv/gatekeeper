@@ -201,8 +201,9 @@ func TestUsersUpsertAndGet(t *testing.T) {
 	if err := users.Upsert(ctx, domain.User{TGID: 42, Username: "robert"}); err != nil {
 		t.Fatalf("re-upsert: %v", err)
 	}
-	if got, _ = users.Get(ctx, 42); got.Username != "robert" {
-		t.Errorf("username not updated: %q", got.Username)
+	if got, _ = users.Get(ctx, 42); got.Username != "robert" ||
+		got.DMState != domain.DMOpen {
+		t.Errorf("refreshed user = %+v, want username=robert dm_state preserved", got)
 	}
 
 	if err := users.Upsert(ctx, domain.User{
@@ -331,6 +332,92 @@ func TestSubscriptionsGetActive(t *testing.T) {
 	}
 }
 
+func TestSubscriptionsUpsertExpireAndList(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	users := NewUsers(db)
+	subs := NewSubscriptions(db)
+
+	if err := users.Upsert(ctx, domain.User{TGID: 11, Username: "alice"}); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+	started := time.Now().UTC().Truncate(time.Second)
+	eventAt := started.Add(time.Minute)
+	id, err := subs.UpsertActive(ctx, domain.Subscription{
+		TGID:        11,
+		Platform:    domain.PlatformBoosty,
+		StartedAt:   started,
+		LastSignal:  "event",
+		LastEventAt: &eventAt,
+	})
+	if err != nil {
+		t.Fatalf("first UpsertActive: %v", err)
+	}
+	if id == 0 {
+		t.Fatal("first UpsertActive returned id 0")
+	}
+	if id2, err := subs.UpsertActive(ctx, domain.Subscription{
+		TGID:          11,
+		Platform:      domain.PlatformBoosty,
+		StartedAt:     started.Add(time.Hour),
+		LastSignal:    "on_demand",
+		LastCheckedAt: &started,
+	}); err != nil {
+		t.Fatalf("second UpsertActive: %v", err)
+	} else if id2 != id {
+		t.Fatalf("second UpsertActive id = %d, want %d", id2, id)
+	}
+
+	active, err := subs.ListActiveByUser(ctx, 11)
+	if err != nil {
+		t.Fatalf("ListActiveByUser: %v", err)
+	}
+	if len(active) != 1 {
+		t.Fatalf("active subscriptions = %+v, want one row", active)
+	}
+	if active[0].LastEventAt == nil || !active[0].LastEventAt.Equal(eventAt) {
+		t.Fatalf("last_event_at = %v, want preserved %v",
+			active[0].LastEventAt, eventAt)
+	}
+	if active[0].LastCheckedAt == nil ||
+		!active[0].LastCheckedAt.Equal(started) {
+		t.Fatalf("last_checked_at = %v, want %v",
+			active[0].LastCheckedAt, started)
+	}
+
+	ended := started.Add(2 * time.Hour)
+	ok, err := subs.ExpireActive(ctx, 11, domain.PlatformBoosty, ended, "event")
+	if err != nil {
+		t.Fatalf("ExpireActive: %v", err)
+	}
+	if !ok {
+		t.Fatal("ExpireActive ok = false, want true")
+	}
+	ok, err = subs.ExpireActive(ctx, 11, domain.PlatformBoosty, ended, "event")
+	if err != nil {
+		t.Fatalf("second ExpireActive: %v", err)
+	}
+	if ok {
+		t.Fatal("second ExpireActive ok = true, want false")
+	}
+	history, err := subs.ListByUser(ctx, 11)
+	if err != nil {
+		t.Fatalf("ListByUser: %v", err)
+	}
+	if len(history) != 1 || history[0].Status != domain.SubExpired {
+		t.Fatalf("history = %+v, want one expired row", history)
+	}
+	if history[0].LastEventAt == nil || !history[0].LastEventAt.Equal(ended) {
+		t.Fatalf("expired last_event_at = %v, want %v",
+			history[0].LastEventAt, ended)
+	}
+	if history[0].LastCheckedAt == nil ||
+		!history[0].LastCheckedAt.Equal(started) {
+		t.Fatalf("expired last_checked_at = %v, want preserved %v",
+			history[0].LastCheckedAt, started)
+	}
+}
+
 func TestGrantsUpsertAndGet(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
@@ -371,6 +458,81 @@ func TestGrantsUpsertAndGet(t *testing.T) {
 
 	if _, err := grants.Get(ctx, 999, domain.ResourceChat); !errors.Is(err, ErrNotFound) {
 		t.Errorf("expected ErrNotFound for an unknown grant, got %v", err)
+	}
+}
+
+func TestRepositoryLookupAndRecentLists(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	users := NewUsers(db)
+	grants := NewGrants(db)
+	audit := NewAudit(db)
+	revocations := NewRevocations(db)
+
+	if err := users.Upsert(ctx, domain.User{TGID: 12, Username: "Known"}); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+	if got, ok, err := users.FindByUsername(ctx, "@known"); err != nil || !ok ||
+		got.TGID != 12 {
+		t.Fatalf("FindByUsername = (%+v, %v, %v), want tg_id 12", got, ok, err)
+	}
+	if _, ok, err := users.FindByUsername(ctx, "@missing"); err != nil || ok {
+		t.Fatalf("FindByUsername missing = (_, %v, %v), want false nil", ok, err)
+	}
+
+	if err := grants.Upsert(ctx, domain.AccessGrant{
+		TGID:     12,
+		Resource: domain.ResourceChat,
+		State:    domain.GrantJoined,
+	}); err != nil {
+		t.Fatalf("upsert chat grant: %v", err)
+	}
+	if err := grants.Upsert(ctx, domain.AccessGrant{
+		TGID:     12,
+		Resource: domain.ResourceChannel,
+		State:    domain.GrantPending,
+	}); err != nil {
+		t.Fatalf("upsert channel grant: %v", err)
+	}
+	userGrants, err := grants.ListByUser(ctx, 12)
+	if err != nil {
+		t.Fatalf("ListByUser grants: %v", err)
+	}
+	if len(userGrants) != 2 {
+		t.Fatalf("grants = %+v, want two rows", userGrants)
+	}
+
+	tgID := int64(12)
+	for _, kind := range []string{"old", "new"} {
+		if err := audit.Append(ctx, AuditEntry{
+			TGID: &tgID,
+			Kind: kind,
+		}); err != nil {
+			t.Fatalf("append audit %s: %v", kind, err)
+		}
+	}
+	recent, err := audit.ListRecentByUser(ctx, 12, 1)
+	if err != nil {
+		t.Fatalf("ListRecentByUser: %v", err)
+	}
+	if len(recent) != 1 || recent[0].Kind != "new" {
+		t.Fatalf("recent audit = %+v, want newest only", recent)
+	}
+
+	if _, ok, err := revocations.Get(ctx, 12); err != nil || ok {
+		t.Fatalf("missing revocation = (_, %v, %v), want false nil", ok, err)
+	}
+	scheduled := time.Now().UTC().Add(time.Hour)
+	if err := revocations.Upsert(ctx, domain.PendingRevocation{
+		TGID:        12,
+		Reason:      "expired",
+		ScheduledAt: scheduled,
+	}); err != nil {
+		t.Fatalf("upsert revocation: %v", err)
+	}
+	if got, ok, err := revocations.Get(ctx, 12); err != nil || !ok ||
+		got.Reason != "expired" {
+		t.Fatalf("revocation = (%+v, %v, %v), want reason expired", got, ok, err)
 	}
 }
 

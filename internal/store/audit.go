@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 )
@@ -9,12 +10,14 @@ import (
 // AuditEntry is one append-only business-journal record. A nil TGID,
 // or an empty Source or Resource, is stored as a SQL NULL.
 type AuditEntry struct {
-	TGID     *int64
-	Kind     string
-	Source   string
-	Resource string
-	Actor    string // defaults to "system" when empty
-	Detail   string
+	ID        int64
+	TGID      *int64
+	Kind      string
+	Source    string
+	Resource  string
+	Actor     string // defaults to "system" when empty
+	Detail    string
+	CreatedAt time.Time
 }
 
 // Audit is the repository for the append-only audit_log table.
@@ -46,4 +49,55 @@ func (r *Audit) Append(ctx context.Context, e AuditEntry) error {
 		return fmt.Errorf("append audit %q: %w", e.Kind, err)
 	}
 	return nil
+}
+
+// ListRecentByUser returns recent audit rows for a user from newest to oldest.
+func (r *Audit) ListRecentByUser(
+	ctx context.Context, tgID int64, limit int,
+) ([]AuditEntry, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, tg_id, kind, source, resource, actor, detail, created_at
+		FROM audit_log
+		WHERE tg_id = ?
+		ORDER BY created_at DESC, id DESC
+		LIMIT ?`, tgID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list recent audit for %d: %w", tgID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []AuditEntry
+	for rows.Next() {
+		var (
+			e                AuditEntry
+			tgIDValue        sql.NullInt64
+			source, resource sql.NullString
+			createdAt        string
+		)
+		if err := rows.Scan(&e.ID, &tgIDValue, &e.Kind, &source, &resource,
+			&e.Actor, &e.Detail, &createdAt); err != nil {
+			return nil, fmt.Errorf("scan audit row: %w", err)
+		}
+		if tgIDValue.Valid {
+			tgID := tgIDValue.Int64
+			e.TGID = &tgID
+		}
+		if source.Valid {
+			e.Source = source.String
+		}
+		if resource.Valid {
+			e.Resource = resource.String
+		}
+		if e.CreatedAt, err = parseTime(createdAt); err != nil {
+			return nil, fmt.Errorf("parse audit created_at: %w", err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate audit for %d: %w", tgID, err)
+	}
+	return out, nil
 }
