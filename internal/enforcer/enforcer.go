@@ -15,6 +15,7 @@ import (
 
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/invite"
+	"github.com/justskiv/gatekeeper/internal/messages"
 	"github.com/justskiv/gatekeeper/internal/store"
 	"github.com/justskiv/gatekeeper/internal/telegram"
 )
@@ -467,11 +468,23 @@ func (e *Enforcer) sendDM(
 		return errors.New("send_dm payload text is required")
 	}
 
-	if err := e.wait(ctx, requestKindMessage, tgID); err != nil {
+	chatID := tgID
+	if payload.ChatID != 0 {
+		chatID = payload.ChatID
+	}
+
+	if err := e.wait(ctx, requestKindMessage, chatID); err != nil {
 		return err
 	}
 
-	return e.tg.SendMessage(ctx, tgID, payload.Text)
+	if payload.RetryButton {
+		if sender, ok := e.tg.(replyMarkupSender); ok {
+			return sender.SendMessageWithReplyMarkup(
+				ctx, chatID, payload.Text, retryKeyboard())
+		}
+	}
+
+	return e.tg.SendMessage(ctx, chatID, payload.Text)
 }
 
 func (e *Enforcer) verifyMember(
@@ -767,7 +780,9 @@ func (e expectedNoopError) Unwrap() error {
 }
 
 type sendDMPayload struct {
-	Text string `json:"text"`
+	Text        string `json:"text"`
+	ChatID      int64  `json:"chat_id,omitempty"`
+	RetryButton bool   `json:"retry_button,omitempty"`
 }
 
 type sendInvitePayload struct {
@@ -777,4 +792,24 @@ type sendInvitePayload struct {
 type revokeInvitePayload struct {
 	InviteLinkID int64  `json:"invite_link_id"`
 	InviteLink   string `json:"invite_link"`
+}
+
+type replyMarkupSender interface {
+	SendMessageWithReplyMarkup(
+		ctx context.Context,
+		chatID int64,
+		text string,
+		replyMarkup models.ReplyMarkup,
+	) error
+}
+
+func retryKeyboard() models.InlineKeyboardMarkup {
+	return models.InlineKeyboardMarkup{
+		InlineKeyboard: [][]models.InlineKeyboardButton{{
+			{
+				Text:         messages.RetryAccessButtonText,
+				CallbackData: messages.RetryAccessCallbackData,
+			},
+		}},
+	}
 }

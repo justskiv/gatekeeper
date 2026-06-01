@@ -16,9 +16,18 @@ const (
 	CommandStatusDescription = "показать статус подписки"
 	CommandWhoisDescription  = "показать карточку пользователя"
 
+	RetryAccessCallbackData = "grant_access.retry"
+	RetryAccessButtonText   = "Проверить ещё раз"
+
 	MsgNoSub = "Подписка пока не найдена. " +
 		"Проверьте оформление подписки и напишите боту с того же аккаунта Telegram."
 )
+
+// InviteLinkLine is one managed resource link shown to a user.
+type InviteLinkLine struct {
+	Resource domain.Resource
+	URL      string
+}
 
 // AuditLine is the audit data needed for owner-facing /whois text.
 type AuditLine struct {
@@ -42,6 +51,58 @@ type WhoisData struct {
 func Welcome() string {
 	return "Привет! Я помогу получить доступ в закрытое сообщество. " +
 		"Оформите подписку и пишите боту с того же аккаунта Telegram."
+}
+
+// ActiveShared returns the active admission response with shared links.
+func ActiveShared(links []InviteLinkLine) string {
+	var b strings.Builder
+
+	b.WriteString("Подписка активна. Вступите в клубные ресурсы по ссылкам:")
+
+	for _, link := range links {
+		if link.URL == "" {
+			continue
+		}
+
+		fmt.Fprintf(&b, "\n- %s: %s", resourceText(link.Resource), link.URL)
+	}
+
+	return b.String()
+}
+
+// ActiveDirect returns the active response for direct-invite mode.
+func ActiveDirect() string {
+	return "Подписка активна. Сейчас подготовлю персональные ссылки для входа."
+}
+
+// InviteSoon tells the user that personal links are being prepared.
+func InviteSoon() string {
+	return "Подписка активна. Сейчас отправлю персональные ссылки для входа."
+}
+
+// Granted confirms that a join request was approved.
+func Granted() string {
+	return "Доступ подтверждён. Заявка на вступление одобрена."
+}
+
+// TryLater asks the user to retry after a temporary check failure.
+func TryLater() string {
+	return "Не удалось надёжно проверить подписку. Попробуйте ещё раз чуть позже."
+}
+
+// Banned explains a manual hard-ban.
+func Banned() string {
+	return "Доступ для этого аккаунта заблокирован. Если это ошибка, напишите владельцу."
+}
+
+// AlreadyIn tells the user that all managed resources are already joined.
+func AlreadyIn() string {
+	return "Доступ уже выдан: вы уже состоите в клубных ресурсах."
+}
+
+// PersonalInviteMisused explains that an invite belongs to another account.
+func PersonalInviteMisused() string {
+	return "Эта ссылка выпущена для другого аккаунта. Запросите доступ через свой Telegram."
 }
 
 // Help returns the /help text.

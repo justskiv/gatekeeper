@@ -3,19 +3,28 @@ package invite
 
 import (
 	"context"
+	"time"
 
 	"github.com/go-telegram/bot/models"
 
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/store"
-	"github.com/justskiv/gatekeeper/internal/telegram"
 )
+
+// CreateChatInviteLinkParams is the Bot API surface needed by Service.
+type CreateChatInviteLinkParams struct {
+	ChatID             int64
+	Name               string
+	ExpireAt           *time.Time
+	MemberLimit        int
+	CreatesJoinRequest bool
+}
 
 // LinkManager is the consumer-side Telegram surface needed by Service.
 type LinkManager interface {
 	CreateChatInviteLink(
 		ctx context.Context,
-		params telegram.CreateChatInviteLinkParams,
+		params CreateChatInviteLinkParams,
 	) (*models.ChatInviteLink, error)
 	RevokeChatInviteLink(
 		ctx context.Context,
@@ -36,6 +45,11 @@ type Store interface {
 		tgID int64,
 		resource domain.Resource,
 		mode domain.InviteMode,
+	) (domain.InviteLink, bool, error)
+	FindActiveByHash(
+		ctx context.Context,
+		resource domain.Resource,
+		inviteLinkHash string,
 	) (domain.InviteLink, bool, error)
 	SaveCreated(ctx context.Context, input store.InviteLinkInput) (domain.InviteLink, error)
 	MarkStatus(

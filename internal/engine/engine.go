@@ -236,6 +236,16 @@ func (e *Engine) recomputeAccess(
 	return nil, nil
 }
 
+// RecomputeAccess re-evaluates durable local access state after callers
+// have persisted fresh observations.
+func (e *Engine) RecomputeAccess(
+	ctx context.Context,
+	repos Store,
+	tgID int64,
+) ([]Effect, error) {
+	return e.recomputeAccess(ctx, repos, tgID)
+}
+
 func eventDetail(event domain.SubscriptionEvent) string {
 	return fmt.Sprintf("platform=%s kind=%s external_id=%s period_id=%s",
 		event.Platform, event.Kind, event.ExternalID, event.PeriodID)

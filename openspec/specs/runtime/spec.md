@@ -136,6 +136,20 @@ fatal-ошибкой, а не молча уходить в polling. Webhook-тр
   что webhook-режим Telegram в этой фазе не поддержан
 - **AND** поллер не запускается
 
+### Requirement: Runtime отклоняет неоднозначные source и club chat IDs
+
+Startup MUST отклонять конфигурацию, в которой один Telegram `chat.id`
+одновременно является source chat и managed club resource. Проверка
+MUST выполняться до запуска poller loop, чтобы один Telegram update не
+мог быть направлен в два доменных обработчика. Ошибка MUST называть
+конфликтующие configuration keys и shared value.
+
+#### Scenario: Source chat id совпадает с club resource id
+- **WHEN** один и тот же `chat.id` настроен, например, как
+  `BOOSTY_GROUP_ID` и `CLUB_CHAT_ID`
+- **THEN** startup завершается ошибкой конфигурации до запуска poller
+- **AND** ошибка называет оба конфликтующих key и shared value
+
 ### Requirement: Default polling runtime starts no HTTP server
 
 `gatekeeper` MUST NOT поднимать HTTP-сервер в дефолтном режиме. При
@@ -184,4 +198,3 @@ stderr MUST оставаться надёжным каналом.
 - **WHEN** внутренняя функция `run()` возвращает ненулевую ошибку
 - **THEN** `main` пишет `"fatal: <message>"` в stderr и выходит с
   кодом `1`
-

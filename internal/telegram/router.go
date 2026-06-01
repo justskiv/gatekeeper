@@ -8,9 +8,11 @@ import (
 
 	"github.com/go-telegram/bot/models"
 
+	"github.com/justskiv/gatekeeper/internal/admission"
 	commandbot "github.com/justskiv/gatekeeper/internal/bot"
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/engine"
+	"github.com/justskiv/gatekeeper/internal/messages"
 	"github.com/justskiv/gatekeeper/internal/notify"
 	"github.com/justskiv/gatekeeper/internal/source"
 	"github.com/justskiv/gatekeeper/internal/store"
@@ -49,9 +51,11 @@ type Router struct {
 	whitelist     *store.Whitelist
 	revocations   *store.Revocations
 	outbox        *store.Outbox
+	invites       *store.Invites
 	updateID      int64
 	statusEngine  *engine.Engine
 	sourceChats   SourceChats
+	admissionCfg  admission.Config
 	preflight     RoutePreflight
 	chats         []HealthChat
 	ownerIDs      []int64
@@ -69,6 +73,7 @@ type RouterDeps struct {
 	Whitelist     *store.Whitelist
 	Revocations   *store.Revocations
 	Outbox        *store.Outbox
+	Invites       *store.Invites
 	UpdateID      int64
 }
 
@@ -81,7 +86,8 @@ type SourceChats struct {
 
 // RoutePreflight contains network reads performed before tx2.
 type RoutePreflight struct {
-	Snapshot *engine.Snapshot
+	Snapshot             *engine.Snapshot
+	AdmissionRateLimited bool
 }
 
 // RouterOption configures optional routes.
@@ -98,6 +104,13 @@ func WithStatusEngine(e *engine.Engine) RouterOption {
 func WithSourceChats(chats SourceChats) RouterOption {
 	return func(r *Router) {
 		r.sourceChats = chats
+	}
+}
+
+// WithAdmissionConfig attaches managed club-resource admission config.
+func WithAdmissionConfig(cfg admission.Config) RouterOption {
+	return func(r *Router) {
+		r.admissionCfg = cfg
 	}
 }
 
@@ -130,6 +143,7 @@ func NewRouter(
 		whitelist:     deps.Whitelist,
 		revocations:   deps.Revocations,
 		outbox:        deps.Outbox,
+		invites:       deps.Invites,
 		updateID:      deps.UpdateID,
 		chats:         chats,
 		ownerIDs:      ownerIDs,
@@ -164,9 +178,9 @@ func (r *Router) Route(ctx context.Context, update *models.Update) (RouteResult,
 	case update.ChatMember != nil:
 		return r.routeChatMember(ctx, update.ChatMember)
 	case update.ChatJoinRequest != nil:
-		return ignored(), nil
+		return r.routeChatJoinRequest(ctx, update.ChatJoinRequest)
 	case update.CallbackQuery != nil:
-		return ignored(), nil
+		return r.routeCallback(ctx, update.CallbackQuery)
 	default:
 		return ignored(), nil
 	}
@@ -175,6 +189,13 @@ func (r *Router) Route(ctx context.Context, update *models.Update) (RouteResult,
 func (r *Router) routeMessage(
 	ctx context.Context, msg *models.Message,
 ) (RouteResult, error) {
+	if msg.Chat.Type == models.ChatTypePrivate &&
+		r.canRunAdmission() &&
+		isAccessRequestMessage(msg) {
+		return r.routeAdmissionAccess(ctx, userFromTelegram(*msg.From, domain.DMOpen),
+			"message")
+	}
+
 	commands := commandbot.NewCommands(commandbot.CommandDeps{
 		Users:         r.users,
 		Subscriptions: r.subscriptions,
@@ -200,6 +221,10 @@ func (r *Router) routeChatMember(
 	ctx context.Context,
 	update *models.ChatMemberUpdated,
 ) (RouteResult, error) {
+	if resource, ok := r.clubResource(update.Chat.ID); ok && r.canRunAdmission() {
+		return r.routeClubMembership(ctx, update, resource)
+	}
+
 	platform, ok := r.sourcePlatform(update.Chat.ID)
 	if !ok {
 		return ignored(), nil
@@ -226,6 +251,169 @@ func (r *Router) routeChatMember(
 	}
 
 	return r.processedEffects(ctx, fromEngineEffects(effects))
+}
+
+func (r *Router) routeChatJoinRequest(
+	ctx context.Context,
+	req *models.ChatJoinRequest,
+) (RouteResult, error) {
+	resource, ok := r.clubResource(req.Chat.ID)
+	if !ok || !r.canRunAdmission() {
+		return ignored(), nil
+	}
+
+	inviteLink := ""
+	if req.InviteLink != nil {
+		inviteLink = req.InviteLink.InviteLink
+	}
+
+	requestDate := time.Now()
+	if req.Date > 0 {
+		requestDate = time.Unix(int64(req.Date), 0)
+	}
+
+	handler := r.admissionHandler()
+	if err := handler.HandleJoinRequest(ctx, admission.JoinRequest{
+		User:        userFromTelegram(req.From, ""),
+		UserChatID:  req.UserChatID,
+		Resource:    resource,
+		InviteLink:  inviteLink,
+		RequestDate: requestDate,
+		Snapshot:    r.preflight.Snapshot,
+	}); err != nil {
+		return RouteResult{}, err
+	}
+
+	return processed(nil), nil
+}
+
+func (r *Router) routeCallback(
+	ctx context.Context,
+	query *models.CallbackQuery,
+) (RouteResult, error) {
+	if query == nil || query.Data != messages.RetryAccessCallbackData ||
+		!r.canRunAdmission() {
+		return ignored(), nil
+	}
+
+	return r.routeAdmissionAccess(ctx,
+		userFromTelegram(query.From, domain.DMOpen), "callback")
+}
+
+func (r *Router) routeAdmissionAccess(
+	ctx context.Context,
+	user domain.User,
+	trigger string,
+) (RouteResult, error) {
+	handler := r.admissionHandler()
+	if err := handler.HandleAccessRequest(ctx, admission.AccessRequest{
+		User:        user,
+		Snapshot:    r.preflight.Snapshot,
+		RateLimited: r.preflight.AdmissionRateLimited,
+		Trigger:     trigger,
+	}); err != nil {
+		return RouteResult{}, err
+	}
+
+	return processed(nil), nil
+}
+
+func (r *Router) routeClubMembership(
+	ctx context.Context,
+	update *models.ChatMemberUpdated,
+	resource domain.Resource,
+) (RouteResult, error) {
+	user := chatMemberUser(&update.NewChatMember)
+	if user == nil || user.IsBot {
+		return processed(nil), nil
+	}
+
+	oldInChat := source.MemberInChat(&update.OldChatMember)
+
+	newInChat := source.MemberInChat(&update.NewChatMember)
+	if oldInChat == newInChat {
+		return processed(nil), nil
+	}
+
+	inviteLink := ""
+	if update.InviteLink != nil {
+		inviteLink = update.InviteLink.InviteLink
+	}
+
+	eventDate := time.Time{}
+	if update.Date > 0 {
+		eventDate = time.Unix(int64(update.Date), 0)
+	}
+
+	handler := r.admissionHandler()
+	if err := handler.HandleMembershipUpdate(ctx, admission.MembershipUpdate{
+		User:           userFromTelegram(*user, ""),
+		Resource:       resource,
+		Joined:         newInChat,
+		ViaJoinRequest: update.ViaJoinRequest,
+		InviteLink:     inviteLink,
+		EventDate:      eventDate,
+		Snapshot:       r.preflight.Snapshot,
+	}); err != nil {
+		return RouteResult{}, err
+	}
+
+	return processed(nil), nil
+}
+
+func (r *Router) admissionHandler() *admission.Handler {
+	return admission.New(admission.Deps{
+		Users:         r.users,
+		Subscriptions: r.subscriptions,
+		Grants:        r.grants,
+		Invites:       r.invites,
+		Outbox:        r.outbox,
+		Audit:         r.audit,
+		Alerts:        r.alerts,
+		Whitelist:     r.whitelist,
+		Revocations:   r.revocations,
+		StatusEngine:  r.statusEngine,
+	}, r.admissionCfg)
+}
+
+func (r *Router) canRunAdmission() bool {
+	return r.statusEngine != nil &&
+		r.users != nil &&
+		r.subscriptions != nil &&
+		r.grants != nil &&
+		r.invites != nil &&
+		r.outbox != nil
+}
+
+func isAccessRequestMessage(msg *models.Message) bool {
+	if msg == nil || msg.From == nil {
+		return false
+	}
+
+	cmd := commandbot.CommandName(msg.Text)
+
+	return cmd == "start" || cmd == ""
+}
+
+func (r *Router) clubResource(chatID int64) (domain.Resource, bool) {
+	if chatID == 0 {
+		return "", false
+	}
+
+	for _, resource := range r.admissionCfg.Resources {
+		if resource.ChatID == chatID {
+			return resource.Resource, true
+		}
+	}
+
+	switch chatID {
+	case r.admissionCfg.ClubChatID:
+		return domain.ResourceChat, r.admissionCfg.ClubChatID != 0
+	case r.admissionCfg.ClubChannelID:
+		return domain.ResourceChannel, r.admissionCfg.ClubChannelID != 0
+	default:
+		return "", false
+	}
 }
 
 func (r *Router) sourcePlatform(chatID int64) (domain.Platform, bool) {

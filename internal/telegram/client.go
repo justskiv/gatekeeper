@@ -15,6 +15,7 @@ import (
 	botapi "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"github.com/justskiv/gatekeeper/internal/invite"
 	"github.com/justskiv/gatekeeper/internal/messages"
 )
 
@@ -148,6 +149,29 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) err
 	_, err := c.bot.SendMessage(ctx, &botapi.SendMessageParams{
 		ChatID: chatID,
 		Text:   text,
+	})
+	if err != nil {
+		if chatID > 0 {
+			return NormalizeError("sendMessage", err)
+		}
+
+		return NormalizeError("sendChatMessage", err)
+	}
+
+	return nil
+}
+
+// SendMessageWithReplyMarkup sends a plain text message with reply markup.
+func (c *Client) SendMessageWithReplyMarkup(
+	ctx context.Context,
+	chatID int64,
+	text string,
+	replyMarkup models.ReplyMarkup,
+) error {
+	_, err := c.bot.SendMessage(ctx, &botapi.SendMessageParams{
+		ChatID:      chatID,
+		Text:        text,
+		ReplyMarkup: replyMarkup,
 	})
 	if err != nil {
 		if chatID > 0 {
@@ -349,14 +373,9 @@ type GetUpdatesParams struct {
 	AllowedUpdates []string `json:"allowed_updates,omitempty"`
 }
 
-// CreateChatInviteLinkParams is the Bot API surface needed by invite service.
-type CreateChatInviteLinkParams struct {
-	ChatID             int64
-	Name               string
-	ExpireAt           *time.Time
-	MemberLimit        int
-	CreatesJoinRequest bool
-}
+// CreateChatInviteLinkParams keeps the Telegram client surface stable while
+// the invite package owns the consumer-side request shape.
+type CreateChatInviteLinkParams = invite.CreateChatInviteLinkParams
 
 type createChatInviteLinkRequest struct {
 	ChatID             int64  `json:"chat_id"`

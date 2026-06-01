@@ -8,13 +8,18 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/go-telegram/bot/models"
 
+	"github.com/justskiv/gatekeeper/internal/admission"
 	commandbot "github.com/justskiv/gatekeeper/internal/bot"
+	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/engine"
+	"github.com/justskiv/gatekeeper/internal/messages"
 	"github.com/justskiv/gatekeeper/internal/notify"
+	"github.com/justskiv/gatekeeper/internal/source"
 	"github.com/justskiv/gatekeeper/internal/store"
 )
 
@@ -23,6 +28,7 @@ const (
 	defaultPollTimeout = 50
 	pendingBatchLimit  = 100
 	maxPollBackoff     = 5 * time.Second
+	liveRetryDelay     = 100 * time.Millisecond
 )
 
 // Poller runs the durable long-polling loop.
@@ -33,6 +39,8 @@ type Poller struct {
 
 	statusEngine *engine.Engine
 	sourceChats  SourceChats
+	admissionCfg admission.Config
+	rateLimiter  *admissionRateLimiter
 	chats        []HealthChat
 	ownerIDs     []int64
 	logger       *slog.Logger
@@ -60,6 +68,13 @@ func WithPollerSourceChats(sourceChats SourceChats) PollerOption {
 	}
 }
 
+// WithPollerAdmissionConfig attaches managed resource admission config.
+func WithPollerAdmissionConfig(cfg admission.Config) PollerOption {
+	return func(p *Poller) {
+		p.admissionCfg = cfg
+	}
+}
+
 // NewPoller returns a durable sequential Telegram update poller.
 func NewPoller(
 	db *sql.DB,
@@ -75,14 +90,15 @@ func NewPoller(
 	}
 
 	poller := &Poller{
-		db:       db,
-		client:   client,
-		notifier: notifier,
-		chats:    chats,
-		ownerIDs: ownerIDs,
-		logger:   logger,
-		limit:    defaultPollLimit,
-		timeout:  defaultPollTimeout,
+		db:          db,
+		client:      client,
+		notifier:    notifier,
+		chats:       chats,
+		ownerIDs:    ownerIDs,
+		logger:      logger,
+		rateLimiter: newAdmissionRateLimiter(time.Now),
+		limit:       defaultPollLimit,
+		timeout:     defaultPollTimeout,
 	}
 	for _, opt := range opts {
 		opt(poller)
@@ -284,10 +300,12 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 		Whitelist:     store.NewWhitelist(tx),
 		Revocations:   store.NewRevocations(tx),
 		Outbox:        store.NewOutbox(tx),
+		Invites:       store.NewInvites(tx),
 		UpdateID:      row.UpdateID,
 	}, p.chats, p.ownerIDs, p.logger,
 		WithStatusEngine(p.statusEngine),
 		WithSourceChats(p.sourceChats),
+		WithAdmissionConfig(p.admissionCfg),
 		WithPreflight(preflight))
 
 	result, err := router.Route(ctx, &update)
@@ -330,9 +348,23 @@ func (p *Poller) buildPreflight(
 	ctx context.Context,
 	update *models.Update,
 ) (RoutePreflight, error) {
-	if p.statusEngine == nil ||
-		update == nil ||
-		update.Message == nil ||
+	if p.statusEngine == nil || update == nil {
+		return RoutePreflight{}, nil
+	}
+
+	preflight, ok, err := p.buildAdmissionPreflight(ctx, update)
+	if ok || err != nil {
+		return preflight, err
+	}
+
+	return p.buildCommandPreflight(ctx, update)
+}
+
+func (p *Poller) buildCommandPreflight(
+	ctx context.Context,
+	update *models.Update,
+) (RoutePreflight, error) {
+	if update.Message == nil ||
 		update.Message.From == nil ||
 		update.Message.Chat.Type != models.ChatTypePrivate {
 		return RoutePreflight{}, nil
@@ -381,6 +413,187 @@ func (p *Poller) buildPreflight(
 	}
 
 	return RoutePreflight{Snapshot: &snapshot}, nil
+}
+
+func (p *Poller) buildAdmissionPreflight(
+	ctx context.Context,
+	update *models.Update,
+) (RoutePreflight, bool, error) {
+	target, ok := p.admissionPreflightTarget(update)
+	if !ok {
+		return RoutePreflight{}, false, nil
+	}
+
+	if target.rateLimited {
+		return RoutePreflight{AdmissionRateLimited: true}, true, nil
+	}
+
+	banned, err := p.isKnownBanned(ctx, target.tgID)
+	if err != nil {
+		return RoutePreflight{}, true, err
+	}
+
+	if banned {
+		return RoutePreflight{}, true, nil
+	}
+
+	snapshot, err := p.liveSnapshotWithRetries(ctx, target.tgID, target.retries)
+	if err != nil {
+		return RoutePreflight{}, true, err
+	}
+
+	return RoutePreflight{Snapshot: snapshot}, true, nil
+}
+
+type admissionPreflightTarget struct {
+	tgID        int64
+	retries     int
+	rateLimited bool
+}
+
+func (p *Poller) admissionPreflightTarget(
+	update *models.Update,
+) (admissionPreflightTarget, bool) {
+	switch {
+	case update.Message != nil:
+		msg := update.Message
+		if msg.From == nil ||
+			msg.Chat.Type != models.ChatTypePrivate ||
+			!isAccessRequestMessage(msg) {
+			return admissionPreflightTarget{}, false
+		}
+
+		if !p.rateLimiter.Allow(msg.From.ID, 30*time.Second) {
+			return admissionPreflightTarget{
+				tgID:        msg.From.ID,
+				rateLimited: true,
+			}, true
+		}
+
+		return admissionPreflightTarget{tgID: msg.From.ID}, true
+	case update.CallbackQuery != nil:
+		query := update.CallbackQuery
+		if query.Data != messages.RetryAccessCallbackData {
+			return admissionPreflightTarget{}, false
+		}
+
+		if !p.rateLimiter.Allow(query.From.ID, 30*time.Second) {
+			return admissionPreflightTarget{
+				tgID:        query.From.ID,
+				rateLimited: true,
+			}, true
+		}
+
+		return admissionPreflightTarget{tgID: query.From.ID}, true
+	case update.ChatJoinRequest != nil:
+		req := update.ChatJoinRequest
+		if !p.isClubResource(req.Chat.ID) {
+			return admissionPreflightTarget{}, false
+		}
+
+		return admissionPreflightTarget{
+			tgID:    req.From.ID,
+			retries: p.joinRequestRetries(),
+		}, true
+	case update.ChatMember != nil:
+		memberUpdate := update.ChatMember
+		if !p.isClubResource(memberUpdate.Chat.ID) {
+			return admissionPreflightTarget{}, false
+		}
+
+		if source.MemberInChat(&memberUpdate.OldChatMember) ||
+			!source.MemberInChat(&memberUpdate.NewChatMember) {
+			return admissionPreflightTarget{}, false
+		}
+
+		if memberUpdate.ViaJoinRequest ||
+			p.admissionCfg.InviteMode != domain.InviteDirect {
+			return admissionPreflightTarget{}, false
+		}
+
+		user := chatMemberUser(&memberUpdate.NewChatMember)
+		if user == nil || user.IsBot {
+			return admissionPreflightTarget{}, false
+		}
+
+		return admissionPreflightTarget{tgID: user.ID}, true
+	default:
+		return admissionPreflightTarget{}, false
+	}
+}
+
+func (p *Poller) liveSnapshotWithRetries(
+	ctx context.Context,
+	tgID int64,
+	retries int,
+) (*engine.Snapshot, error) {
+	attempts := max(retries, 0) + 1
+
+	var snapshot engine.Snapshot
+
+	for i := range attempts {
+		got, err := p.statusEngine.LiveSnapshot(ctx, engine.Store{
+			Users:         store.NewUsers(p.db),
+			Subscriptions: store.NewSubscriptions(p.db),
+			Whitelist:     store.NewWhitelist(p.db),
+		}, tgID)
+		if err != nil {
+			return nil, err
+		}
+
+		snapshot = got
+		if got.Decision.Status != domain.StatusUnknown || i == attempts-1 {
+			return &snapshot, nil
+		}
+
+		timer := time.NewTimer(liveRetryDelay)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+
+			return nil, ctx.Err()
+		}
+	}
+
+	return &snapshot, nil
+}
+
+func (p *Poller) isClubResource(chatID int64) bool {
+	if chatID == 0 {
+		return false
+	}
+
+	for _, resource := range p.admissionCfg.Resources {
+		if resource.ChatID == chatID {
+			return true
+		}
+	}
+
+	return chatID == p.admissionCfg.ClubChatID && p.admissionCfg.ClubChatID != 0 ||
+		chatID == p.admissionCfg.ClubChannelID && p.admissionCfg.ClubChannelID != 0
+}
+
+func (p *Poller) joinRequestRetries() int {
+	if p.admissionCfg.JoinRequestRetries > 0 {
+		return p.admissionCfg.JoinRequestRetries
+	}
+
+	return 2
+}
+
+func (p *Poller) isKnownBanned(ctx context.Context, tgID int64) (bool, error) {
+	user, err := store.NewUsers(p.db).Get(ctx, tgID)
+	switch {
+	case err == nil:
+		return user.Banned, nil
+	case errors.Is(err, store.ErrNotFound):
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 func containsID(ids []int64, want int64) bool {
@@ -534,18 +747,18 @@ func updateType(update *models.Update) string {
 func updateChatAndUser(update *models.Update) (*int64, *int64) {
 	switch {
 	case update.Message != nil:
-		return new(update.Message.Chat.ID), messageUserID(update.Message)
+		return int64Ptr(update.Message.Chat.ID), messageUserID(update.Message)
 	case update.CallbackQuery != nil:
-		return nil, new(update.CallbackQuery.From.ID)
+		return nil, int64Ptr(update.CallbackQuery.From.ID)
 	case update.MyChatMember != nil:
-		return new(update.MyChatMember.Chat.ID),
-			new(update.MyChatMember.From.ID)
+		return int64Ptr(update.MyChatMember.Chat.ID),
+			int64Ptr(update.MyChatMember.From.ID)
 	case update.ChatMember != nil:
-		return new(update.ChatMember.Chat.ID),
-			new(update.ChatMember.From.ID)
+		return int64Ptr(update.ChatMember.Chat.ID),
+			int64Ptr(update.ChatMember.From.ID)
 	case update.ChatJoinRequest != nil:
-		return new(update.ChatJoinRequest.Chat.ID),
-			new(update.ChatJoinRequest.From.ID)
+		return int64Ptr(update.ChatJoinRequest.Chat.ID),
+			int64Ptr(update.ChatJoinRequest.From.ID)
 	default:
 		return nil, nil
 	}
@@ -556,5 +769,42 @@ func messageUserID(msg *models.Message) *int64 {
 		return nil
 	}
 
-	return new(msg.From.ID)
+	return int64Ptr(msg.From.ID)
+}
+
+func int64Ptr(v int64) *int64 {
+	return &v
+}
+
+type admissionRateLimiter struct {
+	mu   sync.Mutex
+	last map[int64]time.Time
+	now  func() time.Time
+}
+
+func newAdmissionRateLimiter(now func() time.Time) *admissionRateLimiter {
+	return &admissionRateLimiter{
+		last: make(map[int64]time.Time),
+		now:  now,
+	}
+}
+
+func (l *admissionRateLimiter) Allow(tgID int64, interval time.Duration) bool {
+	if l == nil || interval <= 0 {
+		return true
+	}
+
+	now := l.now()
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	last, ok := l.last[tgID]
+	if ok && now.Sub(last) < interval {
+		return false
+	}
+
+	l.last[tgID] = now
+
+	return true
 }

@@ -111,8 +111,9 @@ Every value MUST be parsed into its target type.
 be strictly positive. Booleans MUST follow `strconv.ParseBool`.
 Enums (`INVITE_MODE`, `TRIBUTE_MODE`, `TELEGRAM_MODE`,
 `EXPIRY_MODE`, `LOG_LEVEL`, `LOG_FORMAT`) MUST accept only their
-listed values. `ENFORCER_WORKERS` MUST be `> 0`. `TIMEZONE` MUST
-load via `time.LoadLocation`.
+listed values. `ENFORCER_WORKERS` MUST be `> 0`.
+`ADMISSION_JOIN_REQUEST_RETRIES` MUST be zero or greater. `TIMEZONE`
+MUST load via `time.LoadLocation`.
 
 #### Scenario: Invalid duration
 - **WHEN** `GRACE_PERIOD` is `"not-a-duration"`
@@ -133,6 +134,8 @@ run. The defaults are:
 
 - `DB_PATH` → `./data/gatekeeper.db`
 - `INVITE_MODE` → `shared_join_request`, `INVITE_TTL` → `24h`
+- `ADMISSION_FALLBACK_MAX_AGE` → `1h`,
+  `ADMISSION_JOIN_REQUEST_RETRIES` → `2`
 - `TRIBUTE_MODE` → `observation`, `WEBHOOK_LISTEN_ADDR` → `:8080`
 - `TRIBUTE_WEBHOOK_PATH` → `/webhooks/tribute`
 - `TELEGRAM_MODE` → `polling`, `TELEGRAM_WEBHOOK_PATH` → `/webhooks/telegram`

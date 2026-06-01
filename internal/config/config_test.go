@@ -1,47 +1,52 @@
 package config
 
-import "maps"
-
-import "testing"
+import (
+	"maps"
+	"strings"
+	"testing"
+	"time"
+)
 
 // baseEnv is a complete, valid environment. Every variable the loader
 // reads is set explicitly so the tests do not depend on the ambient
 // shell environment.
 func baseEnv() map[string]string {
 	return map[string]string{
-		"BOT_TOKEN":                   "123456:ABC-DEF",
-		"OWNER_TG_IDS":                "11111111,22222222",
-		"DB_PATH":                     "./data/gatekeeper.db",
-		"BOOSTY_GROUP_ID":             "-1001111111111",
-		"TRIBUTE_CHANNEL_ID":          "-1002222222222",
-		"CLUB_CHAT_ID":                "-1003333333333",
-		"CLUB_CHANNEL_ID":             "-1004444444444",
-		"ADMIN_LOG_CHAT_ID":           "",
-		"BOOSTY_SUBSCRIBE_URL":        "https://boosty.to/author",
-		"TRIBUTE_SUBSCRIBE_URL":       "https://t.me/tribute/app",
-		"INVITE_MODE":                 "shared_join_request",
-		"INVITE_TTL":                  "24h",
-		"ALLOW_DIRECT_INVITES":        "false",
-		"TRIBUTE_MODE":                "observation",
-		"TRIBUTE_API_KEY":             "",
-		"TRIBUTE_CANCEL_IS_IMMEDIATE": "false",
-		"WEBHOOK_LISTEN_ADDR":         ":8080",
-		"TRIBUTE_WEBHOOK_PATH":        "/webhooks/tribute",
-		"TELEGRAM_MODE":               "polling",
-		"TELEGRAM_WEBHOOK_PUBLIC_URL": "",
-		"TELEGRAM_WEBHOOK_PATH":       "/webhooks/telegram",
-		"TELEGRAM_WEBHOOK_SECRET":     "",
-		"EXPIRY_MODE":                 "grace",
-		"GRACE_PERIOD":                "72h",
-		"RECONCILE_INTERVAL":          "1h",
-		"CLEANUP_INTERVAL":            "24h",
-		"RAW_RETENTION":               "720h",
-		"AUDIT_RETENTION":             "8760h",
-		"ENFORCER_WORKERS":            "2",
-		"TIMEZONE":                    "UTC",
-		"LOG_LEVEL":                   "info",
-		"LOG_FORMAT":                  "json",
-		"METRICS_ENABLED":             "false",
+		"BOT_TOKEN":                      "123456:ABC-DEF",
+		"OWNER_TG_IDS":                   "11111111,22222222",
+		"DB_PATH":                        "./data/gatekeeper.db",
+		"BOOSTY_GROUP_ID":                "-1001111111111",
+		"TRIBUTE_CHANNEL_ID":             "-1002222222222",
+		"CLUB_CHAT_ID":                   "-1003333333333",
+		"CLUB_CHANNEL_ID":                "-1004444444444",
+		"ADMIN_LOG_CHAT_ID":              "",
+		"BOOSTY_SUBSCRIBE_URL":           "https://boosty.to/author",
+		"TRIBUTE_SUBSCRIBE_URL":          "https://t.me/tribute/app",
+		"INVITE_MODE":                    "shared_join_request",
+		"INVITE_TTL":                     "24h",
+		"ALLOW_DIRECT_INVITES":           "false",
+		"ADMISSION_FALLBACK_MAX_AGE":     "1h",
+		"ADMISSION_JOIN_REQUEST_RETRIES": "2",
+		"TRIBUTE_MODE":                   "observation",
+		"TRIBUTE_API_KEY":                "",
+		"TRIBUTE_CANCEL_IS_IMMEDIATE":    "false",
+		"WEBHOOK_LISTEN_ADDR":            ":8080",
+		"TRIBUTE_WEBHOOK_PATH":           "/webhooks/tribute",
+		"TELEGRAM_MODE":                  "polling",
+		"TELEGRAM_WEBHOOK_PUBLIC_URL":    "",
+		"TELEGRAM_WEBHOOK_PATH":          "/webhooks/telegram",
+		"TELEGRAM_WEBHOOK_SECRET":        "",
+		"EXPIRY_MODE":                    "grace",
+		"GRACE_PERIOD":                   "72h",
+		"RECONCILE_INTERVAL":             "1h",
+		"CLEANUP_INTERVAL":               "24h",
+		"RAW_RETENTION":                  "720h",
+		"AUDIT_RETENTION":                "8760h",
+		"ENFORCER_WORKERS":               "2",
+		"TIMEZONE":                       "UTC",
+		"LOG_LEVEL":                      "info",
+		"LOG_FORMAT":                     "json",
+		"METRICS_ENABLED":                "false",
 	}
 }
 
@@ -67,6 +72,11 @@ func TestLoad(t *testing.T) {
 		{"non-negative chat ID", map[string]string{"CLUB_CHAT_ID": "1003333333333"}, true},
 		{"non-integer chat ID", map[string]string{"CLUB_CHAT_ID": "not-a-number"}, true},
 		{"duplicate chat IDs", map[string]string{"CLUB_CHANNEL_ID": "-1003333333333"}, true},
+		{
+			"source and club chat conflict",
+			map[string]string{"CLUB_CHAT_ID": "-1001111111111"},
+			true,
+		},
 		{"invalid owner IDs", map[string]string{"OWNER_TG_IDS": "abc"}, true},
 		{"direct without allow flag", map[string]string{"INVITE_MODE": "direct"}, true},
 		{
@@ -96,6 +106,16 @@ func TestLoad(t *testing.T) {
 		},
 		{"invalid duration", map[string]string{"GRACE_PERIOD": "abc"}, true},
 		{"non-positive duration", map[string]string{"INVITE_TTL": "0s"}, true},
+		{
+			"non-positive admission fallback",
+			map[string]string{"ADMISSION_FALLBACK_MAX_AGE": "0s"},
+			true,
+		},
+		{
+			"negative admission join request retries",
+			map[string]string{"ADMISSION_JOIN_REQUEST_RETRIES": "-1"},
+			true,
+		},
 		{"invalid timezone", map[string]string{"TIMEZONE": "Mars/Olympus"}, true},
 		{"invalid invite mode", map[string]string{"INVITE_MODE": "carrier-pigeon"}, true},
 		{"invalid expiry mode", map[string]string{"EXPIRY_MODE": "whenever"}, true},
@@ -161,8 +181,34 @@ func TestLoadParsesValues(t *testing.T) {
 		t.Errorf("GracePeriod = %v", cfg.GracePeriod)
 	}
 
+	if cfg.AdmissionFallbackMaxAge != time.Hour {
+		t.Errorf("AdmissionFallbackMaxAge = %v, want 1h", cfg.AdmissionFallbackMaxAge)
+	}
+
+	if cfg.AdmissionJoinRequestRetries != 2 {
+		t.Errorf("AdmissionJoinRequestRetries = %d, want 2",
+			cfg.AdmissionJoinRequestRetries)
+	}
+
 	if cfg.Location == nil || cfg.Location.String() != "UTC" {
 		t.Errorf("Location = %v", cfg.Location)
+	}
+}
+
+func TestLoadReportsSourceClubChatConflictKeys(t *testing.T) {
+	env := baseEnv()
+	env["CLUB_CHAT_ID"] = env["BOOSTY_GROUP_ID"]
+
+	_, err := LoadFromLookup(lookup(env))
+	if err == nil {
+		t.Fatal("expected source/club conflict error")
+	}
+
+	msg := err.Error()
+	if !strings.Contains(msg, "BOOSTY_GROUP_ID") ||
+		!strings.Contains(msg, "CLUB_CHAT_ID") ||
+		!strings.Contains(msg, env["BOOSTY_GROUP_ID"]) {
+		t.Fatalf("error = %q, want both keys and shared value", msg)
 	}
 }
 

@@ -1,10 +1,5 @@
-# bot-commands Specification
+## ADDED Requirements
 
-## Purpose
-
-Описывает команды Telegram-бота, durable-доставку личных сообщений и
-тонкие bot-command входы в доменные workflows.
-## Requirements
 ### Requirement: Запрос доступа ограничен по частоте и повторяем кнопкой
 
 Бот MUST направлять retry controls, включая inline-кнопку "Проверить
@@ -23,6 +18,8 @@ actions.
 - **WHEN** пользователь повторно нажимает retry раньше 30 секунд
 - **THEN** источники подписки не вызываются
 - **AND** новые invite actions не создаются
+
+## MODIFIED Requirements
 
 ### Requirement: `/start` registers the user and returns the greeting
 
@@ -64,59 +61,14 @@ durable `send_dm` или `send_invite`.
 - **THEN** бот ставит durable `MSG_TRY_LATER`
 
 #### Scenario: Некомандный DM-текст ведёт себя как /start
-- **WHEN** обычный пользователь шлёт в личку произвольный текст без команды
+- **WHEN** обычный пользователь шлёт в личку произвольный текст без
+  команды
 - **THEN** бот обрабатывает его как `/start`, включая grant-access flow
 
 #### Scenario: Повторный /start идемпотентен
 - **WHEN** пользователь отправляет `/start` повторно
-- **THEN** существующая строка `users` обновляется, дубль не создаётся
+- **THEN** существующая строка `users` обновляется
 - **AND** второй `pending` grant и дубль invite actions не создаются
-
-### Requirement: `/help` returns the help text
-
-`/help` MUST отвечать краткой справкой: что делает бот, как оформить
-подписку и важное замечание «писать с того же аккаунта Telegram». Текст
-берётся из пакета `messages`.
-
-#### Scenario: Help-команда отвечает
-- **WHEN** пользователь отправляет `/help` в личку
-- **THEN** бот отвечает справочным текстом из пакета `messages`
-
-### Requirement: `/here` answers chat id and type for owners only
-
-`/here` MUST быть доступна только идентификаторам из `OWNER_TG_IDS` и
-работать в группах/супергруппах: бот отвечает `chat.id` и типом чата —
-это помогает владельцу узнать ID для конфигурации. В каналах `/here`
-не работает: посты канала приходят как `channel_post` (его нет в
-`allowed_updates`) и не несут надёжного `from` для проверки владельца;
-ID канала владелец узнаёт из discovery-DM, когда добавляет бота
-админом. Обращение `/here` не от владельца игнорируется; прочие
-сообщения в не-личных чатах бот не хранит.
-
-#### Scenario: Владелец получает chat id и тип
-- **WHEN** владелец отправляет `/here` в группе или супергруппе
-- **THEN** бот отвечает значением `chat.id` и типом чата
-
-#### Scenario: /here не от владельца игнорируется
-- **WHEN** `/here` отправляет идентификатор не из `OWNER_TG_IDS`
-- **THEN** бот не отвечает и не сохраняет сообщение
-
-### Requirement: setMyCommands registers user and admin command scopes
-
-При старте бот MUST регистрировать меню команд через `setMyCommands`:
-пользовательские команды — глобально, админские — scoped на
-`OWNER_TG_IDS`. Ошибка `setMyCommands` — **best-effort, не фатальна**:
-логируется на уровне `warn` и не прерывает старт (меню — лишь подсказка,
-сами команды работают и без него).
-
-#### Scenario: Command scopes регистрируются при старте
-- **WHEN** бот стартует
-- **THEN** пользовательские команды зарегистрированы глобально
-- **AND** админские команды зарегистрированы scoped на `OWNER_TG_IDS`
-
-#### Scenario: Ошибка регистрации команд не прерывает старт
-- **WHEN** `setMyCommands` возвращает ошибку при старте
-- **THEN** ошибка логируется на уровне `warn` и старт продолжается
 
 ### Requirement: DM delivery respects dm_state and handles blocking
 
@@ -133,7 +85,7 @@ durable `send_dm` action вместо прямого Telegram-вызова. Пе
 `/status`, `/whois` и некомандный DM-текст, который обрабатывается как
 `/start`) MUST enqueue `send_dm` в той же handler-транзакции, где
 фиксируются durable изменения и terminal status входящего update.
-Admission-specific сообщения (`MSG_ACTIVE`, `MSG_INVITE_SOON`,
+Admission-specific сообщения этой фазы (`MSG_ACTIVE`, `MSG_INVITE_SOON`,
 `MSG_GRANTED`, `MSG_TRY_LATER`, `MSG_BANNED`, `MSG_ALREADY_IN`) MUST
 использовать тот же outbox/Enforcer канал. `send_invite` MAY send the
 final invite-bearing DM itself after ensuring personal or direct links.
@@ -165,10 +117,10 @@ final invite-bearing DM itself after ensuring personal or direct links.
 
 Все пользовательские тексты (русский, §15.4) MUST жить в пакете
 `messages`; inline-литералов пользовательских сообщений в коде нет
-(§20.3) — это упрощает будущую локализацию. Admission-сообщения
-`MSG_ACTIVE`, `MSG_INVITE_SOON`, `MSG_GRANTED`, `MSG_TRY_LATER`,
-`MSG_BANNED`, `MSG_ALREADY_IN` и вариант `MSG_ACTIVE` для `direct` без
-обещания approve-заявки MUST жить в `messages`. Текст
+(§20.3) - это упрощает будущую локализацию. К уже существующим текстам
+добавляются admission-сообщения: `MSG_ACTIVE`, `MSG_INVITE_SOON`,
+`MSG_GRANTED`, `MSG_TRY_LATER`, `MSG_BANNED`, `MSG_ALREADY_IN` и
+вариант `MSG_ACTIVE` для `direct` без обещания approve-заявки. Текст
 `MSG_ACCESS_KEPT` MUST браться из `messages`, когда его готовит
 `recomputeAccess`.
 
@@ -184,52 +136,3 @@ final invite-bearing DM itself after ensuring personal or direct links.
 #### Scenario: Admission messages доступны в messages
 - **WHEN** grant-access flow формирует ответ пользователю
 - **THEN** он использует admission-текст из пакета `messages`
-
-### Requirement: `/status` показывает пользователю его подписки и членство
-
-`/status` MUST работать в личке и отвечать пользователю его текущим
-статусом: активные источники подписок с `expires_at`, если он известен,
-и членство в клубных чате и канале. Как любое сообщение в личку,
-команда MUST обеспечить строку пользователя (`ensureUser`) и выставить
-`dm_state='open'` (пользователь нам написал — личка открыта). Команда
-MUST NOT выдавать или отзывать доступ. Живой вердикт источников (включая
-`unknown` при потере ботом прав) MUST считаться **вне `tx2`**, чтобы не
-нарушать инвариант I2. Текст MUST строиться из пакета `messages`
-(`MSG_STATUS`; при отсутствии активной подписки — `MSG_NO_SUB`).
-
-#### Scenario: Пользователь видит активные подписки
-- **WHEN** пользователь с активной подпиской отправляет `/status`
-- **THEN** бот отвечает списком активных источников и (если известно)
-  датами `expires_at`, а также членством в клубных ресурсах
-
-#### Scenario: Нет активных подписок
-- **WHEN** `/status` отправляет пользователь без активных подписок
-- **THEN** ответ сообщает, что активных подписок нет, без выдачи доступа
-
-#### Scenario: Status открывает личку
-- **WHEN** пользователь впервые пишет `/status`
-- **THEN** строка `users` существует и `dm_state='open'`
-
-### Requirement: `/whois` объясняет владельцу статус пользователя
-
-`/whois <tg_id|@username>` MUST быть доступна только идентификаторам из
-`OWNER_TG_IDS` и возвращать карточку пользователя: профиль, подписки,
-доступы, флаги whitelist/ban, `AccessDecision` с `Reasons` («почему есть
-или нет доступ») и последние записи `audit_log`. Поиск по `@username`
-MUST работать только если пользователь уже известен в БД
-(`Users.FindByUsername`), без внешнего Telegram-lookup. Обращение
-`/whois` не от владельца MUST игнорироваться так же, как прочий
-не-командный текст.
-
-#### Scenario: Владелец получает объяснимую карточку
-- **WHEN** владелец отправляет `/whois <tg_id>` по известному пользователю
-- **THEN** бот отвечает профилем, подписками, доступами и
-  `AccessDecision` с `Reasons`
-
-#### Scenario: Поиск по username вне БД
-- **WHEN** владелец указывает `@username`, которого нет в БД
-- **THEN** бот сообщает, что пользователь не найден, без обращения к сети
-
-#### Scenario: /whois не от владельца игнорируется
-- **WHEN** `/whois` отправляет идентификатор не из `OWNER_TG_IDS`
-- **THEN** команда игнорируется как обычный текст, данные не раскрываются

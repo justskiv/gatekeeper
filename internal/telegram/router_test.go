@@ -2,12 +2,18 @@ package telegram
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"testing"
+	"time"
 
 	"github.com/go-telegram/bot/models"
 
+	"github.com/justskiv/gatekeeper/internal/admission"
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/engine"
+	"github.com/justskiv/gatekeeper/internal/messages"
 	"github.com/justskiv/gatekeeper/internal/store"
 )
 
@@ -80,6 +86,192 @@ func TestRouterEnqueuesCommandDMInOutbox(t *testing.T) {
 
 	if len(result.Effects) != 0 {
 		t.Fatalf("effects = %+v, want no direct DM effects", result.Effects)
+	}
+
+	if got := countSendDMActions(t, db); got != 1 {
+		t.Fatalf("send_dm actions = %d, want 1", got)
+	}
+}
+
+func TestRouterRoutesJoinRequestToAdmission(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tgID := int64(9101)
+	rawLink := "https://t.me/+router-join"
+
+	seedRouterSharedInvite(t, db, domain.ResourceChat, rawLink)
+
+	router := admissionRouter(t, db, activeSnapshotForRouter(tgID))
+
+	result, err := router.Route(ctx, &models.Update{
+		ID: 901,
+		ChatJoinRequest: &models.ChatJoinRequest{
+			Chat:       models.Chat{ID: -1001, Type: models.ChatTypeSupergroup},
+			From:       models.User{ID: tgID, FirstName: "Join"},
+			UserChatID: 99101,
+			Date:       int(time.Unix(1_700_000_000, 0).Unix()),
+			InviteLink: &models.ChatInviteLink{InviteLink: rawLink},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+
+	if result.Status != store.TelegramUpdateProcessed {
+		t.Fatalf("status = %s, want processed", result.Status)
+	}
+
+	if got := countRouterActions(t, db, domain.ActionApproveJoin); got != 1 {
+		t.Fatalf("approve_join actions = %d, want 1", got)
+	}
+}
+
+func TestRouterJoinRequestPreservesKnownDMState(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tgID := int64(9104)
+	rawLink := "https://t.me/+router-join-dm-state"
+
+	if err := store.NewUsers(db).Upsert(ctx, domain.User{
+		TGID:    tgID,
+		DMState: domain.DMBlocked,
+	}); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+
+	seedRouterSharedInvite(t, db, domain.ResourceChat, rawLink)
+
+	router := admissionRouter(t, db, activeSnapshotForRouter(tgID))
+	if _, err := router.Route(ctx, &models.Update{
+		ID: 904,
+		ChatJoinRequest: &models.ChatJoinRequest{
+			Chat:       models.Chat{ID: -1001, Type: models.ChatTypeSupergroup},
+			From:       models.User{ID: tgID, FirstName: "Join"},
+			UserChatID: 99104,
+			Date:       int(time.Unix(1_700_000_000, 0).Unix()),
+			InviteLink: &models.ChatInviteLink{InviteLink: rawLink},
+		},
+	}); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+
+	user, err := store.NewUsers(db).Get(ctx, tgID)
+	if err != nil {
+		t.Fatalf("get user: %v", err)
+	}
+
+	if user.DMState != domain.DMBlocked {
+		t.Fatalf("dm_state = %s, want blocked preserved", user.DMState)
+	}
+}
+
+func TestRouterRoutesClubChatMemberToAdmission(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tgID := int64(9102)
+
+	router := admissionRouter(t, db, activeSnapshotForRouter(tgID))
+
+	result, err := router.Route(ctx, &models.Update{
+		ID: 902,
+		ChatMember: &models.ChatMemberUpdated{
+			Chat: models.Chat{ID: -1001, Type: models.ChatTypeSupergroup},
+			OldChatMember: models.ChatMember{
+				Type: models.ChatMemberTypeLeft,
+				Left: &models.ChatMemberLeft{
+					User: &models.User{ID: tgID, FirstName: "External"},
+				},
+			},
+			NewChatMember: models.ChatMember{
+				Type: models.ChatMemberTypeMember,
+				Member: &models.ChatMemberMember{
+					User: &models.User{ID: tgID, FirstName: "External"},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+
+	if result.Status != store.TelegramUpdateProcessed {
+		t.Fatalf("status = %s, want processed", result.Status)
+	}
+
+	grant, err := store.NewGrants(db).Get(ctx, tgID, domain.ResourceChat)
+	if err != nil {
+		t.Fatalf("get grant: %v", err)
+	}
+
+	if grant.AdmittedBy != "external" {
+		t.Fatalf("grant = %+v, want external admission", grant)
+	}
+}
+
+func TestRouterClubMembershipPreservesKnownDMState(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tgID := int64(9105)
+
+	if err := store.NewUsers(db).Upsert(ctx, domain.User{
+		TGID:    tgID,
+		DMState: domain.DMOpen,
+	}); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+
+	router := admissionRouter(t, db, activeSnapshotForRouter(tgID))
+	if _, err := router.Route(ctx, &models.Update{
+		ID: 905,
+		ChatMember: &models.ChatMemberUpdated{
+			Chat: models.Chat{ID: -1001, Type: models.ChatTypeSupergroup},
+			OldChatMember: models.ChatMember{
+				Type: models.ChatMemberTypeLeft,
+				Left: &models.ChatMemberLeft{
+					User: &models.User{ID: tgID, FirstName: "Member"},
+				},
+			},
+			NewChatMember: models.ChatMember{
+				Type: models.ChatMemberTypeMember,
+				Member: &models.ChatMemberMember{
+					User: &models.User{ID: tgID, FirstName: "Member"},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+
+	user, err := store.NewUsers(db).Get(ctx, tgID)
+	if err != nil {
+		t.Fatalf("get user: %v", err)
+	}
+
+	if user.DMState != domain.DMOpen {
+		t.Fatalf("dm_state = %s, want open preserved", user.DMState)
+	}
+}
+
+func TestRouterRoutesRetryCallbackToAdmission(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tgID := int64(9103)
+
+	router := admissionRouter(t, db, inactiveSnapshotForRouter(tgID))
+
+	result, err := router.Route(ctx, &models.Update{
+		ID: 903,
+		CallbackQuery: &models.CallbackQuery{
+			From: models.User{ID: tgID, FirstName: "Retry"},
+			Data: messages.RetryAccessCallbackData,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+
+	if result.Status != store.TelegramUpdateProcessed {
+		t.Fatalf("status = %s, want processed", result.Status)
 	}
 
 	if got := countSendDMActions(t, db); got != 1 {
@@ -250,4 +442,110 @@ func sourceJoinUpdate(chatID, tgID int64) *models.Update {
 			},
 		},
 	}
+}
+
+func admissionRouter(
+	t *testing.T,
+	db *sql.DB,
+	snapshot *engine.Snapshot,
+) *Router {
+	t.Helper()
+
+	return NewRouter(RouterDeps{
+		Users:         store.NewUsers(db),
+		Subscriptions: store.NewSubscriptions(db),
+		Grants:        store.NewGrants(db),
+		Meta:          store.NewMeta(db),
+		Audit:         store.NewAudit(db),
+		Alerts:        store.NewAlerts(db),
+		Whitelist:     store.NewWhitelist(db),
+		Revocations:   store.NewRevocations(db),
+		Outbox:        store.NewOutbox(db),
+		Invites:       store.NewInvites(db),
+	}, nil, nil, nil,
+		WithStatusEngine(engine.New(nil)),
+		WithAdmissionConfig(admission.Config{
+			InviteMode:    domain.InviteSharedJoinRequest,
+			ClubChatID:    -1001,
+			ClubChannelID: -1002,
+			Resources: []admission.ResourceConfig{
+				{Resource: domain.ResourceChat, ChatID: -1001},
+				{Resource: domain.ResourceChannel, ChatID: -1002},
+			},
+		}),
+		WithPreflight(RoutePreflight{Snapshot: snapshot}))
+}
+
+func seedRouterSharedInvite(
+	t *testing.T,
+	db *sql.DB,
+	resource domain.Resource,
+	rawLink string,
+) {
+	t.Helper()
+
+	if _, err := store.NewInvites(db).SaveCreated(context.Background(),
+		store.InviteLinkInput{
+			Resource:           resource,
+			Mode:               domain.InviteSharedJoinRequest,
+			InviteLink:         rawLink,
+			InviteLinkHash:     routerInviteHash(rawLink),
+			TelegramName:       "gk-router",
+			CreatesJoinRequest: true,
+		}); err != nil {
+		t.Fatalf("save shared invite: %v", err)
+	}
+}
+
+func activeSnapshotForRouter(tgID int64) *engine.Snapshot {
+	return statusSnapshotForRouter(tgID, domain.StatusActive, domain.VerdictActive)
+}
+
+func inactiveSnapshotForRouter(tgID int64) *engine.Snapshot {
+	return statusSnapshotForRouter(tgID, domain.StatusInactive, domain.VerdictInactive)
+}
+
+func statusSnapshotForRouter(
+	tgID int64,
+	status domain.EffectiveStatus,
+	verdict domain.Verdict,
+) *engine.Snapshot {
+	sourceVerdict := domain.SourceVerdict{
+		Source:  domain.PlatformBoosty,
+		Verdict: verdict,
+		Detail:  "router test",
+	}
+
+	return &engine.Snapshot{
+		TGID:     tgID,
+		Verdicts: []domain.SourceVerdict{sourceVerdict},
+		Decision: domain.AccessDecision{
+			TGID:    tgID,
+			Status:  status,
+			Allowed: status == domain.StatusActive,
+			Reasons: []domain.AccessReason{
+				domain.AccessReason(sourceVerdict),
+			},
+		},
+	}
+}
+
+func countRouterActions(t *testing.T, db *sql.DB, action domain.ActionType) int {
+	t.Helper()
+
+	var n int
+	if err := db.QueryRowContext(context.Background(), `
+		SELECT count(*)
+		FROM access_actions
+		WHERE action_type = ?`, string(action)).Scan(&n); err != nil {
+		t.Fatalf("count actions: %v", err)
+	}
+
+	return n
+}
+
+func routerInviteHash(link string) string {
+	sum := sha256.Sum256([]byte(link))
+
+	return hex.EncodeToString(sum[:])
 }

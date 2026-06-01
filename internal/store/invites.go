@@ -95,6 +95,39 @@ func (r *Invites) FindActivePersonal(
 	return link, true, nil
 }
 
+// FindActiveByHash returns an active invite link for a managed resource by hash.
+func (r *Invites) FindActiveByHash(
+	ctx context.Context,
+	resource domain.Resource,
+	inviteLinkHash string,
+) (domain.InviteLink, bool, error) {
+	if inviteLinkHash == "" {
+		return domain.InviteLink{}, false, nil
+	}
+
+	link, err := scanInviteLink(r.db.QueryRowContext(ctx, `
+		SELECT id, tg_id, resource, mode, invite_link, invite_link_hash,
+		       telegram_name, nonce, status, creates_join_request, expires_at,
+		       sent_at, used_at, revoked_at, attempted_by, last_error,
+		       created_at, updated_at
+		FROM invite_links
+		WHERE invite_link_hash = ?
+		  AND resource = ?
+		  AND status IN ('created', 'sent')
+		LIMIT 1`, inviteLinkHash, string(resource)))
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.InviteLink{}, false, nil
+	}
+
+	if err != nil {
+		return domain.InviteLink{}, false,
+			fmt.Errorf("find active invite by hash %s/%s: %w",
+				resource, inviteLinkHash, err)
+	}
+
+	return link, true, nil
+}
+
 // SaveCreated inserts a newly created Telegram invite link.
 func (r *Invites) SaveCreated(
 	ctx context.Context,

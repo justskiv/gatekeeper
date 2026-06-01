@@ -195,15 +195,21 @@ Telegram-вызов после коммита.
 ### Requirement: The router dispatches updates by type and chat id
 
 Роутер MUST маршрутизировать каждое обновление по типу и `chat.id`.
-В этой фазе **реально обрабатываются**: `message` в личке → хендлеры
-команд бота; `/here` в группе/супергруппе от владельца → ответ с
-`chat.id` (в каналах недоступна: нет `channel_post` в
-`allowed_updates`); `my_chat_member` → chat-health; `chat_member` в
-источнике-чате (`BOOSTY_GROUP_ID`, либо `TRIBUTE_CHANNEL_ID` в режиме A)
-→ нормализация в `SubscriptionEvent` и `engine.handleEvent` внутри
-`tx2`. Обновления `chat_member` в прочих чатах и `chat_join_request`
-маршрутов ещё не имеют и завершаются как `ignored` (наполнят Фаза 05).
-Прочее — `ignored`.
+Реально обрабатываются: `message` в личке -> хендлеры команд бота
+(`/start` и некомандный DM запускают grant-access flow); `/here` в
+группе или супергруппе от владельца -> ответ с `chat.id` (в каналах
+недоступна: нет `channel_post` в `allowed_updates`);
+`my_chat_member` -> chat-health; `chat_member` в источнике-чате
+(`BOOSTY_GROUP_ID`, либо `TRIBUTE_CHANNEL_ID` в режиме A) ->
+нормализация в `SubscriptionEvent` и `engine.handleEvent` внутри
+`tx2`; `chat_join_request` в club chat или club channel -> admission
+join-request handler; `chat_member` в club chat или club channel ->
+club membership handler. Прочее завершается как `ignored`.
+
+Неоднозначное пересечение source chat id и club resource id отклоняется
+на уровне runtime/config до запуска poller, поэтому роутер получает уже
+однозначную конфигурацию и не выбирает между двумя доменными
+обработчиками для одного update.
 
 #### Scenario: Private message маршрутизируется в bot command handlers
 - **WHEN** приходит `message` из приватного чата
@@ -219,10 +225,20 @@ Telegram-вызов после коммита.
 - **THEN** оно нормализуется в `SubscriptionEvent` и применяется через
   `engine.handleEvent`
 
-#### Scenario: Прочие membership-updates игнорируются в этой фазе
-- **WHEN** приходит `chat_member` в чате, не являющемся настроенным
-  источником, или `chat_join_request`
-- **THEN** в этой фазе строка завершается статусом `ignored`
+#### Scenario: chat_join_request клубного ресурса маршрутизируется в admission
+- **WHEN** приходит `chat_join_request` с `chat.id`, равным club chat
+  или club channel
+- **THEN** оно направляется в grant-access join-request handler
+
+#### Scenario: chat_member клубного ресурса обновляет grants
+- **WHEN** приходит `chat_member` с `chat.id`, равным club chat или
+  club channel
+- **THEN** оно направляется в club membership handler
+
+#### Scenario: Прочие membership-updates игнорируются
+- **WHEN** приходит `chat_member` или `chat_join_request` в чате, не
+  являющемся настроенным источником или club resource
+- **THEN** строка завершается статусом `ignored`
 
 ### Requirement: Membership-события источников нормализуются в SubscriptionEvent
 
@@ -257,4 +273,3 @@ Telegram в транзакции — членство берётся из payloa
 #### Scenario: События ботов игнорируются
 - **WHEN** затронутый пользователь — бот (в том числе сам бот)
 - **THEN** событие не формируется
-

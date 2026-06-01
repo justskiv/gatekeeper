@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/justskiv/gatekeeper/internal/admission"
 	"github.com/justskiv/gatekeeper/internal/applog"
 	"github.com/justskiv/gatekeeper/internal/config"
 	"github.com/justskiv/gatekeeper/internal/domain"
@@ -131,7 +132,8 @@ func run() error {
 	poller := telegram.NewPoller(
 		db, tgClient, notifier, healthChats, cfg.OwnerTGIDs, logger,
 		telegram.WithPollerStatusEngine(statusEngine),
-		telegram.WithPollerSourceChats(sourceChats))
+		telegram.WithPollerSourceChats(sourceChats),
+		telegram.WithPollerAdmissionConfig(admissionConfig(cfg)))
 
 	runtime.group.Go(func() error {
 		return poller.Run(runtimeCtx)
@@ -155,6 +157,20 @@ func run() error {
 	}
 
 	return nil
+}
+
+func admissionConfig(cfg config.Config) admission.Config {
+	return admission.Config{
+		InviteMode:         domain.InviteMode(cfg.InviteMode),
+		FallbackMaxAge:     cfg.AdmissionFallbackMaxAge,
+		ClubChatID:         cfg.ClubChatID,
+		ClubChannelID:      cfg.ClubChannelID,
+		JoinRequestRetries: cfg.AdmissionJoinRequestRetries,
+		Resources: []admission.ResourceConfig{
+			{Resource: domain.ResourceChat, ChatID: cfg.ClubChatID},
+			{Resource: domain.ResourceChannel, ChatID: cfg.ClubChannelID},
+		},
+	}
 }
 
 type runtimeGroup struct {

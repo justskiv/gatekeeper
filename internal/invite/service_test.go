@@ -18,17 +18,16 @@ import (
 
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/store"
-	"github.com/justskiv/gatekeeper/internal/telegram"
 )
 
 type fakeLinkManager struct {
 	calls  int
-	params []telegram.CreateChatInviteLinkParams
+	params []CreateChatInviteLinkParams
 }
 
 func (m *fakeLinkManager) CreateChatInviteLink(
 	_ context.Context,
-	params telegram.CreateChatInviteLinkParams,
+	params CreateChatInviteLinkParams,
 ) (*models.ChatInviteLink, error) {
 	m.calls++
 	m.params = append(m.params, params)
@@ -256,6 +255,98 @@ func TestInviteServiceLogsHashWithoutFullURL(t *testing.T) {
 
 	if !strings.Contains(logLine, link.InviteLinkHash) {
 		t.Fatalf("log = %s, want invite_link_hash %s", logLine, link.InviteLinkHash)
+	}
+}
+
+func TestResolveJoinRequestSharedMissingLinkFallback(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	service := New(nil, store.NewInvites(db), Config{
+		Mode:       domain.InviteSharedJoinRequest,
+		ClubChatID: -1001,
+	})
+
+	if _, err := store.NewInvites(db).SaveCreated(ctx, store.InviteLinkInput{
+		Resource:           domain.ResourceChat,
+		Mode:               domain.InviteSharedJoinRequest,
+		InviteLink:         "https://t.me/+shared-resolve",
+		InviteLinkHash:     HashInviteLink("https://t.me/+shared-resolve"),
+		TelegramName:       "gk-shared",
+		CreatesJoinRequest: true,
+	}); err != nil {
+		t.Fatalf("save shared invite: %v", err)
+	}
+
+	result, err := service.ResolveJoinRequest(ctx, ResolveRequest{
+		TGID:     4001,
+		Resource: domain.ResourceChat,
+		Mode:     domain.InviteSharedJoinRequest,
+	})
+	if err != nil {
+		t.Fatalf("ResolveJoinRequest: %v", err)
+	}
+
+	if !result.Accepted() || result.Status != ResolveSafeFallback {
+		t.Fatalf("resolution = %+v, want accepted safe fallback", result)
+	}
+}
+
+func TestResolveJoinRequestPersonalMisuseMarksAttemptedBy(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	ownerID := int64(4002)
+	requesterID := int64(4003)
+
+	users := store.NewUsers(db)
+	for _, tgID := range []int64{ownerID, requesterID} {
+		if err := users.Upsert(ctx, domain.User{TGID: tgID}); err != nil {
+			t.Fatalf("upsert user %d: %v", tgID, err)
+		}
+	}
+
+	rawLink := "https://t.me/+personal-resolve"
+
+	link, err := store.NewInvites(db).SaveCreated(ctx, store.InviteLinkInput{
+		TGID:               &ownerID,
+		Resource:           domain.ResourceChat,
+		Mode:               domain.InvitePersonalJoinRequest,
+		InviteLink:         rawLink,
+		InviteLinkHash:     HashInviteLink(rawLink),
+		TelegramName:       "gk-personal",
+		CreatesJoinRequest: true,
+	})
+	if err != nil {
+		t.Fatalf("save personal invite: %v", err)
+	}
+
+	service := New(nil, store.NewInvites(db), Config{
+		Mode:       domain.InvitePersonalJoinRequest,
+		ClubChatID: -1001,
+	})
+
+	result, err := service.ResolveJoinRequest(ctx, ResolveRequest{
+		TGID:       requesterID,
+		Resource:   domain.ResourceChat,
+		Mode:       domain.InvitePersonalJoinRequest,
+		InviteLink: rawLink,
+	})
+	if err != nil {
+		t.Fatalf("ResolveJoinRequest: %v", err)
+	}
+
+	if result.Status != ResolveUsedByOther || result.Accepted() {
+		t.Fatalf("resolution = %+v, want used_by_other", result)
+	}
+
+	got, err := store.NewInvites(db).GetByID(ctx, link.ID)
+	if err != nil {
+		t.Fatalf("get invite: %v", err)
+	}
+
+	if got.Status != domain.InviteUsedByOther ||
+		got.AttemptedBy == nil ||
+		*got.AttemptedBy != requesterID {
+		t.Fatalf("invite = %+v, want attempted_by requester", got)
 	}
 }
 

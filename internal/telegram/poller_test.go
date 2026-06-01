@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-telegram/bot/models"
 
+	"github.com/justskiv/gatekeeper/internal/admission"
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/notify"
@@ -383,6 +384,132 @@ func TestPollerStatusPreflightRunsSourceOutsideHandlerTransaction(t *testing.T) 
 				t.Fatalf("status = %q, want processed", status)
 			}
 		})
+	}
+}
+
+func TestPollerAdmissionRateLimitSkipsSecondSourceProbe(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	sender := &recordingSender{}
+
+	seedRouterSharedInvite(t, db, domain.ResourceChat, "https://t.me/+rl-chat")
+	seedRouterSharedInvite(t, db, domain.ResourceChannel, "https://t.me/+rl-channel")
+
+	inTx := &atomic.Bool{}
+	calledInTx := &atomic.Bool{}
+	source := &countingSource{
+		platform:   domain.PlatformBoosty,
+		inTx:       inTx,
+		calledInTx: calledInTx,
+	}
+	statusEngine := engine.New([]engine.SubscriptionSource{source})
+	poller := NewPoller(
+		db,
+		nil,
+		notify.New(store.NewUsers(db), sender, slog.Default()),
+		nil,
+		nil,
+		slog.Default(),
+		WithPollerStatusEngine(statusEngine),
+		WithPollerAdmissionConfig(admission.Config{
+			InviteMode:    domain.InviteSharedJoinRequest,
+			ClubChatID:    -1001,
+			ClubChannelID: -1002,
+			Resources: []admission.ResourceConfig{
+				{Resource: domain.ResourceChat, ChatID: -1001},
+				{Resource: domain.ResourceChannel, ChatID: -1002},
+			},
+		}),
+	)
+	poller.afterBeginTx = func() {
+		inTx.Store(true)
+	}
+
+	updates := []FetchedUpdate{
+		fetchedUpdate(t, privateTextUpdate(80, 8080, "/start")),
+		fetchedUpdate(t, privateTextUpdate(81, 8080, "/start")),
+	}
+
+	batch, nextOffset, err := buildUpdateBatch(updates, 0)
+	if err != nil {
+		t.Fatalf("buildUpdateBatch: %v", err)
+	}
+
+	if err := store.NewTelegramUpdates(db).InsertBatch(ctx, batch, nextOffset); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	if err := poller.processPending(ctx); err != nil {
+		t.Fatalf("processPending: %v", err)
+	}
+
+	if source.calls != 1 {
+		t.Fatalf("source calls = %d, want one due to rate limit", source.calls)
+	}
+
+	if calledInTx.Load() {
+		t.Fatal("source was called after tx2 began")
+	}
+
+	if got := countSendDMActions(t, db); got != 2 {
+		t.Fatalf("send_dm actions = %d, want active response and throttle response", got)
+	}
+
+	if got := countRouterActions(t, db, domain.ActionSendInvite); got != 0 {
+		t.Fatalf("send_invite actions = %d, want none in shared mode", got)
+	}
+}
+
+func TestPollerAdmissionBannedUserSkipsSourceProbe(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tgID := int64(8081)
+
+	if err := store.NewUsers(db).Upsert(ctx, domain.User{
+		TGID:   tgID,
+		Banned: true,
+	}); err != nil {
+		t.Fatalf("upsert banned user: %v", err)
+	}
+
+	source := &countingSource{platform: domain.PlatformBoosty}
+	poller := NewPoller(
+		db,
+		nil,
+		notify.New(store.NewUsers(db), &recordingSender{}, slog.Default()),
+		nil,
+		nil,
+		slog.Default(),
+		WithPollerStatusEngine(engine.New([]engine.SubscriptionSource{source})),
+		WithPollerAdmissionConfig(admission.Config{
+			InviteMode:    domain.InviteSharedJoinRequest,
+			ClubChatID:    -1001,
+			ClubChannelID: -1002,
+		}),
+	)
+
+	update := privateTextUpdate(82, tgID, "/start")
+
+	batch, nextOffset, err := buildUpdateBatch(
+		[]FetchedUpdate{fetchedUpdate(t, update)}, 0)
+	if err != nil {
+		t.Fatalf("buildUpdateBatch: %v", err)
+	}
+
+	if err := store.NewTelegramUpdates(db).InsertBatch(ctx, batch, nextOffset); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	if err := poller.processPending(ctx); err != nil {
+		t.Fatalf("processPending: %v", err)
+	}
+
+	if source.calls != 0 {
+		t.Fatalf("source calls = %d, want none for banned user", source.calls)
+	}
+
+	if got := countSendDMActions(t, db); got != 1 {
+		t.Fatalf("send_dm actions = %d, want banned response", got)
 	}
 }
 

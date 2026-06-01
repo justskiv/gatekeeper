@@ -53,6 +53,148 @@ func (r *Grants) Upsert(ctx context.Context, g domain.AccessGrant) error {
 	return nil
 }
 
+// MarkPending idempotently stores a pending grant without changing
+// already joined or revoked access. It returns the grant cycle timestamp:
+// stable while the row remains pending, refreshed when a new pending cycle
+// starts after left/external states.
+func (r *Grants) MarkPending(
+	ctx context.Context,
+	tgID int64,
+	resource domain.Resource,
+) (time.Time, error) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	var updatedAt string
+
+	err := r.db.QueryRowContext(ctx, `
+		INSERT INTO access_grants (
+			tg_id, resource, state, admitted_by, created_at, updated_at)
+		VALUES (?, ?, 'pending', 'bot', ?, ?)
+		ON CONFLICT(tg_id, resource) DO UPDATE SET
+			state = CASE
+				WHEN access_grants.state IN ('joined', 'revoked')
+				THEN access_grants.state
+				ELSE 'pending'
+			END,
+			admitted_by = CASE
+				WHEN access_grants.state IN ('joined', 'revoked')
+				THEN access_grants.admitted_by
+				ELSE 'bot'
+			END,
+			updated_at = CASE
+				WHEN access_grants.state IN ('pending', 'joined', 'revoked')
+				THEN access_grants.updated_at
+				ELSE excluded.updated_at
+			END
+		RETURNING updated_at`,
+		tgID, string(resource), now, now).Scan(&updatedAt)
+	if err != nil {
+		return time.Time{}, fmt.Errorf(
+			"mark grant pending %d/%s: %w", tgID, resource, err)
+	}
+
+	pendingAt, err := parseTime(updatedAt)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse pending grant updated_at: %w", err)
+	}
+
+	return pendingAt, nil
+}
+
+// MarkJoined records observed membership and admission metadata.
+func (r *Grants) MarkJoined(
+	ctx context.Context,
+	tgID int64,
+	resource domain.Resource,
+	admittedBy string,
+) error {
+	nowTime := time.Now()
+	now := rfc3339(nowTime)
+
+	if admittedBy == "" {
+		admittedBy = "bot"
+	}
+
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO access_grants (
+			tg_id, resource, state, admitted_by, joined_at, created_at, updated_at)
+		VALUES (?, ?, 'joined', ?, ?, ?, ?)
+		ON CONFLICT(tg_id, resource) DO UPDATE SET
+			state = CASE
+				WHEN access_grants.state = 'revoked'
+				THEN access_grants.state
+				ELSE 'joined'
+			END,
+			admitted_by = CASE
+				WHEN access_grants.state = 'revoked'
+				THEN access_grants.admitted_by
+				ELSE excluded.admitted_by
+			END,
+			joined_at = CASE
+				WHEN access_grants.state = 'revoked'
+				THEN access_grants.joined_at
+				ELSE COALESCE(access_grants.joined_at, excluded.joined_at)
+			END,
+			revoked_at = CASE
+				WHEN access_grants.state = 'revoked'
+				THEN access_grants.revoked_at
+				ELSE NULL
+			END,
+			revoked_reason = CASE
+				WHEN access_grants.state = 'revoked'
+				THEN access_grants.revoked_reason
+				ELSE ''
+			END,
+			updated_at = CASE
+				WHEN access_grants.state = 'revoked'
+				THEN access_grants.updated_at
+				ELSE excluded.updated_at
+			END`,
+		tgID, string(resource), admittedBy, rfc3339(nowTime), now, now)
+	if err != nil {
+		return fmt.Errorf("mark grant joined %d/%s: %w", tgID, resource, err)
+	}
+
+	return nil
+}
+
+// MarkLeftUnlessRevoked records that a user left a resource, preserving
+// a prior revoked state.
+func (r *Grants) MarkLeftUnlessRevoked(
+	ctx context.Context,
+	tgID int64,
+	resource domain.Resource,
+) (bool, error) {
+	now := rfc3339(time.Now())
+
+	res, err := r.db.ExecContext(ctx, `
+		INSERT INTO access_grants (
+			tg_id, resource, state, admitted_by, created_at, updated_at)
+		VALUES (?, ?, 'left', 'bot', ?, ?)
+		ON CONFLICT(tg_id, resource) DO UPDATE SET
+			state = CASE
+				WHEN access_grants.state = 'revoked'
+				THEN access_grants.state
+				ELSE 'left'
+			END,
+			updated_at = CASE
+				WHEN access_grants.state = 'revoked'
+				THEN access_grants.updated_at
+				ELSE excluded.updated_at
+			END`,
+		tgID, string(resource), now, now)
+	if err != nil {
+		return false, fmt.Errorf("mark grant left %d/%s: %w", tgID, resource, err)
+	}
+
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("read left grant rows affected: %w", err)
+	}
+
+	return affected > 0, nil
+}
+
 // Get returns the access grant for (tgID, resource), or ErrNotFound.
 func (r *Grants) Get(
 	ctx context.Context, tgID int64, resource domain.Resource,

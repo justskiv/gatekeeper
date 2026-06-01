@@ -38,9 +38,11 @@ type Config struct {
 	TributeSubscribeURL string
 
 	// Access granting
-	InviteMode         string
-	InviteTTL          time.Duration
-	AllowDirectInvites bool
+	InviteMode                  string
+	InviteTTL                   time.Duration
+	AllowDirectInvites          bool
+	AdmissionFallbackMaxAge     time.Duration
+	AdmissionJoinRequestRetries int
 
 	// Tribute
 	TributeMode              string
@@ -106,6 +108,8 @@ func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 		"shared_join_request", "personal_join_request", "direct")
 	cfg.InviteTTL = l.duration("INVITE_TTL", "24h")
 	cfg.AllowDirectInvites = l.boolean("ALLOW_DIRECT_INVITES", false)
+	cfg.AdmissionFallbackMaxAge = l.duration("ADMISSION_FALLBACK_MAX_AGE", "1h")
+	cfg.AdmissionJoinRequestRetries = l.intVal("ADMISSION_JOIN_REQUEST_RETRIES", 2)
 
 	cfg.TributeMode = l.enum("TRIBUTE_MODE", "observation", "observation", "webhook")
 	cfg.TributeAPIKey = l.str("TRIBUTE_API_KEY", "")
@@ -405,6 +409,11 @@ func (l *loader) validate(cfg *Config) {
 	if cfg.EnforcerWorkers <= 0 {
 		l.errf("ENFORCER_WORKERS must be greater than zero, got %d",
 			cfg.EnforcerWorkers)
+	}
+
+	if cfg.AdmissionJoinRequestRetries < 0 {
+		l.errf("ADMISSION_JOIN_REQUEST_RETRIES must be zero or greater, got %d",
+			cfg.AdmissionJoinRequestRetries)
 	}
 
 	l.httpURL("BOOSTY_SUBSCRIBE_URL", cfg.BoostySubscribeURL)

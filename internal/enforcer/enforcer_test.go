@@ -87,6 +87,17 @@ func (t *fakeTelegram) SendMessage(context.Context, int64, string) error {
 	return t.sendErr
 }
 
+func (t *fakeTelegram) SendMessageWithReplyMarkup(
+	context.Context,
+	int64,
+	string,
+	models.ReplyMarkup,
+) error {
+	t.calls = append(t.calls, "sendMessageWithReplyMarkup")
+
+	return t.sendErr
+}
+
 func (t *fakeTelegram) GetChatMember(
 	context.Context,
 	int64,
@@ -268,6 +279,28 @@ func TestEnforcerSendDMBlockedMarksUserAndCompletes(t *testing.T) {
 	if users.blocked != tgID || !outbox.done || outbox.retryError != "" {
 		t.Fatalf("blocked=%d done=%v retry=%q, want blocked done without retry",
 			users.blocked, outbox.done, outbox.retryError)
+	}
+}
+
+func TestEnforcerSendDMRetryButtonUsesReplyMarkup(t *testing.T) {
+	tgID := int64(53)
+	outbox := &fakeOutbox{action: domain.AccessAction{
+		ID:             1,
+		Type:           domain.ActionSendDM,
+		TGID:           &tgID,
+		IdempotencyKey: "send-dm-retry",
+		PayloadJSON:    []byte(`{"text":"try later","retry_button":true}`),
+		MaxAttempts:    8,
+	}}
+	tg := &fakeTelegram{}
+	e := newTestEnforcer(outbox, tg, &fakeUsers{}, &fakeAlerts{})
+
+	if _, err := e.runOnce(context.Background()); err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+
+	if len(tg.calls) != 1 || tg.calls[0] != "sendMessageWithReplyMarkup" {
+		t.Fatalf("calls=%v, want reply markup send", tg.calls)
 	}
 }
 

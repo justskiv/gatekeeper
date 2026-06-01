@@ -34,6 +34,16 @@ func TestInvitesActiveSharedLookupReturnsOneLink(t *testing.T) {
 	if !ok || got.ID != saved.ID || !got.CreatesJoinRequest {
 		t.Fatalf("shared link = (%+v, %v), want saved active link", got, ok)
 	}
+
+	byHash, ok, err := invites.FindActiveByHash(
+		ctx, domain.ResourceChat, "hash-shared")
+	if err != nil {
+		t.Fatalf("FindActiveByHash: %v", err)
+	}
+
+	if !ok || byHash.ID != saved.ID {
+		t.Fatalf("hash lookup = (%+v, %v), want saved link", byHash, ok)
+	}
 }
 
 func TestInvitesExpiredPersonalLinkFreesActiveSlot(t *testing.T) {
@@ -139,5 +149,51 @@ func TestInvitesMarkFailedStoresLastError(t *testing.T) {
 
 	if got.Status != domain.InviteFailed || got.LastError != "not enough rights" {
 		t.Fatalf("failed invite = %+v, want status failed with last_error", got)
+	}
+}
+
+func TestInvitesMarkUsedByOtherStoresAttemptedBy(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	ownerID := int64(3001)
+	attemptedBy := int64(3002)
+
+	users := NewUsers(db)
+	for _, tgID := range []int64{ownerID, attemptedBy} {
+		if err := users.Upsert(ctx, domain.User{TGID: tgID}); err != nil {
+			t.Fatalf("upsert user %d: %v", tgID, err)
+		}
+	}
+
+	invites := NewInvites(db)
+
+	link, err := invites.SaveCreated(ctx, InviteLinkInput{
+		TGID:               &ownerID,
+		Resource:           domain.ResourceChat,
+		Mode:               domain.InvitePersonalJoinRequest,
+		InviteLink:         "https://t.me/+personal-misuse",
+		InviteLinkHash:     "hash-personal-misuse",
+		TelegramName:       "gk-personal",
+		CreatesJoinRequest: true,
+	})
+	if err != nil {
+		t.Fatalf("save invite: %v", err)
+	}
+
+	if err := invites.MarkStatus(
+		ctx, link.ID, domain.InviteUsedByOther, &attemptedBy, "",
+	); err != nil {
+		t.Fatalf("mark used_by_other: %v", err)
+	}
+
+	got, err := invites.GetByID(ctx, link.ID)
+	if err != nil {
+		t.Fatalf("get invite: %v", err)
+	}
+
+	if got.Status != domain.InviteUsedByOther ||
+		got.AttemptedBy == nil ||
+		*got.AttemptedBy != attemptedBy {
+		t.Fatalf("invite = %+v, want used_by_other attempted_by", got)
 	}
 }
