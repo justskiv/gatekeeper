@@ -8,16 +8,19 @@ package main
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
+	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/justskiv/gatekeeper/internal/admission"
 	"github.com/justskiv/gatekeeper/internal/applog"
+	commandbot "github.com/justskiv/gatekeeper/internal/bot"
 	"github.com/justskiv/gatekeeper/internal/config"
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/enforcer"
@@ -28,6 +31,7 @@ import (
 	"github.com/justskiv/gatekeeper/internal/source"
 	"github.com/justskiv/gatekeeper/internal/store"
 	"github.com/justskiv/gatekeeper/internal/telegram"
+	"github.com/justskiv/gatekeeper/internal/webhook"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -41,6 +45,7 @@ func main() {
 	}
 }
 
+//nolint:funlen,wsl_v5 // Startup wiring is intentionally linear.
 func run() error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -49,10 +54,6 @@ func run() error {
 
 	logger := applog.New(cfg)
 	slog.SetDefault(logger)
-
-	if cfg.TelegramMode == "webhook" {
-		return errors.New("telegram webhook mode is not implemented in this phase")
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(),
 		syscall.SIGINT, syscall.SIGTERM)
@@ -129,11 +130,47 @@ func run() error {
 		telegram.WithPollerStatusEngine(statusEngine),
 		telegram.WithPollerSourceChats(sourceChats),
 		telegram.WithPollerAdmissionConfig(admissionConfig(cfg)),
-		telegram.WithPollerAdminLogChatID(cfg.AdminLogChatID))
+		telegram.WithPollerAdminLogChatID(cfg.AdminLogChatID),
+		telegram.WithPollerChatRoles(chatRolesFromConfig(cfg)))
 
-	runtime.group.Go(func() error {
-		return poller.Run(runtimeCtx)
-	})
+	var telegramWebhookRegistered atomic.Bool
+	if shouldStartHTTPServer(cfg) {
+		server := newHTTPServer(
+			db, cfg, statusEngine, poller, healthChats,
+			func() bool { return true },
+			telegramWebhookRegistered.Load,
+			logger,
+		)
+		runtime.group.Go(func() error {
+			return server.Run(runtimeCtx)
+		})
+	}
+
+	switch cfg.TelegramMode {
+	case "polling":
+		if err := tgClient.DeleteWebhook(ctx); err != nil {
+			runtime.stopAndWait()
+
+			return err
+		}
+
+		runtime.group.Go(func() error {
+			return poller.Run(runtimeCtx)
+		})
+	case "webhook":
+		if err := tgClient.SetWebhook(
+			ctx,
+			telegramWebhookURL(cfg),
+			cfg.TelegramWebhookSecret,
+			telegram.DefaultAllowedUpdates,
+		); err != nil {
+			runtime.stopAndWait()
+
+			return err
+		}
+
+		telegramWebhookRegistered.Store(true)
+	}
 
 	logger.Info("gatekeeper started",
 		slog.String("db_path", cfg.DBPath),
@@ -170,6 +207,95 @@ func waitRuntime(
 	}
 }
 
+func shouldStartHTTPServer(cfg config.Config) bool {
+	return cfg.TributeMode == "webhook" ||
+		cfg.TelegramMode == "webhook" ||
+		cfg.MetricsEnabled
+}
+
+func newHTTPServer(
+	db *sql.DB,
+	cfg config.Config,
+	statusEngine *engine.Engine,
+	poller *telegram.Poller,
+	healthChats []telegram.HealthChat,
+	getMeOK func() bool,
+	telegramWebhookRegistered func() bool,
+	logger *slog.Logger,
+) *webhook.Server {
+	var tributeHandler http.Handler
+	if cfg.TributeMode == "webhook" {
+		tributeHandler = &webhook.TributeHandler{
+			DB:              db,
+			APIKey:          cfg.TributeAPIKey,
+			Engine:          statusEngine,
+			CancelImmediate: cfg.TributeCancelIsImmediate,
+			OwnerIDs:        cfg.OwnerTGIDs,
+			AdminLogChatID:  cfg.AdminLogChatID,
+			Logger:          logger,
+		}
+	}
+
+	var telegramHandler http.Handler
+	if cfg.TelegramMode == "webhook" {
+		telegramHandler = webhook.NewTelegramHandler(
+			cfg.TelegramWebhookSecret, poller)
+	}
+
+	return webhook.NewServer(webhook.Config{
+		ListenAddr:      cfg.WebhookListenAddr,
+		MetricsEnabled:  cfg.MetricsEnabled,
+		TributeEnabled:  cfg.TributeMode == "webhook",
+		TelegramEnabled: cfg.TelegramMode == "webhook",
+		TributePath:     cfg.TributeWebhookPath,
+		TelegramPath:    cfg.TelegramWebhookPath,
+		Readiness: webhook.Readiness{
+			DB:                                 db,
+			HealthKeys:                         healthKeys(healthChats),
+			ReconcileInterval:                  cfg.ReconcileInterval,
+			GetMeOK:                            getMeOK,
+			RequireTelegramWebhookRegistration: cfg.TelegramMode == "webhook",
+			TelegramWebhookRegistered:          telegramWebhookRegistered,
+		},
+		Metrics:  &webhook.Metrics{Ops: store.NewOps(db)},
+		Tribute:  tributeHandler,
+		Telegram: telegramHandler,
+		Logger:   logger,
+	})
+}
+
+func telegramWebhookURL(cfg config.Config) string {
+	return strings.TrimRight(cfg.TelegramWebhookPublicURL, "/") +
+		cfg.TelegramWebhookPath
+}
+
+func healthKeys(chats []telegram.HealthChat) []string {
+	keys := make([]string, 0, len(chats))
+	for _, chat := range chats {
+		keys = append(keys, chat.Key)
+	}
+
+	return keys
+}
+
+func chatRolesFromConfig(cfg config.Config) []commandbot.ChatRole {
+	roles := []commandbot.ChatRole{
+		{Role: "Boosty group", ChatID: cfg.BoostyGroupID},
+		{Role: "Tribute channel", ChatID: cfg.TributeChannelID},
+		{Role: "club chat", ChatID: cfg.ClubChatID},
+		{Role: "club channel", ChatID: cfg.ClubChannelID},
+	}
+
+	if cfg.AdminLogChatID != nil {
+		roles = append(roles, commandbot.ChatRole{
+			Role:   "admin log chat",
+			ChatID: *cfg.AdminLogChatID,
+		})
+	}
+
+	return roles
+}
+
 func checkStartupHealth(
 	ctx context.Context,
 	db *sql.DB,
@@ -195,7 +321,14 @@ func newStatusEngine(
 		source.NewMembership(domain.PlatformBoosty, cfg.BoostyGroupID, tgClient),
 	}
 
-	if sourceChats.TributeObservation {
+	if cfg.TributeMode == "webhook" {
+		sources = append(sources, source.NewMembership(
+			domain.PlatformTribute,
+			cfg.TributeChannelID,
+			tgClient,
+			source.WithLedger(store.NewSubscriptions(db)),
+		))
+	} else if sourceChats.TributeObservation {
 		sources = append(sources, source.NewMembership(
 			domain.PlatformTribute,
 			cfg.TributeChannelID,

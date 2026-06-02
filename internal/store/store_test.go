@@ -301,7 +301,6 @@ func TestSubscriptionsGetActive(t *testing.T) {
 		t.Fatalf("GetActive on empty store: ok=%v err=%v", ok, err)
 	}
 
-	// RFC3339 storage rounds to seconds; truncate inputs to compare.
 	started := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
 	expires := started.Add(30 * 24 * time.Hour)
 
@@ -373,7 +372,7 @@ func TestSubscriptionsUpsertExpireAndList(t *testing.T) {
 	}
 
 	started := time.Now().UTC().Truncate(time.Second)
-	eventAt := started.Add(time.Minute)
+	eventAt := started.Add(time.Minute + 123*time.Millisecond)
 
 	id, err := subs.UpsertActive(ctx, domain.Subscription{
 		TGID:        11,
@@ -422,7 +421,7 @@ func TestSubscriptionsUpsertExpireAndList(t *testing.T) {
 			active[0].LastCheckedAt, started)
 	}
 
-	ended := started.Add(2 * time.Hour)
+	ended := started.Add(2*time.Hour + 456*time.Millisecond)
 
 	ok, err := subs.ExpireActive(ctx, 11, domain.PlatformBoosty, ended, "event")
 	if err != nil {

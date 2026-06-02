@@ -42,6 +42,8 @@ type SubscriptionEvent struct {
 	ExpiresAt      *time.Time // known only for Tribute mode B and for manual
 	ExternalID     string     // tribute subscription_id, etc.
 	PeriodID       string     // tribute period_id
+	EventAt        time.Time  // provider event creation time for ordering
+	ProviderEvent  string     // raw provider event name, when available
 	OccurredAt     time.Time
 	Raw            []byte // raw payload for auditing
 }

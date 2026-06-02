@@ -2,9 +2,11 @@ package bot
 
 import (
 	"context"
+	"encoding/csv"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-telegram/bot/models"
 
@@ -210,6 +212,136 @@ func TestAdminSyncConfirmCancelAndExpiredCallbacks(t *testing.T) {
 	}
 }
 
+func TestOpsCommandsAreOwnerOnly(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	handler := NewCommands(adminDeps(db, nil), []int64{adminTestOwnerID})
+
+	result, err := handler.HandlePrivate(ctx, privateMessage(1, 101, "/stats"))
+	if err != nil {
+		t.Fatalf("HandlePrivate non-owner stats: %v", err)
+	}
+
+	if !result.Ignored {
+		t.Fatalf("non-owner stats result = %+v, want ignored", result)
+	}
+}
+
+func TestOpsCommandsRenderStatsAlertsChatsAndExport(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	handler := NewCommands(CommandDeps{
+		Users:         store.NewUsers(db),
+		Subscriptions: store.NewSubscriptions(db),
+		Grants:        store.NewGrants(db),
+		Audit:         store.NewAudit(db),
+		Whitelist:     store.NewWhitelist(db),
+		Revocations:   store.NewRevocations(db),
+		Outbox:        store.NewOutbox(db),
+		Alerts:        store.NewAlerts(db),
+		Ops:           store.NewOps(db),
+		StatusEngine:  engine.New(nil),
+		ChatRoles: []ChatRole{
+			{Role: "club chat", ChatID: -1003333333333},
+		},
+	}, []int64{adminTestOwnerID})
+
+	if err := store.NewUsers(db).Upsert(ctx, domain.User{
+		TGID:     900,
+		Username: "alice",
+	}); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+
+	if _, err := store.NewSubscriptions(db).UpsertManual(
+		ctx, 900, nil, "manual",
+	); err != nil {
+		t.Fatalf("upsert manual subscription: %v", err)
+	}
+
+	if _, err := store.NewAlerts(db).Create(ctx, store.AlertInput{
+		Severity: "warning",
+		Kind:     "test_alert",
+		Title:    "test alert",
+	}); err != nil {
+		t.Fatalf("create alert: %v", err)
+	}
+
+	for _, command := range []string{"/stats", "/alerts", "/chats", "/help_admin"} {
+		result, err := handler.HandlePrivate(ctx,
+			privateMessage(1, adminTestOwnerID, command))
+		if err != nil {
+			t.Fatalf("HandlePrivate %s: %v", command, err)
+		}
+
+		if result.Ignored || len(result.Replies) != 1 || result.Replies[0].Text == "" {
+			t.Fatalf("%s result = %+v, want one reply", command, result)
+		}
+	}
+
+	export, err := handler.HandlePrivate(ctx,
+		privateMessage(1, adminTestOwnerID, "/export"))
+	if err != nil {
+		t.Fatalf("HandlePrivate export: %v", err)
+	}
+
+	if export.Ignored || len(export.Replies) == 0 {
+		t.Fatalf("export result = %+v, want replies", export)
+	}
+
+	if !strings.Contains(export.Replies[0].Text, "tg_id,username") ||
+		!strings.Contains(export.Replies[0].Text, "900,alice") {
+		t.Fatalf("export text = %q, want CSV user row", export.Replies[0].Text)
+	}
+
+	groupExport, err := handler.HandlePrivate(ctx, &models.Message{
+		From: &models.User{ID: adminTestOwnerID},
+		Chat: models.Chat{ID: -1001, Type: models.ChatTypeSupergroup},
+		Text: "/export",
+	})
+	if err != nil {
+		t.Fatalf("HandlePrivate group export: %v", err)
+	}
+
+	if !groupExport.Ignored {
+		t.Fatalf("group export result = %+v, want ignored", groupExport)
+	}
+}
+
+func TestRenderExportCSVAndSplitReplyEdgeCases(t *testing.T) {
+	text, err := renderExportCSV([]store.ExportRow{{TGID: 901}})
+	if err != nil {
+		t.Fatalf("renderExportCSV: %v", err)
+	}
+
+	records, err := csv.NewReader(strings.NewReader(text)).ReadAll()
+	if err != nil {
+		t.Fatalf("read csv: %v", err)
+	}
+
+	if len(records) != 2 {
+		t.Fatalf("records = %+v, want header and one row", records)
+	}
+
+	lastSeenColumn := len(records[1]) - 1
+	if records[1][lastSeenColumn] != "" {
+		t.Fatalf("last_seen_at = %q, want empty", records[1][lastSeenColumn])
+	}
+
+	multibyte := "a🙂b"
+
+	parts := splitReply(multibyte, 3)
+	for _, part := range parts {
+		if !utf8.ValidString(part) {
+			t.Fatalf("part %q is not valid UTF-8", part)
+		}
+	}
+
+	if strings.Join(parts, "") != multibyte {
+		t.Fatalf("parts = %+v, want to preserve input", parts)
+	}
+}
+
 func adminDeps(db store.DBTX, sync AdminSyncFunc) CommandDeps {
 	return CommandDeps{
 		Users:         store.NewUsers(db),
@@ -220,6 +352,7 @@ func adminDeps(db store.DBTX, sync AdminSyncFunc) CommandDeps {
 		Revocations:   store.NewRevocations(db),
 		Outbox:        store.NewOutbox(db),
 		Alerts:        store.NewAlerts(db),
+		Ops:           store.NewOps(db),
 		StatusEngine:  engine.New(nil),
 		AdminSync:     sync,
 	}

@@ -21,32 +21,6 @@ import (
 	"github.com/justskiv/gatekeeper/internal/telegram"
 )
 
-func TestRunFailsFastForTelegramWebhookMode(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "gatekeeper.db")
-
-	env := validEnv(dbPath)
-	env["TELEGRAM_MODE"] = "webhook"
-	env["TELEGRAM_WEBHOOK_PUBLIC_URL"] = "https://bot.example.com"
-
-	env["TELEGRAM_WEBHOOK_SECRET"] = "secret"
-	for key, value := range env {
-		t.Setenv(key, value)
-	}
-
-	err := run()
-	if err == nil {
-		t.Fatal("run returned nil, want webhook not implemented error")
-	}
-
-	if !strings.Contains(err.Error(), "telegram webhook mode is not implemented") {
-		t.Fatalf("run error = %v, want webhook not implemented", err)
-	}
-
-	if _, statErr := os.Stat(dbPath); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("webhook mode touched db path: %v", statErr)
-	}
-}
-
 func TestRunFailsFastForDirectWithoutAllowBeforeDB(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "gatekeeper.db")
 
@@ -69,6 +43,40 @@ func TestRunFailsFastForDirectWithoutAllowBeforeDB(t *testing.T) {
 
 	if _, statErr := os.Stat(dbPath); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("invalid direct config touched db path: %v", statErr)
+	}
+}
+
+func TestShouldStartHTTPServer(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  config.Config
+		want bool
+	}{
+		{"default polling", config.Config{
+			TelegramMode: "polling",
+			TributeMode:  "observation",
+		}, false},
+		{"metrics", config.Config{
+			TelegramMode:   "polling",
+			TributeMode:    "observation",
+			MetricsEnabled: true,
+		}, true},
+		{"tribute webhook", config.Config{
+			TelegramMode: "polling",
+			TributeMode:  "webhook",
+		}, true},
+		{"telegram webhook", config.Config{
+			TelegramMode: "webhook",
+			TributeMode:  "observation",
+		}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldStartHTTPServer(tt.cfg); got != tt.want {
+				t.Fatalf("shouldStartHTTPServer = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

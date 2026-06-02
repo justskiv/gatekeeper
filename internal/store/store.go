@@ -132,9 +132,14 @@ func CheckSchema(ctx context.Context, db *sql.DB) error {
 }
 
 // rfc3339 formats a time as RFC3339 in UTC — the on-disk representation
-// for every timestamp column.
+// for timestamp columns that are compared lexicographically in SQLite.
 func rfc3339(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
+}
+
+// rfc3339Nano formats event timestamps whose sub-second ordering matters.
+func rfc3339Nano(t time.Time) string {
+	return t.UTC().Format(time.RFC3339Nano)
 }
 
 // nullTime formats an optional timestamp for storage: nil becomes a SQL
@@ -147,9 +152,19 @@ func nullTime(t *time.Time) any {
 	return rfc3339(*t)
 }
 
+// nullEventTime formats an optional provider event timestamp. These values are
+// only read back for in-process ordering, so preserving nanoseconds is safe.
+func nullEventTime(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+
+	return rfc3339Nano(*t)
+}
+
 // parseTime parses an RFC3339 timestamp stored in the database.
 func parseTime(s string) (time.Time, error) {
-	return time.Parse(time.RFC3339, s)
+	return time.Parse(time.RFC3339Nano, s)
 }
 
 // parseNullTime parses an optional RFC3339 timestamp from a nullable

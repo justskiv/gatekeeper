@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Domain tests keep arrange/act/assert blocks compact.
 package engine
 
 import (
@@ -130,6 +131,111 @@ func TestHandleEventDeactivatedAndCancelledAreIdempotent(t *testing.T) {
 
 	if len(active) != 0 {
 		t.Fatalf("cancelled recreated active subscription: %+v", active)
+	}
+}
+
+func TestTributeCancelledSubscriptionDoesNotRevokeByDefault(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	now := time.Date(2026, 5, 31, 10, 0, 0, 0, time.UTC)
+	e := New(nil, WithClock(func() time.Time { return now }))
+	repos := engineStore(db)
+
+	activated := domain.SubscriptionEvent{
+		Platform:      domain.PlatformTribute,
+		Kind:          domain.EventActivated,
+		TGUserID:      77,
+		EventAt:       now,
+		ProviderEvent: "new_subscription",
+		OccurredAt:    now,
+	}
+	if _, err := e.HandleEvent(ctx, repos, activated); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+
+	if err := store.NewGrants(db).Upsert(ctx, domain.AccessGrant{
+		TGID:       77,
+		Resource:   domain.ResourceChat,
+		State:      domain.GrantJoined,
+		AdmittedBy: "bot",
+	}); err != nil {
+		t.Fatalf("upsert grant: %v", err)
+	}
+
+	cancelled := activated
+	cancelled.Kind = domain.EventCancelledSubscription
+	cancelled.EventAt = now.Add(time.Hour)
+	cancelled.ProviderEvent = "cancelled_subscription"
+	cancelled.OccurredAt = cancelled.EventAt
+	if effects, err := e.HandleEvent(ctx, repos, cancelled); err != nil {
+		t.Fatalf("cancelled: %v", err)
+	} else if len(effects) != 0 {
+		t.Fatalf("cancel effects = %+v, want none", effects)
+	}
+
+	if _, ok, err := repos.Subscriptions.GetActive(
+		ctx, 77, domain.PlatformTribute,
+	); err != nil || !ok {
+		t.Fatalf("active subscription = %v err=%v, want kept", ok, err)
+	}
+
+	if _, ok, err := repos.Revocations.Get(ctx, 77); err != nil || ok {
+		t.Fatalf("revocation = %v err=%v, want absent", ok, err)
+	}
+}
+
+func TestTributeStaleCancelledSubscriptionWritesAudit(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	now := time.Date(2026, 5, 31, 10, 0, 0, 0, time.UTC)
+	e := New(nil, WithClock(func() time.Time { return now }))
+	repos := engineStore(db)
+
+	activatedAt := now.Add(time.Hour)
+	activated := domain.SubscriptionEvent{
+		Platform:      domain.PlatformTribute,
+		Kind:          domain.EventActivated,
+		TGUserID:      77,
+		EventAt:       activatedAt,
+		ProviderEvent: "new_subscription",
+		OccurredAt:    activatedAt,
+	}
+	if _, err := e.HandleEvent(ctx, repos, activated); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+
+	cancelled := activated
+	cancelled.Kind = domain.EventCancelledSubscription
+	cancelled.EventAt = now
+	cancelled.ProviderEvent = "cancelled_subscription"
+	cancelled.OccurredAt = cancelled.EventAt
+	if effects, err := e.HandleEvent(ctx, repos, cancelled); err != nil {
+		t.Fatalf("cancelled: %v", err)
+	} else if len(effects) != 0 {
+		t.Fatalf("cancel effects = %+v, want none", effects)
+	}
+
+	sub, ok, err := repos.Subscriptions.GetActive(
+		ctx, 77, domain.PlatformTribute)
+	if err != nil || !ok || sub.LastEventAt == nil {
+		t.Fatalf("active subscription = (%+v, %v, %v), want active", sub, ok, err)
+	}
+
+	if !sub.LastEventAt.Equal(activatedAt) {
+		t.Fatalf("last_event_at = %v, want %v", sub.LastEventAt, activatedAt)
+	}
+
+	var cancelledAudit int
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*)
+		FROM audit_log
+		WHERE kind = ?`,
+		auditSubscriptionCancelled).Scan(&cancelledAudit); err != nil {
+		t.Fatalf("count cancel audit: %v", err)
+	}
+
+	if cancelledAudit != 1 {
+		t.Fatalf("cancel audit = %d, want 1", cancelledAudit)
 	}
 }
 

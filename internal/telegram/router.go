@@ -56,6 +56,7 @@ type Router struct {
 	revocations    *store.Revocations
 	outbox         *store.Outbox
 	invites        *store.Invites
+	ops            *store.Ops
 	updateID       int64
 	statusEngine   *engine.Engine
 	sourceChats    SourceChats
@@ -64,6 +65,7 @@ type Router struct {
 	chats          []HealthChat
 	ownerIDs       []int64
 	adminLogChatID *int64
+	chatRoles      []commandbot.ChatRole
 	members        engine.MemberChecker
 	logger         *slog.Logger
 }
@@ -81,8 +83,10 @@ type RouterDeps struct {
 	Revocations    *store.Revocations
 	Outbox         *store.Outbox
 	Invites        *store.Invites
+	Ops            *store.Ops
 	UpdateID       int64
 	AdminLogChatID *int64
+	ChatRoles      []commandbot.ChatRole
 }
 
 // SourceChats identifies configured subscription source chats.
@@ -160,8 +164,10 @@ func NewRouter(
 		revocations:    deps.Revocations,
 		outbox:         deps.Outbox,
 		invites:        deps.Invites,
+		ops:            deps.Ops,
 		updateID:       deps.UpdateID,
 		adminLogChatID: deps.AdminLogChatID,
+		chatRoles:      append([]commandbot.ChatRole(nil), deps.ChatRoles...),
 		chats:          chats,
 		ownerIDs:       ownerIDs,
 		logger:         logger,
@@ -222,6 +228,8 @@ func (r *Router) routeMessage(
 		Revocations:   r.revocations,
 		Outbox:        r.outbox,
 		Alerts:        r.alerts,
+		Ops:           r.ops,
+		ChatRoles:     r.chatRoles,
 		StatusEngine:  r.statusEngine,
 		Members:       r.members,
 		Preflight:     r.preflight.Snapshot,
@@ -331,6 +339,8 @@ func (r *Router) routeCallback(
 			Revocations:   r.revocations,
 			Outbox:        r.outbox,
 			Alerts:        r.alerts,
+			Ops:           r.ops,
+			ChatRoles:     r.chatRoles,
 			StatusEngine:  r.statusEngine,
 			Members:       r.members,
 			AdminSync:     r.adminSync,

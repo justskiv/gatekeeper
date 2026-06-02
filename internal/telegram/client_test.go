@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Client serialization tests keep captured vars together.
 package telegram
 
 import (
@@ -197,10 +198,69 @@ func TestSetMyCommandsIncludesOwnerAdminCommands(t *testing.T) {
 	for _, command := range []string{
 		"start", "help", "status", "here", "whois",
 		"grant", "revoke", "ban", "unban", "sync",
+		"stats", "alerts", "export", "chats", "help_admin",
 	} {
 		if !ownerCommands[command] {
 			t.Fatalf("owner commands = %v, missing %q", ownerCommands, command)
 		}
+	}
+}
+
+func TestSetAndDeleteWebhookSerializeBotAPIRequests(t *testing.T) {
+	var methods []string
+	var setWebhook map[string]any
+	var deleteWebhook map[string]any
+
+	client := newBotAPITestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		method := methodName(r.URL.Path)
+		methods = append(methods, method)
+
+		switch method {
+		case "setWebhook":
+			if err := json.NewDecoder(r.Body).Decode(&setWebhook); err != nil {
+				t.Fatalf("decode setWebhook: %v", err)
+			}
+		case "deleteWebhook":
+			if err := json.NewDecoder(r.Body).Decode(&deleteWebhook); err != nil {
+				t.Fatalf("decode deleteWebhook: %v", err)
+			}
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+
+		writeTelegramResult(w, true)
+	})
+
+	if err := client.SetWebhook(context.Background(),
+		"https://bot.example.com/webhooks/telegram",
+		"secret",
+		[]string{"message", "chat_member"},
+	); err != nil {
+		t.Fatalf("SetWebhook: %v", err)
+	}
+
+	if err := client.DeleteWebhook(context.Background()); err != nil {
+		t.Fatalf("DeleteWebhook: %v", err)
+	}
+
+	if strings.Join(methods, ",") != "setWebhook,deleteWebhook" {
+		t.Fatalf("methods = %v, want set/delete", methods)
+	}
+
+	if setWebhook["url"] != "https://bot.example.com/webhooks/telegram" ||
+		setWebhook["secret_token"] != "secret" {
+		t.Fatalf("setWebhook = %#v, want url and secret", setWebhook)
+	}
+
+	allowed, ok := setWebhook["allowed_updates"].([]any)
+	if !ok || len(allowed) != 2 || allowed[0] != "message" {
+		t.Fatalf("allowed_updates = %#v, want explicit list",
+			setWebhook["allowed_updates"])
+	}
+
+	if deleteWebhook["drop_pending_updates"] != false {
+		t.Fatalf("deleteWebhook = %#v, want drop_pending_updates=false",
+			deleteWebhook)
 	}
 }
 

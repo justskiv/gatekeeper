@@ -46,6 +46,8 @@ type CommandDeps struct {
 	Revocations   *store.Revocations
 	Outbox        *store.Outbox
 	Alerts        *store.Alerts
+	Ops           *store.Ops
+	ChatRoles     []ChatRole
 	StatusEngine  *engine.Engine
 	Members       engine.MemberChecker
 	Preflight     *engine.Snapshot
@@ -100,6 +102,16 @@ func (h *UserCommands) HandlePrivate(
 		return h.handleWhois(ctx, msg)
 	case "grant", "revoke", "ban", "unban", "sync":
 		return h.handleAdminAction(ctx, msg, cmd)
+	case "stats":
+		return h.handleStats(ctx, msg)
+	case "alerts":
+		return h.handleAlerts(ctx, msg)
+	case "chats":
+		return h.handleChats(msg)
+	case "help_admin":
+		return h.handleHelpAdmin(msg)
+	case "export":
+		return h.handleExport(ctx, msg)
 	case "start", "":
 		if err := h.rememberPrivateUser(ctx, *msg.From); err != nil {
 			return Result{}, err

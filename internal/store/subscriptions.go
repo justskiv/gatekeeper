@@ -36,7 +36,7 @@ func (r *Subscriptions) Create(ctx context.Context, s domain.Subscription) (int6
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		s.TGID, string(s.Platform), string(s.Status), s.ExternalID,
 		s.PeriodID, s.Tier, rfc3339(s.StartedAt), nullTime(s.ExpiresAt),
-		nullTime(s.EndedAt), s.LastSignal, nullTime(s.LastEventAt),
+		nullTime(s.EndedAt), s.LastSignal, nullEventTime(s.LastEventAt),
 		nullTime(s.LastCheckedAt), now, now)
 	if err != nil {
 		return 0, fmt.Errorf("create subscription for %d: %w", s.TGID, err)
@@ -76,7 +76,7 @@ func (r *Subscriptions) UpsertActive(
 		s.Tier, s.Tier,
 		nullTime(s.ExpiresAt),
 		s.LastSignal, s.LastSignal,
-		nullTime(s.LastEventAt), nullTime(s.LastCheckedAt),
+		nullEventTime(s.LastEventAt), nullTime(s.LastCheckedAt),
 		now, s.TGID, string(s.Platform))
 	if err != nil {
 		return 0, fmt.Errorf("update active subscription for %d/%s: %w",
@@ -137,7 +137,7 @@ func (r *Subscriptions) ExpireActive(
 		    updated_at = ?
 		WHERE tg_id = ? AND platform = ? AND status = 'active'`,
 		rfc3339(endedAt), signal,
-		signal, rfc3339(endedAt),
+		signal, rfc3339Nano(endedAt),
 		signal, rfc3339(endedAt),
 		now,
 		tgID, string(platform))

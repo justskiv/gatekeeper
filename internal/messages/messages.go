@@ -10,16 +10,21 @@ import (
 )
 
 const (
-	CommandStartDescription  = "начать работу"
-	CommandHelpDescription   = "справка"
-	CommandHereDescription   = "показать ID чата"
-	CommandStatusDescription = "показать статус подписки"
-	CommandWhoisDescription  = "показать карточку пользователя"
-	CommandGrantDescription  = "выдать ручной доступ"
-	CommandRevokeDescription = "отозвать ручной доступ"
-	CommandBanDescription    = "заблокировать пользователя"
-	CommandUnbanDescription  = "снять блокировку"
-	CommandSyncDescription   = "запустить сверку доступа"
+	CommandStartDescription     = "начать работу"
+	CommandHelpDescription      = "справка"
+	CommandHereDescription      = "показать ID чата"
+	CommandStatusDescription    = "показать статус подписки"
+	CommandWhoisDescription     = "показать карточку пользователя"
+	CommandGrantDescription     = "выдать ручной доступ"
+	CommandRevokeDescription    = "отозвать ручной доступ"
+	CommandBanDescription       = "заблокировать пользователя"
+	CommandUnbanDescription     = "снять блокировку"
+	CommandSyncDescription      = "запустить сверку доступа"
+	CommandStatsDescription     = "показать сводку состояния"
+	CommandAlertsDescription    = "показать открытые тревоги"
+	CommandExportDescription    = "выгрузить пользователей CSV"
+	CommandChatsDescription     = "показать настроенные чаты"
+	CommandHelpAdminDescription = "справка владельца"
 
 	RetryAccessCallbackData = "grant_access.retry"
 	RetryAccessButtonText   = "Проверить ещё раз"
@@ -52,6 +57,58 @@ type WhoisData struct {
 	Whitelisted   bool
 	Decision      domain.AccessDecision
 	Audit         []AuditLine
+}
+
+// NamedCount is one named count in owner ops summaries.
+type NamedCount struct {
+	Name  string
+	Count int
+}
+
+// NamedValue is one named string value in owner ops summaries.
+type NamedValue struct {
+	Name  string
+	Value string
+}
+
+// GrantCount is an access-grant count in owner ops summaries.
+type GrantCount struct {
+	Resource string
+	State    string
+	Count    int
+}
+
+// OutboxCount is an outbox count in owner ops summaries.
+type OutboxCount struct {
+	Status string
+	Count  int
+}
+
+// OpsStatsData is the owner-facing /stats payload.
+type OpsStatsData struct {
+	ActiveSubscriptions []NamedCount
+	Grants              []GrantCount
+	PendingRevocations  int
+	DueRevocations      int
+	Health              []NamedValue
+	ReconcileLastRunAt  *time.Time
+	Outbox              []OutboxCount
+	OpenAlerts          int
+}
+
+// OpsAlertData is one owner-facing alert line.
+type OpsAlertData struct {
+	ID        int64
+	Severity  string
+	Kind      string
+	Title     string
+	CreatedAt time.Time
+}
+
+// ChatRoleData is one configured chat role.
+type ChatRoleData struct {
+	Role   string
+	ChatID int64
 }
 
 // Welcome returns the /start greeting.
@@ -258,6 +315,128 @@ func AdminCommandUsage(command string) string {
 	default:
 		return "Команда указана неверно."
 	}
+}
+
+// AdminHelp returns the owner/admin command reference.
+func AdminHelp() string {
+	return strings.Join([]string{
+		"Команды владельца:",
+		"/here — показать chat.id текущего чата",
+		"/whois <tg_id|@username> — карточка пользователя",
+		"/grant <tg_id|@username> [срок] [причина] — выдать доступ",
+		"/revoke <tg_id|@username> [причина] — отозвать ручной доступ",
+		"/ban <tg_id|@username> [причина] — заблокировать доступ",
+		"/unban <tg_id|@username> [причина] — снять блокировку",
+		"/sync [tg_id|@username] — запустить сверку",
+		"/stats — сводка состояния",
+		"/alerts — открытые тревоги",
+		"/export — CSV users/subscriptions только в личке",
+		"/chats — настроенные роли чатов",
+		"/help_admin — эта справка",
+	}, "\n")
+}
+
+// OpsUnavailable reports missing read-model dependencies.
+func OpsUnavailable() string {
+	return "Операционная сводка сейчас недоступна."
+}
+
+// OpsStats renders the owner-facing /stats summary.
+//
+//nolint:wsl_v5 // String-builder formatting is clearer without extra gaps.
+func OpsStats(data OpsStatsData) string {
+	var b strings.Builder
+	b.WriteString("Сводка состояния\n")
+
+	b.WriteString("Активные подписки:\n")
+	if len(data.ActiveSubscriptions) == 0 {
+		b.WriteString("- нет\n")
+	} else {
+		for _, count := range data.ActiveSubscriptions {
+			fmt.Fprintf(&b, "- %s: %d\n", count.Name, count.Count)
+		}
+	}
+
+	b.WriteString("Доступы:\n")
+	if len(data.Grants) == 0 {
+		b.WriteString("- нет\n")
+	} else {
+		for _, count := range data.Grants {
+			fmt.Fprintf(&b, "- %s/%s: %d\n",
+				count.Resource, count.State, count.Count)
+		}
+	}
+
+	fmt.Fprintf(&b, "Отзывы доступа: pending=%d due=%d\n",
+		data.PendingRevocations, data.DueRevocations)
+
+	b.WriteString("Health:\n")
+	if len(data.Health) == 0 {
+		b.WriteString("- нет данных\n")
+	} else {
+		for _, health := range data.Health {
+			fmt.Fprintf(&b, "- %s: %s\n", health.Name, health.Value)
+		}
+	}
+
+	if data.ReconcileLastRunAt == nil {
+		b.WriteString("Последняя сверка: нет данных\n")
+	} else {
+		fmt.Fprintf(&b, "Последняя сверка: %s\n",
+			data.ReconcileLastRunAt.UTC().Format(time.RFC3339))
+	}
+
+	pendingOutbox := 0
+	deadOutbox := 0
+	for _, count := range data.Outbox {
+		if count.Status == "queued" || count.Status == "running" {
+			pendingOutbox += count.Count
+		}
+		if count.Status == "dead" {
+			deadOutbox += count.Count
+		}
+	}
+
+	fmt.Fprintf(&b, "Outbox: pending=%d dead=%d\n", pendingOutbox, deadOutbox)
+	fmt.Fprintf(&b, "Открытые тревоги: %d", data.OpenAlerts)
+
+	return b.String()
+}
+
+// OpsAlerts renders the owner-facing /alerts response.
+//
+//nolint:wsl_v5 // String-builder formatting is clearer without extra gaps.
+func OpsAlerts(alerts []OpsAlertData) string {
+	if len(alerts) == 0 {
+		return "Открытых тревог нет."
+	}
+
+	var b strings.Builder
+	b.WriteString("Открытые тревоги\n")
+	for _, alert := range alerts {
+		fmt.Fprintf(&b, "- #%d %s %s: %s (%s)\n",
+			alert.ID,
+			alert.Severity,
+			alert.Kind,
+			alert.Title,
+			alert.CreatedAt.UTC().Format(time.RFC3339),
+		)
+	}
+
+	return strings.TrimSpace(b.String())
+}
+
+// OpsChats renders configured chat roles.
+//
+//nolint:wsl_v5 // String-builder formatting is clearer without extra gaps.
+func OpsChats(roles []ChatRoleData) string {
+	var b strings.Builder
+	b.WriteString("Настроенные чаты\n")
+	for _, role := range roles {
+		fmt.Fprintf(&b, "- %s: %d\n", role.Role, role.ChatID)
+	}
+
+	return strings.TrimSpace(b.String())
 }
 
 // SyncSummary renders owner-facing reconciliation result counters.

@@ -331,6 +331,26 @@ func (c *Client) SetMyCommands(ctx context.Context, ownerIDs []int64) error {
 		models.BotCommand{
 			Command:     "sync",
 			Description: messages.CommandSyncDescription,
+		},
+		models.BotCommand{
+			Command:     "stats",
+			Description: messages.CommandStatsDescription,
+		},
+		models.BotCommand{
+			Command:     "alerts",
+			Description: messages.CommandAlertsDescription,
+		},
+		models.BotCommand{
+			Command:     "export",
+			Description: messages.CommandExportDescription,
+		},
+		models.BotCommand{
+			Command:     "chats",
+			Description: messages.CommandChatsDescription,
+		},
+		models.BotCommand{
+			Command:     "help_admin",
+			Description: messages.CommandHelpAdminDescription,
 		})
 	for _, ownerID := range ownerIDs {
 		if _, err := c.bot.SetMyCommands(ctx, &botapi.SetMyCommandsParams{
@@ -339,6 +359,39 @@ func (c *Client) SetMyCommands(ctx context.Context, ownerIDs []int64) error {
 		}); err != nil {
 			return NormalizeError("setMyCommands", err)
 		}
+	}
+
+	return nil
+}
+
+// SetWebhook registers Telegram webhook delivery with an explicit update set.
+func (c *Client) SetWebhook(
+	ctx context.Context,
+	url string,
+	secretToken string,
+	allowedUpdates []string,
+) error {
+	if len(allowedUpdates) == 0 {
+		allowedUpdates = append([]string(nil), c.allowedUpdates...)
+	}
+
+	if err := c.rawRequest(ctx, "setWebhook", map[string]any{
+		"url":             url,
+		"secret_token":    secretToken,
+		"allowed_updates": allowedUpdates,
+	}, nil); err != nil {
+		return NormalizeError("setWebhook", err)
+	}
+
+	return nil
+}
+
+// DeleteWebhook disables Telegram webhook delivery so getUpdates can run.
+func (c *Client) DeleteWebhook(ctx context.Context) error {
+	if err := c.rawRequest(ctx, "deleteWebhook", map[string]any{
+		"drop_pending_updates": false,
+	}, nil); err != nil {
+		return NormalizeError("deleteWebhook", err)
 	}
 
 	return nil

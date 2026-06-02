@@ -33,6 +33,11 @@ type SubscriptionStore interface {
 		endedAt time.Time,
 		signal string,
 	) (bool, error)
+	GetActive(
+		ctx context.Context,
+		tgID int64,
+		platform domain.Platform,
+	) (domain.Subscription, bool, error)
 	ListActiveByUser(ctx context.Context, tgID int64) ([]domain.Subscription, error)
 }
 

@@ -192,8 +192,40 @@ func TestLoadParsesValues(t *testing.T) {
 			cfg.AdmissionJoinRequestRetries)
 	}
 
+	if cfg.TributeCancelIsImmediate {
+		t.Error("TributeCancelIsImmediate = true, want default false")
+	}
+
 	if cfg.Location == nil || cfg.Location.String() != "UTC" {
 		t.Errorf("Location = %v", cfg.Location)
+	}
+}
+
+func TestLoadParsesTributeCancelOverride(t *testing.T) {
+	env := baseEnv()
+	env["TRIBUTE_CANCEL_IS_IMMEDIATE"] = "true"
+
+	cfg, err := LoadFromLookup(lookup(env))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !cfg.TributeCancelIsImmediate {
+		t.Fatal("TributeCancelIsImmediate = false, want true")
+	}
+}
+
+func TestLoadRejectsInvalidTributeCancelOverride(t *testing.T) {
+	env := baseEnv()
+	env["TRIBUTE_CANCEL_IS_IMMEDIATE"] = "soon"
+
+	_, err := LoadFromLookup(lookup(env))
+	if err == nil {
+		t.Fatal("expected invalid boolean error")
+	}
+
+	if !strings.Contains(err.Error(), "TRIBUTE_CANCEL_IS_IMMEDIATE") {
+		t.Fatalf("error = %q, want TRIBUTE_CANCEL_IS_IMMEDIATE", err)
 	}
 }
 

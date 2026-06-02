@@ -57,6 +57,57 @@ func TestRouterRoutesSourceChatMemberToEngine(t *testing.T) {
 	}
 }
 
+func TestRouterIgnoresTributeMembershipInWebhookMode(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	eventAt := time.Date(2026, 6, 2, 10, 0, 0, 0, time.UTC)
+
+	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: 42}); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+
+	if _, err := store.NewSubscriptions(db).UpsertActive(ctx, domain.Subscription{
+		TGID:        42,
+		Platform:    domain.PlatformTribute,
+		StartedAt:   eventAt,
+		LastSignal:  "webhook",
+		LastEventAt: &eventAt,
+	}); err != nil {
+		t.Fatalf("seed tribute subscription: %v", err)
+	}
+
+	router := NewRouter(RouterDeps{
+		Users:         store.NewUsers(db),
+		Subscriptions: store.NewSubscriptions(db),
+		Grants:        store.NewGrants(db),
+		Meta:          store.NewMeta(db),
+		Audit:         store.NewAudit(db),
+		Alerts:        store.NewAlerts(db),
+		Whitelist:     store.NewWhitelist(db),
+		Revocations:   store.NewRevocations(db),
+	}, nil, nil, nil,
+		WithStatusEngine(engine.New(nil)),
+		WithSourceChats(SourceChats{
+			TributeChannelID:   -1002,
+			TributeObservation: false,
+		}))
+
+	result, err := router.Route(ctx, sourceLeaveUpdate(-1002, 42))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+
+	if result.Status != store.TelegramUpdateIgnored {
+		t.Fatalf("status = %s, want ignored", result.Status)
+	}
+
+	if _, ok, err := store.NewSubscriptions(db).GetActive(
+		ctx, 42, domain.PlatformTribute,
+	); err != nil || !ok {
+		t.Fatalf("active tribute subscription = %v err=%v, want kept", ok, err)
+	}
+}
+
 func TestRouterSourceRevocationWiresProtectedMemberAlertDelivery(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()

@@ -19,6 +19,7 @@ import (
 	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/messages"
 	"github.com/justskiv/gatekeeper/internal/notify"
+	"github.com/justskiv/gatekeeper/internal/redact"
 	"github.com/justskiv/gatekeeper/internal/source"
 	"github.com/justskiv/gatekeeper/internal/store"
 )
@@ -44,6 +45,7 @@ type Poller struct {
 	chats          []HealthChat
 	ownerIDs       []int64
 	adminLogChatID *int64
+	chatRoles      []commandbot.ChatRole
 	logger         *slog.Logger
 
 	afterBeginTx func() // test hook for tx-boundary assertions
@@ -80,6 +82,13 @@ func WithPollerAdmissionConfig(cfg admission.Config) PollerOption {
 func WithPollerAdminLogChatID(chatID *int64) PollerOption {
 	return func(p *Poller) {
 		p.adminLogChatID = chatID
+	}
+}
+
+// WithPollerChatRoles attaches configured chat roles for owner commands.
+func WithPollerChatRoles(roles []commandbot.ChatRole) PollerOption {
+	return func(p *Poller) {
+		p.chatRoles = append([]commandbot.ChatRole(nil), roles...)
 	}
 }
 
@@ -207,6 +216,31 @@ func (p *Poller) Run(ctx context.Context) error {
 	}
 }
 
+// HandleWebhookUpdate inserts one Telegram webhook update and routes pending
+// updates through the same terminal state machine as polling.
+func (p *Poller) HandleWebhookUpdate(ctx context.Context, raw []byte) error {
+	var update models.Update
+	if err := json.Unmarshal(raw, &update); err != nil {
+		return fmt.Errorf("decode telegram webhook update: %w", err)
+	}
+
+	batch, nextOffset, err := buildUpdateBatch([]FetchedUpdate{{
+		Raw:    raw,
+		Update: &update,
+	}}, 0)
+	if err != nil {
+		return err
+	}
+
+	if err := store.NewTelegramUpdates(p.db).InsertBatch(
+		ctx, batch, nextOffset,
+	); err != nil {
+		return err
+	}
+
+	return p.processPending(ctx)
+}
+
 func (p *Poller) waitAfterPollError(
 	ctx context.Context, err error, backoff time.Duration,
 ) (time.Duration, error) {
@@ -313,8 +347,10 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 		Revocations:    store.NewRevocations(tx),
 		Outbox:         outbox,
 		Invites:        store.NewInvites(tx),
+		Ops:            store.NewOps(tx),
 		UpdateID:       row.UpdateID,
 		AdminLogChatID: p.adminLogChatID,
+		ChatRoles:      p.chatRoles,
 	}, p.chats, p.ownerIDs, p.logger,
 		WithStatusEngine(p.statusEngine),
 		WithSourceChats(p.sourceChats),
@@ -720,6 +756,8 @@ func buildUpdateBatch(
 				return nil, 0, fmt.Errorf("encode update %d payload: %w", update.ID, err)
 			}
 		}
+
+		payload = redact.JSONPayload(payload)
 
 		if update.ID+1 > nextOffset {
 			nextOffset = update.ID + 1

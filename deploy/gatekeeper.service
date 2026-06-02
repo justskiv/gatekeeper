@@ -1,0 +1,22 @@
+[Unit]
+Description=Gatekeeper Telegram access-control bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=gatekeeper
+Group=gatekeeper
+WorkingDirectory=/var/lib/gatekeeper
+EnvironmentFile=/etc/gatekeeper/gatekeeper.env
+ExecStart=/usr/local/bin/gatekeeper
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/gatekeeper
+
+[Install]
+WantedBy=multi-user.target

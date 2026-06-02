@@ -173,6 +173,49 @@ func TestPollerRunFetchesAllowedUpdatesAndPersistsRawPayload(t *testing.T) {
 	}
 }
 
+func TestHandleWebhookUpdateUsesDurablePipelineAndDeduplicates(t *testing.T) {
+	db := newTestDB(t)
+	poller := NewPoller(db, nil, nil, nil, nil, slog.Default())
+
+	raw := []byte(`{
+		"update_id": 700,
+		"web_app_link":"https://t.me/app?startapp=secret"
+	}`)
+
+	for range 2 {
+		if err := poller.HandleWebhookUpdate(context.Background(), raw); err != nil {
+			t.Fatalf("HandleWebhookUpdate: %v", err)
+		}
+	}
+
+	var rows int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM telegram_updates`).Scan(&rows); err != nil {
+		t.Fatalf("count telegram updates: %v", err)
+	}
+
+	if rows != 1 {
+		t.Fatalf("telegram update rows = %d, want 1", rows)
+	}
+
+	var status, payload string
+	if err := db.QueryRowContext(context.Background(), `
+		SELECT status, payload_json
+		FROM telegram_updates
+		WHERE update_id = 700`,
+	).Scan(&status, &payload); err != nil {
+		t.Fatalf("read telegram update: %v", err)
+	}
+
+	if status != string(store.TelegramUpdateIgnored) {
+		t.Fatalf("status = %s, want ignored", status)
+	}
+
+	if strings.Contains(payload, "startapp=secret") {
+		t.Fatalf("payload was not redacted: %s", payload)
+	}
+}
+
 func TestPollerProcessesDuplicateUpdateIDOnce(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()

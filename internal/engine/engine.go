@@ -16,6 +16,7 @@ import (
 const (
 	signalEvent    = "event"
 	signalOnDemand = "on_demand"
+	signalWebhook  = "webhook"
 
 	auditSubscriptionActivated = "subscription_activated"
 	auditSubscriptionExpired   = "subscription_expired"
@@ -141,6 +142,8 @@ func (e *Engine) applyObservations(
 }
 
 // HandleEvent applies one normalized subscription event inside tx2.
+//
+//nolint:gocognit,gocyclo,cyclop,funlen,wsl_v5 // Domain event switch is explicit.
 func (e *Engine) HandleEvent(
 	ctx context.Context,
 	repos Store,
@@ -165,9 +168,30 @@ func (e *Engine) HandleEvent(
 		now = e.now()
 	}
 
+	eventAt := event.EventAt
+	if eventAt.IsZero() {
+		eventAt = now
+	}
+
 	tgID := event.TGUserID
 	switch event.Kind {
 	case domain.EventActivated:
+		signal := signalEvent
+		lastEventAt := now
+		if event.ProviderEvent != "" {
+			signal = signalWebhook
+			lastEventAt = eventAt
+
+			stale, err := e.staleTributeWebhookEvent(ctx, repos, event, eventAt)
+			if err != nil {
+				return nil, err
+			}
+
+			if stale {
+				return nil, nil
+			}
+		}
+
 		if _, err := repos.Subscriptions.UpsertActive(ctx, domain.Subscription{
 			TGID:        tgID,
 			Platform:    event.Platform,
@@ -177,8 +201,8 @@ func (e *Engine) HandleEvent(
 			Tier:        event.Tier,
 			StartedAt:   now,
 			ExpiresAt:   event.ExpiresAt,
-			LastSignal:  signalEvent,
-			LastEventAt: &now,
+			LastSignal:  signal,
+			LastEventAt: &lastEventAt,
 		}); err != nil {
 			return nil, err
 		}
@@ -193,8 +217,24 @@ func (e *Engine) HandleEvent(
 			return nil, err
 		}
 	case domain.EventDeactivated:
+		signal := signalEvent
+		endedAt := now
+		if event.ProviderEvent != "" {
+			signal = signalWebhook
+			endedAt = eventAt
+
+			stale, err := e.staleTributeWebhookEvent(ctx, repos, event, eventAt)
+			if err != nil {
+				return nil, err
+			}
+
+			if stale {
+				return nil, nil
+			}
+		}
+
 		ok, err := repos.Subscriptions.ExpireActive(
-			ctx, tgID, event.Platform, now, signalEvent)
+			ctx, tgID, event.Platform, endedAt, signal)
 		if err != nil {
 			return nil, err
 		}
@@ -220,6 +260,19 @@ func (e *Engine) HandleEvent(
 		}); err != nil {
 			return nil, err
 		}
+
+		if event.ProviderEvent != "" {
+			stale, err := e.staleTributeWebhookEvent(ctx, repos, event, eventAt)
+			if err != nil {
+				return nil, err
+			}
+
+			if stale {
+				return nil, nil
+			}
+		}
+
+		return nil, nil
 	default:
 		return nil, fmt.Errorf("unknown subscription event kind %q", event.Kind)
 	}
@@ -230,6 +283,27 @@ func (e *Engine) HandleEvent(
 	}
 
 	return effects, nil
+}
+
+func (e *Engine) staleTributeWebhookEvent(
+	ctx context.Context,
+	repos Store,
+	event domain.SubscriptionEvent,
+	eventAt time.Time,
+) (bool, error) {
+	if event.Platform != domain.PlatformTribute ||
+		event.ProviderEvent == "" ||
+		repos.Subscriptions == nil {
+		return false, nil
+	}
+
+	sub, ok, err := repos.Subscriptions.GetActive(
+		ctx, event.TGUserID, domain.PlatformTribute)
+	if err != nil || !ok || sub.LastEventAt == nil {
+		return false, err
+	}
+
+	return !eventAt.After(*sub.LastEventAt), nil
 }
 
 func (e *Engine) recomputeAccess(
@@ -662,6 +736,20 @@ func (e *Engine) RecomputeAccess(
 }
 
 func eventDetail(event domain.SubscriptionEvent) string {
-	return fmt.Sprintf("platform=%s kind=%s external_id=%s period_id=%s",
+	detail := fmt.Sprintf("platform=%s kind=%s external_id=%s period_id=%s",
 		event.Platform, event.Kind, event.ExternalID, event.PeriodID)
+
+	if event.ProviderEvent != "" {
+		detail += " provider_event=" + event.ProviderEvent
+	}
+
+	if !event.EventAt.IsZero() {
+		detail += " event_at=" + event.EventAt.UTC().Format(time.RFC3339)
+	}
+
+	if event.ExpiresAt != nil {
+		detail += " expires_at=" + event.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+
+	return detail
 }
