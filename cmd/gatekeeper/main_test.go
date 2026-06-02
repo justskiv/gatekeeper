@@ -4,16 +4,21 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pressly/goose/v3"
 
+	"github.com/justskiv/gatekeeper/internal/config"
 	"github.com/justskiv/gatekeeper/internal/domain"
+	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/store"
+	"github.com/justskiv/gatekeeper/internal/telegram"
 )
 
 func TestRunFailsFastForTelegramWebhookMode(t *testing.T) {
@@ -149,6 +154,48 @@ func TestSharedInvitesReadyRequiresChatAndChannel(t *testing.T) {
 	}
 }
 
+func TestRuntimeInitialReconcileAndGracefulShutdown(t *testing.T) {
+	db := newTestDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	client, err := telegram.NewClient("123:ABC")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	runtime, runtimeCtx := startRuntime(
+		ctx,
+		db,
+		runtimeTestConfig(),
+		client,
+		engine.New(nil),
+		nil,
+		slog.Default(),
+	)
+
+	if _, err := runtime.reconciler.RunOnce(runtimeCtx); err != nil {
+		runtime.stopAndWait()
+		t.Fatalf("initial RunOnce: %v", err)
+	}
+
+	if _, ok, err := store.NewMeta(db).Get(
+		context.Background(), "reconcile.last_run_at",
+	); err != nil || !ok {
+		runtime.stopAndWait()
+		t.Fatalf("last_run_at = (_, %v, %v), want present", ok, err)
+	}
+
+	runtime.startPeriodic(runtimeCtx)
+	runtime.stopAndWait()
+
+	select {
+	case <-runtimeCtx.Done():
+	default:
+		t.Fatal("runtime context is not cancelled after stopAndWait")
+	}
+}
+
 type fakeReadiness map[domain.Resource]domain.InviteLink
 
 func (r fakeReadiness) ActiveShared(
@@ -229,5 +276,24 @@ func validEnv(dbPath string) map[string]string {
 		"LOG_LEVEL":                   "info",
 		"LOG_FORMAT":                  "json",
 		"METRICS_ENABLED":             "false",
+	}
+}
+
+func runtimeTestConfig() config.Config {
+	return config.Config{
+		OwnerTGIDs:        []int64{11111111},
+		BoostyGroupID:     -1001111111111,
+		TributeChannelID:  -1002222222222,
+		ClubChatID:        -1003333333333,
+		ClubChannelID:     -1004444444444,
+		InviteMode:        string(domain.InviteDirect),
+		InviteTTL:         time.Hour,
+		ExpiryMode:        "grace",
+		GracePeriod:       time.Hour,
+		ReconcileInterval: time.Hour,
+		CleanupInterval:   time.Hour,
+		RawRetention:      24 * time.Hour,
+		AuditRetention:    24 * time.Hour,
+		EnforcerWorkers:   1,
 	}
 }

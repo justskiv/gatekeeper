@@ -355,20 +355,25 @@ func (l *loader) httpURL(key, value string) {
 	}
 }
 
-// validate runs the cross-field rules from SPEC §18.3.
-func (l *loader) validate(cfg *Config) {
-	// The four source and club chat IDs must be pairwise distinct.
-	type namedID struct {
-		name string
-		id   int64
-	}
+type namedID struct {
+	name string
+	id   int64
+}
 
+func configuredChats(cfg *Config) []namedID {
 	chats := []namedID{
 		{"BOOSTY_GROUP_ID", cfg.BoostyGroupID},
 		{"TRIBUTE_CHANNEL_ID", cfg.TributeChannelID},
 		{"CLUB_CHAT_ID", cfg.ClubChatID},
 		{"CLUB_CHANNEL_ID", cfg.ClubChannelID},
 	}
+
+	return chats
+}
+
+func (l *loader) validateChatIDs(cfg *Config) {
+	chats := configuredChats(cfg)
+
 	for i := range chats {
 		for j := i + 1; j < len(chats); j++ {
 			// id == 0 means the value failed to parse; skip to avoid
@@ -379,6 +384,22 @@ func (l *loader) validate(cfg *Config) {
 			}
 		}
 	}
+
+	if cfg.AdminLogChatID == nil {
+		return
+	}
+
+	for _, chat := range chats {
+		if chat.id != 0 && *cfg.AdminLogChatID == chat.id {
+			l.errf("ADMIN_LOG_CHAT_ID must be different from %s (both %d)",
+				chat.name, chat.id)
+		}
+	}
+}
+
+// validate runs the cross-field rules from SPEC §18.3.
+func (l *loader) validate(cfg *Config) {
+	l.validateChatIDs(cfg)
 
 	if cfg.TributeMode == "webhook" && cfg.TributeAPIKey == "" {
 		l.errf("TRIBUTE_API_KEY is required when TRIBUTE_MODE=webhook")

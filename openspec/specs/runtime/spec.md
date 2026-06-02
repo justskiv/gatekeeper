@@ -27,24 +27,30 @@
 10. Зарегистрировать команды (`setMyCommands`) и прогнать chat-health
     для четырёх настроенных чатов; проблемы здоровья деградируют
     (`admin_alert` + DM владельцу), **не** прерывая старт.
-11. Собрать `Outbox`, `Invite` service и `Enforcer`.
+11. Собрать `Outbox`, `Invite` service, `Enforcer`, `Reconciler` и
+    cleanup service.
 12. Запустить Enforcer workers под `errgroup.WithContext`.
 13. Если `INVITE_MODE=direct`, создать
     `admin_alert(kind='invite_mode_degraded')`.
 14. Если `INVITE_MODE=shared_join_request`, поставить
     `ensure_invite` для клубного чата и канала и дождаться по одной
     активной ссылке в `invite_links` с `creates_join_request=true`.
-15. Запустить поллер под тем же `errgroup.WithContext`, предварительно
+15. Выполнить один immediate Reconciler pass до запуска poller loop.
+16. Запустить periodic Reconciler и cleanup ticker под тем же
+    `errgroup.WithContext`.
+17. Запустить поллер под тем же `errgroup.WithContext`, предварительно
     досканировав оставшиеся `pending`-обновления (recovery).
-16. Ждать отмены контекста или ошибки любой фоновой подсистемы.
-17. Остановить подсистемы (отмена контекста → дождаться горутин
-    Enforcer и поллера), затем закрыть базу данных последней, в
-    `defer` после остановки всех писателей.
+18. Ждать отмены контекста или ошибки любой фоновой подсистемы.
+19. Остановить подсистемы (отмена контекста → дождаться горутин
+    Enforcer, Reconciler, cleanup и поллера), затем закрыть базу данных
+    последней, в `defer` после остановки всех писателей.
 
-Шаги 1–14 строго последовательны: каждый выполняется только после
+Шаги 1–15 строго последовательны: каждый выполняется только после
 успеха предыдущего, и ошибка любого из них прерывает старт и
-пробрасывается в `main`. Шаг 10 (chat-health) — осознанно
-деградирующий: его проблемы не прерывают старт.
+пробрасывается в `main`, кроме деградирующего chat-health внутри шага
+10. Reconciler initial pass MUST завершиться до запуска poller loop, но
+его non-fatal per-chat/per-user проблемы MUST оформляться как
+`admin_alert`, а не падение процесса.
 
 #### Scenario: Ошибка конфигурации
 - **WHEN** `config.Load` возвращает ошибку
@@ -71,7 +77,7 @@
 - **WHEN** chat-health на шаге 10 обнаруживает, что бот не администратор
   в одном из чатов
 - **THEN** поднимается `admin_alert` и владельцу уходит DM
-- **AND** старт продолжается до запуска Enforcer и поллера
+- **AND** старт продолжается до запуска Enforcer, Reconciler и поллера
 
 #### Scenario: Shared invite links готовы до poller loop
 - **WHEN** `INVITE_MODE=shared_join_request` и startup успешен
@@ -79,6 +85,12 @@
   club chat
 - **AND** есть активная join-request ссылка для club channel
 - **AND** poller loop запускается только после этого
+
+#### Scenario: Initial reconcile runs before poller loop
+- **WHEN** startup успешен и Enforcer workers запущены
+- **THEN** один Reconciler pass выполнен до запуска poller loop
+- **AND** due revocations, накопленные до старта, обработаны через
+  outbox-safe paths
 
 #### Scenario: Direct mode creates degraded alert
 - **WHEN** startup успешен с `INVITE_MODE=direct`
@@ -89,38 +101,47 @@
 - **WHEN** процесс получает `SIGINT` или `SIGTERM` после успешного
   старта
 - **THEN** корневой контекст отменяется
-- **AND** горутины Enforcer и поллера завершаются до deferred
-  `db.Close()`
+- **AND** горутины Enforcer, Reconciler, cleanup и поллера завершаются
+  до deferred `db.Close()`
 - **AND** процесс выходит с кодом `0`
 
 ### Requirement: Background subsystems run under a supervised errgroup
 
-Фоновые подсистемы MUST запускаться под `errgroup.WithContext`: в этой
-фазе это поллер и Enforcer workers. Первая ошибка любой подсистемы или
-сигнал отменяют общий контекст и останавливают остальных. Порядок
-остановки: отмена контекста → дождаться завершения горутин →
-`db.Close()` в самом конце (закрывать БД, пока живы писатели, нельзя).
+Фоновые подсистемы MUST запускаться под `errgroup.WithContext`: поллер,
+Enforcer workers, periodic Reconciler и cleanup ticker. Первая
+фатальная ошибка любой подсистемы или сигнал отменяют общий контекст и
+останавливают остальных. Порядок остановки: отмена контекста →
+дождаться завершения горутин → `db.Close()` в самом конце (закрывать
+БД, пока живы писатели, нельзя).
+
 Поллеру отдельная финализация offset не нужна: `update_offset` durable
 после каждого батча. Enforcer не требует отдельной финализации lease:
 незавершённые `running` actions будут подобраны после `locked_until`.
+Reconciler и cleanup ticker MUST завершаться по context cancellation
+без удержания DB transaction.
 
 #### Scenario: Ошибка поллера отменяет группу
 - **WHEN** горутина поллера возвращает ошибку
 - **THEN** контекст группы отменяется
-- **AND** Enforcer workers завершаются
+- **AND** Enforcer, Reconciler и cleanup завершаются
 - **AND** ошибка пробрасывается в `main`
 
 #### Scenario: Ошибка Enforcer отменяет группу
 - **WHEN** горутина Enforcer возвращает ошибку, несовместимую с
   продолжением работы
 - **THEN** контекст группы отменяется
-- **AND** poller завершается
+- **AND** poller, Reconciler и cleanup завершаются
 - **AND** ошибка пробрасывается в `main`
+
+#### Scenario: Ошибка Reconciler pass не ломает процесс при recoverable alert
+- **WHEN** Reconciler обнаруживает потерю прав или `unknown` source
+- **THEN** создаётся `admin_alert`
+- **AND** подсистема продолжает работу, если ошибка recoverable
 
 #### Scenario: Сигнал дожидается горутин до закрытия базы
 - **WHEN** процесс получает сигнал завершения
-- **THEN** контекст отменяется, горутины Enforcer и поллера
-  возвращаются
+- **THEN** контекст отменяется, горутины Enforcer, Reconciler, cleanup
+  и poller возвращаются
 - **AND** `db.Close()` выполняется только после остановки горутин
 
 ### Requirement: Unsupported Telegram webhook mode fails fast

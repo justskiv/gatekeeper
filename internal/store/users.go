@@ -59,6 +59,15 @@ func (r *Users) Upsert(ctx context.Context, u domain.User) error {
 	return nil
 }
 
+// EnsureStub creates a minimal local user row when only tg_id is known.
+func (r *Users) EnsureStub(ctx context.Context, tgID int64) error {
+	if tgID <= 0 {
+		return fmt.Errorf("tg_id must be positive, got %d", tgID)
+	}
+
+	return r.Upsert(ctx, domain.User{TGID: tgID})
+}
+
 // Get returns the user with the given Telegram ID, or ErrNotFound.
 func (r *Users) Get(ctx context.Context, tgID int64) (domain.User, error) {
 	row := r.db.QueryRowContext(ctx, `
@@ -135,6 +144,29 @@ func (r *Users) SetDMState(
 	}
 
 	return nil
+}
+
+// SetBanned narrowly updates the owner-controlled hard-ban fields.
+func (r *Users) SetBanned(
+	ctx context.Context,
+	tgID int64,
+	banned bool,
+	reason string,
+) error {
+	now := rfc3339(time.Now())
+
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE users
+		SET banned = ?,
+		    banned_reason = ?,
+		    updated_at = ?
+		WHERE tg_id = ?`,
+		banned, reason, now, tgID)
+	if err != nil {
+		return fmt.Errorf("set user %d banned: %w", tgID, err)
+	}
+
+	return requireAffected(res, "user", tgID)
 }
 
 type userScanner interface {

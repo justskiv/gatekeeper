@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -615,6 +616,39 @@ func TestMembershipExternalJoinAlertsWithoutKick(t *testing.T) {
 	if got := countRows(t, db,
 		`SELECT count(*) FROM admin_alerts WHERE kind = 'external_join'`); got != 1 {
 		t.Fatalf("external_join alerts = %d, want 1", got)
+	}
+}
+
+func TestMembershipBannedExternalJoinHardBansWithoutGrant(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tgID := int64(7007)
+
+	if err := store.NewUsers(db).Upsert(ctx, domain.User{
+		TGID:   tgID,
+		Banned: true,
+	}); err != nil {
+		t.Fatalf("upsert banned user: %v", err)
+	}
+
+	handler := newTestHandler(db, domain.InviteSharedJoinRequest)
+	if err := handler.HandleMembershipUpdate(ctx, MembershipUpdate{
+		User:      domain.User{TGID: tgID},
+		Resource:  domain.ResourceChat,
+		Joined:    true,
+		EventDate: time.Unix(1_700_000_000, 0),
+	}); err != nil {
+		t.Fatalf("HandleMembershipUpdate: %v", err)
+	}
+
+	if _, err := store.NewGrants(db).Get(ctx, tgID, domain.ResourceChat); err == nil {
+		t.Fatal("grant exists for banned external join, want none")
+	} else if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("get grant: %v", err)
+	}
+
+	if got := countActions(t, db, domain.ActionHardBan); got != 1 {
+		t.Fatalf("hard_ban actions = %d, want one", got)
 	}
 }
 

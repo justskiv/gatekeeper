@@ -17,16 +17,23 @@ import (
 
 // Reply is a post-commit Telegram message effect.
 type Reply struct {
-	ChatID int64
-	TGID   int64
-	Text   string
-	DM     bool
+	ChatID  int64
+	TGID    int64
+	Text    string
+	DM      bool
+	Buttons [][]Button
 }
 
 // Result is the durable command handling result.
 type Result struct {
 	Ignored bool
 	Replies []Reply
+}
+
+// Button is one inline keyboard button for a command reply.
+type Button struct {
+	Text         string `json:"text"`
+	CallbackData string `json:"callback_data"`
 }
 
 // CommandDeps are transaction-bound dependencies for bot commands.
@@ -36,8 +43,13 @@ type CommandDeps struct {
 	Grants        *store.Grants
 	Audit         *store.Audit
 	Whitelist     *store.Whitelist
+	Revocations   *store.Revocations
+	Outbox        *store.Outbox
+	Alerts        *store.Alerts
 	StatusEngine  *engine.Engine
+	Members       engine.MemberChecker
 	Preflight     *engine.Snapshot
+	AdminSync     AdminSyncFunc
 }
 
 // UserCommands handles user and owner bot commands.
@@ -86,6 +98,8 @@ func (h *UserCommands) HandlePrivate(
 		return h.handleStatus(ctx, msg)
 	case "whois":
 		return h.handleWhois(ctx, msg)
+	case "grant", "revoke", "ban", "unban", "sync":
+		return h.handleAdminAction(ctx, msg, cmd)
 	case "start", "":
 		if err := h.rememberPrivateUser(ctx, *msg.From); err != nil {
 			return Result{}, err
@@ -100,6 +114,14 @@ func (h *UserCommands) HandlePrivate(
 	default:
 		return Result{Ignored: true}, nil
 	}
+}
+
+// HandleCallback routes owner confirmation callbacks.
+func (h *UserCommands) HandleCallback(
+	ctx context.Context,
+	query *models.CallbackQuery,
+) (Result, error) {
+	return h.handleAdminCallback(ctx, query)
 }
 
 func (h *UserCommands) rememberPrivateUser(ctx context.Context, user models.User) error {
@@ -271,8 +293,12 @@ func engineStore(deps CommandDeps) engine.Store {
 		Users:         deps.Users,
 		Subscriptions: deps.Subscriptions,
 		Audit:         deps.Audit,
-		Revocations:   nil,
+		Revocations:   deps.Revocations,
 		Whitelist:     deps.Whitelist,
+		Grants:        deps.Grants,
+		Outbox:        deps.Outbox,
+		Alerts:        deps.Alerts,
+		Members:       deps.Members,
 	}
 }
 

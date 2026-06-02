@@ -62,3 +62,37 @@ func (r *Whitelist) Remove(ctx context.Context, tgID int64) error {
 
 	return nil
 }
+
+// ListTGIDs returns whitelisted users for reconciliation candidates.
+func (r *Whitelist) ListTGIDs(ctx context.Context, limit int) ([]int64, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT tg_id
+		FROM whitelist
+		ORDER BY tg_id
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list whitelist tg_ids: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []int64
+
+	for rows.Next() {
+		var tgID int64
+		if err := rows.Scan(&tgID); err != nil {
+			return nil, fmt.Errorf("scan whitelist tg_id: %w", err)
+		}
+
+		out = append(out, tgID)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate whitelist tg_ids: %w", err)
+	}
+
+	return out, nil
+}

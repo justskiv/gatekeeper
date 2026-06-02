@@ -72,6 +72,8 @@ func TestLoad(t *testing.T) {
 		{"non-negative chat ID", map[string]string{"CLUB_CHAT_ID": "1003333333333"}, true},
 		{"non-integer chat ID", map[string]string{"CLUB_CHAT_ID": "not-a-number"}, true},
 		{"duplicate chat IDs", map[string]string{"CLUB_CHANNEL_ID": "-1003333333333"}, true},
+		{"admin log collides with club chat",
+			map[string]string{"ADMIN_LOG_CHAT_ID": "-1003333333333"}, true},
 		{
 			"source and club chat conflict",
 			map[string]string{"CLUB_CHAT_ID": "-1001111111111"},

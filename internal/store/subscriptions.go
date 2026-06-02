@@ -154,6 +154,35 @@ func (r *Subscriptions) ExpireActive(
 	return affected > 0, nil
 }
 
+// UpsertManual creates or refreshes a manual active subscription.
+func (r *Subscriptions) UpsertManual(
+	ctx context.Context,
+	tgID int64,
+	expiresAt *time.Time,
+	signal string,
+) (int64, error) {
+	now := time.Now()
+
+	return r.UpsertActive(ctx, domain.Subscription{
+		TGID:       tgID,
+		Platform:   domain.PlatformManual,
+		Status:     domain.SubActive,
+		StartedAt:  now,
+		ExpiresAt:  expiresAt,
+		LastSignal: signal,
+	})
+}
+
+// ExpireManual expires the active manual subscription, if one exists.
+func (r *Subscriptions) ExpireManual(
+	ctx context.Context,
+	tgID int64,
+	endedAt time.Time,
+	signal string,
+) (bool, error) {
+	return r.ExpireActive(ctx, tgID, domain.PlatformManual, endedAt, signal)
+}
+
 // GetActive returns the active subscription for (tgID, platform), or
 // false when none exists. idx_subscriptions_active_unique guarantees at
 // most one such row.
@@ -186,6 +215,44 @@ func (r *Subscriptions) ListActiveByUser(
 	ctx context.Context, tgID int64,
 ) ([]domain.Subscription, error) {
 	return r.listByUser(ctx, tgID, true)
+}
+
+// ListActiveTGIDs returns users that have at least one active subscription.
+func (r *Subscriptions) ListActiveTGIDs(
+	ctx context.Context,
+	limit int,
+) ([]int64, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT DISTINCT tg_id
+		FROM subscriptions
+		WHERE status = 'active'
+		ORDER BY tg_id
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list active subscription tg_ids: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []int64
+
+	for rows.Next() {
+		var tgID int64
+		if err := rows.Scan(&tgID); err != nil {
+			return nil, fmt.Errorf("scan active subscription tg_id: %w", err)
+		}
+
+		out = append(out, tgID)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate active subscription tg_ids: %w", err)
+	}
+
+	return out, nil
 }
 
 // ListByUser returns a user's subscription history from newest to oldest.

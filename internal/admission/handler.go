@@ -62,6 +62,7 @@ type Deps struct {
 	Whitelist     *store.Whitelist
 	Revocations   *store.Revocations
 	StatusEngine  *engine.Engine
+	Members       engine.MemberChecker
 }
 
 // Handler applies admission decisions inside the handler transaction.
@@ -257,7 +258,7 @@ func (h *Handler) approveJoin(
 		return err
 	}
 
-	if err := h.deps.Grants.MarkJoined(
+	if err := h.deps.Grants.MarkJoinedByAdmission(
 		ctx, req.User.TGID, req.Resource, "bot",
 	); err != nil {
 		return err
@@ -320,6 +321,11 @@ func (h *Handler) HandleMembershipUpdate(
 		return err
 	}
 
+	user, err := h.deps.Users.Get(ctx, update.User.TGID)
+	if err != nil {
+		return err
+	}
+
 	if !update.Joined {
 		if _, err := h.deps.Grants.MarkLeftUnlessRevoked(
 			ctx, update.User.TGID, update.Resource,
@@ -329,6 +335,20 @@ func (h *Handler) HandleMembershipUpdate(
 
 		return h.audit(ctx, update.User.TGID, auditMemberLeft,
 			update.Resource, "member left managed resource")
+	}
+
+	if user.Banned {
+		if h.deps.Outbox == nil {
+			return errors.New("admission outbox dependency is incomplete")
+		}
+
+		if err := h.enqueueHardBan(ctx, update.User.TGID, update.Resource,
+			"banned external join", update.EventDate); err != nil {
+			return err
+		}
+
+		return h.audit(ctx, update.User.TGID, "banned_join_detected",
+			update.Resource, "joined while banned")
 	}
 
 	botAdmitted, directEvidence, err := h.botAdmissionEvidence(ctx, update)
@@ -746,6 +766,10 @@ func (h *Handler) engineStore() engine.Store {
 		Audit:         h.deps.Audit,
 		Revocations:   h.deps.Revocations,
 		Whitelist:     h.deps.Whitelist,
+		Grants:        h.deps.Grants,
+		Outbox:        h.deps.Outbox,
+		Alerts:        h.deps.Alerts,
+		Members:       h.deps.Members,
 	}
 }
 
@@ -852,6 +876,40 @@ func (h *Handler) enqueueSoftKick(
 		IdempotencyKey: domain.AccessActionKey(
 			domain.ActionSoftKick, &tgID, &resource, marker),
 		PayloadJSON: []byte(`{}`),
+	})
+
+	return err
+}
+
+func (h *Handler) enqueueHardBan(
+	ctx context.Context,
+	tgID int64,
+	resource domain.Resource,
+	reason string,
+	eventDate time.Time,
+) error {
+	if eventDate.IsZero() {
+		eventDate = h.now()
+	}
+
+	payload, err := json.Marshal(struct {
+		Reason string `json:"reason,omitempty"`
+	}{Reason: reason})
+	if err != nil {
+		return err
+	}
+
+	_, _, err = h.deps.Outbox.Enqueue(ctx, store.AccessActionInput{
+		Type:     domain.ActionHardBan,
+		TGID:     &tgID,
+		Resource: &resource,
+		IdempotencyKey: domain.AccessActionKey(
+			domain.ActionHardBan,
+			&tgID,
+			&resource,
+			"banned_join:"+eventDate.UTC().Format(time.RFC3339Nano),
+		),
+		PayloadJSON: payload,
 	})
 
 	return err

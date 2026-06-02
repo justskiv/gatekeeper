@@ -24,6 +24,7 @@ import (
 	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/invite"
 	"github.com/justskiv/gatekeeper/internal/notify"
+	"github.com/justskiv/gatekeeper/internal/reconcile"
 	"github.com/justskiv/gatekeeper/internal/source"
 	"github.com/justskiv/gatekeeper/internal/store"
 	"github.com/justskiv/gatekeeper/internal/telegram"
@@ -91,10 +92,109 @@ func run() error {
 		TributeChannelID:   cfg.TributeChannelID,
 		TributeObservation: cfg.TributeMode == "observation",
 	}
+	statusEngine := newStatusEngine(cfg, db, tgClient, sourceChats)
 
+	if err := tgClient.SetMyCommands(ctx, cfg.OwnerTGIDs); err != nil {
+		logger.Warn("failed to set bot commands", slog.Any("error", err))
+	}
+
+	notifier := notify.New(store.NewUsers(db), tgClient, logger)
+	healthChats := telegram.HealthChatsFromConfig(cfg)
+
+	if err := checkStartupHealth(
+		ctx, db, tgClient, notifier, healthChats, cfg.OwnerTGIDs, me.ID, logger,
+	); err != nil {
+		return err
+	}
+
+	runtime, runtimeCtx := startRuntime(
+		ctx, db, cfg, tgClient, statusEngine, healthChats, logger)
+
+	if err := prepareInviteStartup(ctx, runtimeCtx, cfg, runtime); err != nil {
+		runtime.stopAndWait()
+
+		return err
+	}
+
+	if _, err := runtime.reconciler.RunOnce(runtimeCtx); err != nil {
+		runtime.stopAndWait()
+
+		return err
+	}
+
+	runtime.startPeriodic(runtimeCtx)
+
+	poller := telegram.NewPoller(
+		db, tgClient, notifier, healthChats, cfg.OwnerTGIDs, logger,
+		telegram.WithPollerStatusEngine(statusEngine),
+		telegram.WithPollerSourceChats(sourceChats),
+		telegram.WithPollerAdmissionConfig(admissionConfig(cfg)),
+		telegram.WithPollerAdminLogChatID(cfg.AdminLogChatID))
+
+	runtime.group.Go(func() error {
+		return poller.Run(runtimeCtx)
+	})
+
+	logger.Info("gatekeeper started",
+		slog.String("db_path", cfg.DBPath),
+		slog.String("telegram_mode", cfg.TelegramMode),
+		slog.String("tribute_mode", cfg.TributeMode))
+
+	return waitRuntime(ctx, runtimeCtx, runtime, logger)
+}
+
+func waitRuntime(
+	rootCtx context.Context,
+	runtimeCtx context.Context,
+	runtime runtimeGroup,
+	logger *slog.Logger,
+) error {
+	groupDone := make(chan error, 1)
+	go func() {
+		groupDone <- runtime.group.Wait()
+	}()
+
+	select {
+	case <-runtimeCtx.Done():
+		if rootCtx.Err() != nil {
+			logger.Info("shutdown signal received, stopping")
+		}
+
+		runtime.cancel()
+
+		return <-groupDone
+	case err := <-groupDone:
+		runtime.cancel()
+
+		return err
+	}
+}
+
+func checkStartupHealth(
+	ctx context.Context,
+	db *sql.DB,
+	tgClient *telegram.Client,
+	notifier *notify.Notifier,
+	healthChats []telegram.HealthChat,
+	ownerIDs []int64,
+	botID int64,
+	logger *slog.Logger,
+) error {
+	return telegram.CheckStartupHealth(
+		ctx, db, tgClient, notifier, healthChats, ownerIDs, botID, logger,
+	)
+}
+
+func newStatusEngine(
+	cfg config.Config,
+	db store.DBTX,
+	tgClient *telegram.Client,
+	sourceChats telegram.SourceChats,
+) *engine.Engine {
 	sources := []engine.SubscriptionSource{
 		source.NewMembership(domain.PlatformBoosty, cfg.BoostyGroupID, tgClient),
 	}
+
 	if sourceChats.TributeObservation {
 		sources = append(sources, source.NewMembership(
 			domain.PlatformTribute,
@@ -106,57 +206,13 @@ func run() error {
 
 	sources = append(sources,
 		source.NewManual(store.NewWhitelist(db), store.NewSubscriptions(db)))
-	statusEngine := engine.New(sources)
 
-	if err := tgClient.SetMyCommands(ctx, cfg.OwnerTGIDs); err != nil {
-		logger.Warn("failed to set bot commands", slog.Any("error", err))
-	}
-
-	notifier := notify.New(store.NewUsers(db), tgClient, logger)
-
-	healthChats := telegram.HealthChatsFromConfig(cfg)
-	if err := telegram.CheckStartupHealth(
-		ctx, db, tgClient, notifier, healthChats, cfg.OwnerTGIDs, me.ID, logger,
-	); err != nil {
-		return err
-	}
-
-	runtime, runtimeCtx := startRuntime(ctx, db, cfg, tgClient, logger)
-
-	if err := prepareInviteStartup(ctx, runtimeCtx, cfg, runtime); err != nil {
-		runtime.stopAndWait()
-
-		return err
-	}
-
-	poller := telegram.NewPoller(
-		db, tgClient, notifier, healthChats, cfg.OwnerTGIDs, logger,
-		telegram.WithPollerStatusEngine(statusEngine),
-		telegram.WithPollerSourceChats(sourceChats),
-		telegram.WithPollerAdmissionConfig(admissionConfig(cfg)))
-
-	runtime.group.Go(func() error {
-		return poller.Run(runtimeCtx)
-	})
-
-	logger.Info("gatekeeper started",
-		slog.String("db_path", cfg.DBPath),
-		slog.String("telegram_mode", cfg.TelegramMode),
-		slog.String("tribute_mode", cfg.TributeMode))
-
-	<-runtimeCtx.Done()
-
-	if ctx.Err() != nil {
-		logger.Info("shutdown signal received, stopping")
-	}
-
-	runtime.cancel()
-
-	if err := runtime.group.Wait(); err != nil {
-		return err
-	}
-
-	return nil
+	return engine.New(sources, engine.WithRevocationConfig(
+		engine.RevocationConfig{
+			ExpiryMode:  cfg.ExpiryMode,
+			GracePeriod: cfg.GracePeriod,
+		},
+	))
 }
 
 func admissionConfig(cfg config.Config) admission.Config {
@@ -179,6 +235,8 @@ type runtimeGroup struct {
 	outbox        *store.Outbox
 	alerts        *store.Alerts
 	inviteChecker sharedInviteReadiness
+	reconciler    *reconcile.Reconciler
+	cleanup       *reconcile.CleanupService
 }
 
 func startRuntime(
@@ -186,6 +244,8 @@ func startRuntime(
 	db *sql.DB,
 	cfg config.Config,
 	tgClient *telegram.Client,
+	statusEngine *engine.Engine,
+	healthChats []telegram.HealthChat,
 	logger *slog.Logger,
 ) (runtimeGroup, context.Context) {
 	outbox := store.NewOutbox(db)
@@ -198,9 +258,16 @@ func startRuntime(
 	}, invite.WithLogger(logger))
 
 	enforcerRunner := enforcer.New(enforcer.Stores{
-		Outbox: outbox,
-		Users:  store.NewUsers(db),
-		Alerts: store.NewAlerts(db),
+		Outbox:        outbox,
+		Users:         store.NewUsers(db),
+		Subscriptions: store.NewSubscriptions(db),
+		Grants:        store.NewGrants(db),
+		Audit:         store.NewAudit(db),
+		Revocations:   store.NewRevocations(db),
+		Whitelist:     store.NewWhitelist(db),
+		Alerts: store.NewAlertsWithDelivery(
+			db, outbox, cfg.OwnerTGIDs, cfg.AdminLogChatID),
+		StatusEngine: statusEngine,
 	}, tgClient, inviteService, enforcer.Config{
 		Workers:       cfg.EnforcerWorkers,
 		ClubChatID:    cfg.ClubChatID,
@@ -214,18 +281,81 @@ func startRuntime(
 		return enforcerRunner.Run(groupCtx)
 	})
 
+	reconcileCfg := reconcileConfig(cfg)
+	reconciler := reconcile.New(
+		db,
+		statusEngine,
+		inviteService,
+		reconcileCfg,
+		logger,
+		reconcile.WithHealthCheck(func(ctx context.Context) error {
+			return telegram.CheckStartupHealth(
+				ctx,
+				db,
+				tgClient,
+				notify.NewDurable(store.NewUsers(db), outbox, logger),
+				healthChats,
+				cfg.OwnerTGIDs,
+				tgClient.BotID(),
+				logger,
+			)
+		}),
+		reconcile.WithMemberChecker(telegram.NewClubMemberChecker(
+			tgClient, cfg.ClubChatID, cfg.ClubChannelID)),
+	)
+
 	return runtimeGroup{
-		group:         group,
-		cancel:        cancelRuntime,
-		outbox:        outbox,
-		alerts:        store.NewAlerts(db),
+		group:  group,
+		cancel: cancelRuntime,
+		outbox: outbox,
+		alerts: store.NewAlertsWithDelivery(
+			db, outbox, cfg.OwnerTGIDs, cfg.AdminLogChatID),
 		inviteChecker: inviteService,
+		reconciler:    reconciler,
+		cleanup:       reconcile.NewCleanupService(db, reconcileCfg, logger),
 	}, groupCtx
 }
 
 func (r runtimeGroup) stopAndWait() {
 	r.cancel()
 	_ = r.group.Wait()
+}
+
+func (r runtimeGroup) startPeriodic(ctx context.Context) {
+	r.group.Go(func() error {
+		return r.reconciler.Run(ctx)
+	})
+	r.group.Go(func() error {
+		return r.cleanup.Run(ctx)
+	})
+}
+
+func reconcileConfig(cfg config.Config) reconcile.Config {
+	return reconcile.Config{
+		Interval:        cfg.ReconcileInterval,
+		CleanupInterval: cfg.CleanupInterval,
+		RawRetention:    cfg.RawRetention,
+		AuditRetention:  cfg.AuditRetention,
+		InviteMode:      domain.InviteMode(cfg.InviteMode),
+		OwnerIDs:        cfg.OwnerTGIDs,
+		AdminLogChatID:  cfg.AdminLogChatID,
+		Sources: []reconcile.SourceChat{
+			{
+				Platform: domain.PlatformBoosty,
+				ChatID:   cfg.BoostyGroupID,
+				Enabled:  true,
+			},
+			{
+				Platform: domain.PlatformTribute,
+				ChatID:   cfg.TributeChannelID,
+				Enabled:  cfg.TributeMode == "observation",
+			},
+		},
+		Resources: []reconcile.ResourceChat{
+			{Resource: domain.ResourceChat, ChatID: cfg.ClubChatID},
+			{Resource: domain.ResourceChannel, ChatID: cfg.ClubChannelID},
+		},
+	}
 }
 
 func prepareInviteStartup(

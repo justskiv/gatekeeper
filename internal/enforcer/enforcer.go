@@ -14,8 +14,10 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"github.com/justskiv/gatekeeper/internal/domain"
+	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/invite"
 	"github.com/justskiv/gatekeeper/internal/messages"
+	"github.com/justskiv/gatekeeper/internal/source"
 	"github.com/justskiv/gatekeeper/internal/store"
 	"github.com/justskiv/gatekeeper/internal/telegram"
 )
@@ -419,6 +421,21 @@ func (e *Enforcer) hardBan(
 		return err
 	}
 
+	if err := e.wait(ctx, requestKindGetMember, chatID); err != nil {
+		return err
+	}
+
+	member, err := e.tg.GetChatMember(ctx, chatID, tgID)
+	if err != nil {
+		return classifyNoop(string(action.Type), err)
+	}
+
+	if memberIsPrivileged(member) {
+		return expectedNoopError{
+			err: fmt.Errorf("hard_ban target %d is %s", tgID, member.Type),
+		}
+	}
+
 	if err := e.wait(ctx, requestKindDefault, chatID); err != nil {
 		return err
 	}
@@ -443,7 +460,7 @@ func (e *Enforcer) unban(
 		return err
 	}
 
-	if err := e.tg.UnbanChatMember(ctx, chatID, tgID, false); err != nil {
+	if err := e.tg.UnbanChatMember(ctx, chatID, tgID, true); err != nil {
 		return classifyNoop(string(action.Type), err)
 	}
 
@@ -484,6 +501,13 @@ func (e *Enforcer) sendDM(
 		}
 	}
 
+	if len(payload.Buttons) > 0 {
+		if sender, ok := e.tg.(replyMarkupSender); ok {
+			return sender.SendMessageWithReplyMarkup(
+				ctx, chatID, payload.Text, inlineKeyboard(payload.Buttons))
+		}
+	}
+
 	return e.tg.SendMessage(ctx, chatID, payload.Text)
 }
 
@@ -491,18 +515,232 @@ func (e *Enforcer) verifyMember(
 	ctx context.Context,
 	action domain.AccessAction,
 ) error {
-	tgID, chatID, err := e.tgTarget(action)
+	tgID, err := requiredTGID(action)
 	if err != nil {
 		return err
+	}
+
+	payload := verifyMemberPayload{}
+	if err := decodePayload(action, &payload); err != nil {
+		return err
+	}
+
+	chatID := payload.ChatID
+	if chatID == 0 {
+		resource, err := requiredResource(action)
+		if err != nil {
+			return err
+		}
+
+		chatID, err = e.chatID(resource)
+		if err != nil {
+			return err
+		}
+
+		payload.Resource = string(resource)
+		payload.Kind = "club"
 	}
 
 	if err := e.wait(ctx, requestKindGetMember, chatID); err != nil {
 		return err
 	}
 
-	_, err = e.tg.GetChatMember(ctx, chatID, tgID)
+	member, err := e.tg.GetChatMember(ctx, chatID, tgID)
+	if err != nil {
+		return err
+	}
+
+	return e.applyVerifiedMember(ctx, tgID, member, payload)
+}
+
+func (e *Enforcer) applyVerifiedMember(
+	ctx context.Context,
+	tgID int64,
+	member *models.ChatMember,
+	payload verifyMemberPayload,
+) error {
+	joined := source.MemberInChat(member)
+	observedAt := e.now()
+
+	switch payload.Kind {
+	case "source":
+		platform := domain.Platform(payload.Platform)
+		if platform == "" {
+			return errors.New("verify_member source payload platform is required")
+		}
+
+		if e.stores.Users != nil {
+			if err := e.stores.Users.Upsert(ctx, userFromMember(tgID, member)); err != nil {
+				return err
+			}
+		}
+
+		if e.stores.Subscriptions == nil {
+			return nil
+		}
+
+		if joined {
+			if _, err := e.stores.Subscriptions.UpsertActive(ctx, domain.Subscription{
+				TGID:          tgID,
+				Platform:      platform,
+				Status:        domain.SubActive,
+				StartedAt:     observedAt,
+				LastSignal:    "reconcile",
+				LastCheckedAt: &observedAt,
+			}); err != nil {
+				return err
+			}
+		} else if _, err := e.stores.Subscriptions.ExpireActive(
+			ctx, tgID, platform, observedAt, "reconcile",
+		); err != nil {
+			return err
+		}
+
+		return e.recompute(ctx, tgID)
+	case "club", "":
+		resource := domain.Resource(payload.Resource)
+		if resource == "" {
+			switch payload.ChatID {
+			case e.cfg.ClubChatID:
+				resource = domain.ResourceChat
+			case e.cfg.ClubChannelID:
+				resource = domain.ResourceChannel
+			}
+		}
+
+		if resource == "" {
+			return errors.New("verify_member club payload resource is required")
+		}
+
+		if e.stores.Users != nil {
+			if err := e.stores.Users.Upsert(ctx, userFromMember(tgID, member)); err != nil {
+				return err
+			}
+		}
+
+		if e.stores.Grants == nil {
+			return nil
+		}
+
+		if joined {
+			return e.stores.Grants.MarkJoined(ctx, tgID, resource, "bot")
+		}
+
+		_, err := e.stores.Grants.MarkLeftUnlessRevoked(ctx, tgID, resource)
+
+		return err
+	default:
+		return fmt.Errorf("unknown verify_member kind %q", payload.Kind)
+	}
+}
+
+func (e *Enforcer) recompute(ctx context.Context, tgID int64) error {
+	if e.stores.StatusEngine == nil ||
+		e.stores.Users == nil ||
+		e.stores.Subscriptions == nil ||
+		e.stores.Audit == nil ||
+		e.stores.Revocations == nil ||
+		e.stores.Whitelist == nil {
+		return nil
+	}
+
+	users, ok := e.stores.Users.(engine.UserStore)
+	if !ok {
+		return nil
+	}
+
+	subscriptions, ok := e.stores.Subscriptions.(engine.SubscriptionStore)
+	if !ok {
+		return nil
+	}
+
+	grants, ok := e.stores.Grants.(engine.GrantStore)
+	if !ok {
+		return nil
+	}
+
+	outbox, ok := e.stores.Outbox.(engine.OutboxStore)
+	if !ok {
+		return nil
+	}
+
+	_, err := e.stores.StatusEngine.RecomputeAccess(ctx, engine.Store{
+		Users:         users,
+		Subscriptions: subscriptions,
+		Audit:         e.stores.Audit,
+		Revocations:   e.stores.Revocations,
+		Whitelist:     e.stores.Whitelist,
+		Grants:        grants,
+		Outbox:        outbox,
+		Alerts:        e.stores.Alerts,
+		Members: telegram.NewClubMemberChecker(
+			e.tg, e.cfg.ClubChatID, e.cfg.ClubChannelID),
+	}, tgID)
 
 	return err
+}
+
+func userFromMember(tgID int64, member *models.ChatMember) domain.User {
+	user := memberUser(member)
+	if user == nil {
+		return domain.User{TGID: tgID}
+	}
+
+	return domain.User{
+		TGID:         user.ID,
+		Username:     user.Username,
+		FirstName:    user.FirstName,
+		LastName:     user.LastName,
+		LanguageCode: user.LanguageCode,
+		IsBot:        user.IsBot,
+	}
+}
+
+func memberUser(member *models.ChatMember) *models.User {
+	if member == nil {
+		return nil
+	}
+
+	switch member.Type {
+	case models.ChatMemberTypeOwner:
+		if member.Owner == nil {
+			return nil
+		}
+
+		return member.Owner.User
+	case models.ChatMemberTypeAdministrator:
+		if member.Administrator == nil {
+			return nil
+		}
+
+		return &member.Administrator.User
+	case models.ChatMemberTypeMember:
+		if member.Member == nil {
+			return nil
+		}
+
+		return member.Member.User
+	case models.ChatMemberTypeRestricted:
+		if member.Restricted == nil {
+			return nil
+		}
+
+		return member.Restricted.User
+	case models.ChatMemberTypeLeft:
+		if member.Left == nil {
+			return nil
+		}
+
+		return member.Left.User
+	case models.ChatMemberTypeBanned:
+		if member.Banned == nil {
+			return nil
+		}
+
+		return member.Banned.User
+	default:
+		return nil
+	}
 }
 
 func (e *Enforcer) revokeInvite(
@@ -783,6 +1021,10 @@ type sendDMPayload struct {
 	Text        string `json:"text"`
 	ChatID      int64  `json:"chat_id,omitempty"`
 	RetryButton bool   `json:"retry_button,omitempty"`
+	Buttons     [][]struct {
+		Text         string `json:"text"`
+		CallbackData string `json:"callback_data"`
+	} `json:"buttons,omitempty"`
 }
 
 type sendInvitePayload struct {
@@ -792,6 +1034,13 @@ type sendInvitePayload struct {
 type revokeInvitePayload struct {
 	InviteLinkID int64  `json:"invite_link_id"`
 	InviteLink   string `json:"invite_link"`
+}
+
+type verifyMemberPayload struct {
+	Kind     string `json:"kind,omitempty"` // source|club
+	Platform string `json:"platform,omitempty"`
+	Resource string `json:"resource,omitempty"`
+	ChatID   int64  `json:"chat_id,omitempty"`
 }
 
 type replyMarkupSender interface {
@@ -812,4 +1061,26 @@ func retryKeyboard() models.InlineKeyboardMarkup {
 			},
 		}},
 	}
+}
+
+func inlineKeyboard(buttons [][]struct {
+	Text         string `json:"text"`
+	CallbackData string `json:"callback_data"`
+}) models.InlineKeyboardMarkup {
+	keyboard := make([][]models.InlineKeyboardButton, 0, len(buttons))
+	for _, row := range buttons {
+		outRow := make([]models.InlineKeyboardButton, 0, len(row))
+		for _, button := range row {
+			outRow = append(outRow, models.InlineKeyboardButton{
+				Text:         button.Text,
+				CallbackData: button.CallbackData,
+			})
+		}
+
+		if len(outRow) > 0 {
+			keyboard = append(keyboard, outRow)
+		}
+	}
+
+	return models.InlineKeyboardMarkup{InlineKeyboard: keyboard}
 }

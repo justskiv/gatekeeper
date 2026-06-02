@@ -57,6 +57,80 @@ func TestRouterRoutesSourceChatMemberToEngine(t *testing.T) {
 	}
 }
 
+func TestRouterSourceRevocationWiresProtectedMemberAlertDelivery(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tgID := int64(43)
+	ownerID := int64(100)
+	outbox := store.NewOutbox(db)
+
+	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+
+	if _, err := store.NewSubscriptions(db).UpsertActive(ctx, domain.Subscription{
+		TGID:       tgID,
+		Platform:   domain.PlatformBoosty,
+		StartedAt:  time.Now().Add(-time.Hour),
+		LastSignal: "event",
+	}); err != nil {
+		t.Fatalf("upsert subscription: %v", err)
+	}
+
+	if err := store.NewGrants(db).Upsert(ctx, domain.AccessGrant{
+		TGID:       tgID,
+		Resource:   domain.ResourceChat,
+		State:      domain.GrantJoined,
+		AdmittedBy: "bot",
+	}); err != nil {
+		t.Fatalf("upsert grant: %v", err)
+	}
+
+	statusEngine := engine.New(nil, engine.WithRevocationConfig(
+		engine.RevocationConfig{ExpiryMode: "immediate"}))
+	router := NewRouter(RouterDeps{
+		Users:         store.NewUsers(db),
+		Subscriptions: store.NewSubscriptions(db),
+		Grants:        store.NewGrants(db),
+		Meta:          store.NewMeta(db),
+		Audit:         store.NewAudit(db),
+		Alerts: store.NewAlertsWithDelivery(
+			db, outbox, []int64{ownerID}, nil),
+		Whitelist:   store.NewWhitelist(db),
+		Revocations: store.NewRevocations(db),
+		Outbox:      outbox,
+	}, nil, []int64{ownerID}, nil,
+		WithStatusEngine(statusEngine),
+		WithSourceChats(SourceChats{BoostyGroupID: -1001}),
+		WithMemberChecker(staticMemberChecker{member: &models.ChatMember{
+			Type: models.ChatMemberTypeAdministrator,
+			Administrator: &models.ChatMemberAdministrator{
+				User: models.User{ID: tgID},
+			},
+		}}))
+
+	result, err := router.Route(ctx, sourceLeaveUpdate(-1001, tgID))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+
+	if result.Status != store.TelegramUpdateProcessed {
+		t.Fatalf("status = %s, want processed", result.Status)
+	}
+
+	if got := countRouterActions(t, db, domain.ActionSoftKick); got != 0 {
+		t.Fatalf("soft_kick actions = %d, want none for protected admin", got)
+	}
+
+	if got := countRouterAlerts(t, db, "protected_admin_lost_subscription"); got != 1 {
+		t.Fatalf("protected alerts = %d, want one", got)
+	}
+
+	if got := countRouterActions(t, db, domain.ActionSendDM); got != 1 {
+		t.Fatalf("operator delivery actions = %d, want one", got)
+	}
+}
+
 func TestRouterEnqueuesCommandDMInOutbox(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
@@ -444,6 +518,39 @@ func sourceJoinUpdate(chatID, tgID int64) *models.Update {
 	}
 }
 
+func sourceLeaveUpdate(chatID, tgID int64) *models.Update {
+	return &models.Update{
+		ChatMember: &models.ChatMemberUpdated{
+			Chat: models.Chat{ID: chatID, Type: models.ChatTypeSupergroup},
+			From: models.User{ID: 1, FirstName: "Owner"},
+			OldChatMember: models.ChatMember{
+				Type: models.ChatMemberTypeMember,
+				Member: &models.ChatMemberMember{
+					User: &models.User{ID: tgID, FirstName: "User"},
+				},
+			},
+			NewChatMember: models.ChatMember{
+				Type: models.ChatMemberTypeLeft,
+				Left: &models.ChatMemberLeft{
+					User: &models.User{ID: tgID, FirstName: "User"},
+				},
+			},
+		},
+	}
+}
+
+type staticMemberChecker struct {
+	member *models.ChatMember
+}
+
+func (c staticMemberChecker) GetChatMember(
+	context.Context,
+	domain.Resource,
+	int64,
+) (*models.ChatMember, error) {
+	return c.member, nil
+}
+
 func admissionRouter(
 	t *testing.T,
 	db *sql.DB,
@@ -539,6 +646,20 @@ func countRouterActions(t *testing.T, db *sql.DB, action domain.ActionType) int 
 		FROM access_actions
 		WHERE action_type = ?`, string(action)).Scan(&n); err != nil {
 		t.Fatalf("count actions: %v", err)
+	}
+
+	return n
+}
+
+func countRouterAlerts(t *testing.T, db *sql.DB, kind string) int {
+	t.Helper()
+
+	var n int
+	if err := db.QueryRowContext(context.Background(), `
+		SELECT count(*)
+		FROM admin_alerts
+		WHERE kind = ?`, kind).Scan(&n); err != nil {
+		t.Fatalf("count alerts: %v", err)
 	}
 
 	return n

@@ -5,6 +5,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/go-telegram/bot/models"
+
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/store"
 )
@@ -41,13 +43,43 @@ type AuditStore interface {
 
 // RevocationStore is the pending-revocation surface needed by the engine.
 type RevocationStore interface {
+	CreateIfAbsent(ctx context.Context, p domain.PendingRevocation) (bool, error)
 	Get(ctx context.Context, tgID int64) (domain.PendingRevocation, bool, error)
 	Delete(ctx context.Context, tgID int64) error
+	MarkNotified(ctx context.Context, tgID int64) error
 }
 
 // WhitelistStore is the whitelist repository surface needed by the engine.
 type WhitelistStore interface {
 	Has(ctx context.Context, tgID int64) (bool, error)
+}
+
+// GrantStore is the access grant surface needed by revocation.
+type GrantStore interface {
+	ListEligibleForRevoke(ctx context.Context, tgID int64) ([]domain.AccessGrant, error)
+	Revoke(ctx context.Context, tgID int64, resource domain.Resource, reason string) (bool, error)
+}
+
+// OutboxStore is the durable Telegram action surface needed by revocation.
+type OutboxStore interface {
+	Enqueue(
+		ctx context.Context,
+		input store.AccessActionInput,
+	) (domain.AccessAction, bool, error)
+}
+
+// AlertStore is the operational alert surface needed by revocation.
+type AlertStore interface {
+	Create(ctx context.Context, a store.AlertInput) (int64, error)
+}
+
+// MemberChecker reads live Telegram membership for protection checks.
+type MemberChecker interface {
+	GetChatMember(
+		ctx context.Context,
+		resource domain.Resource,
+		tgID int64,
+	) (*models.ChatMember, error)
 }
 
 // Store is the narrow repository bundle used by engine operations.
@@ -57,6 +89,10 @@ type Store struct {
 	Audit         AuditStore
 	Revocations   RevocationStore
 	Whitelist     WhitelistStore
+	Grants        GrantStore
+	Outbox        OutboxStore
+	Alerts        AlertStore
+	Members       MemberChecker
 }
 
 // Effect is a post-commit side effect prepared by the engine.

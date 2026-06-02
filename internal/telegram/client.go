@@ -311,6 +311,26 @@ func (c *Client) SetMyCommands(ctx context.Context, ownerIDs []int64) error {
 		models.BotCommand{
 			Command:     "whois",
 			Description: messages.CommandWhoisDescription,
+		},
+		models.BotCommand{
+			Command:     "grant",
+			Description: messages.CommandGrantDescription,
+		},
+		models.BotCommand{
+			Command:     "revoke",
+			Description: messages.CommandRevokeDescription,
+		},
+		models.BotCommand{
+			Command:     "ban",
+			Description: messages.CommandBanDescription,
+		},
+		models.BotCommand{
+			Command:     "unban",
+			Description: messages.CommandUnbanDescription,
+		},
+		models.BotCommand{
+			Command:     "sync",
+			Description: messages.CommandSyncDescription,
 		})
 	for _, ownerID := range ownerIDs {
 		if _, err := c.bot.SetMyCommands(ctx, &botapi.SetMyCommandsParams{

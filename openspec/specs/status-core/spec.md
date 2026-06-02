@@ -188,33 +188,58 @@ MUST определяться архетипом:
   подписки не сокращается; при отсутствии активной строки expired-строка
   не создаётся
 
-### Requirement: recomputeAccess в этой фазе обрабатывает только active и unknown
+### Requirement: recomputeAccess безопасно координирует отзыв доступа
 
-`recomputeAccess(tgID)` MUST быть идемпотентной и в этой фазе
-реализовывать только две ветки. При `active`: если `pending_revocation`
-**существовал**, удалить его, записать `audit_log(revocation_cancelled)`
-и подготовить `MSG_ACCESS_KEPT`; если отзыва не было — no-op без лишних
-записей. При `unknown`: записать `audit_log(status_unknown)` и не менять
-доступ. Ветка `inactive` MUST NOT выполнять сетевых действий и durable
-revoke в этой фазе — она помечается отложенной до outbox/Enforcer
-(Фаза 06).
+`recomputeAccess(tgID)` MUST быть идемпотентной entry point для
+пересчёта доступа после subscription events, manual admin changes и
+reconciliation. При `active` она MUST отменять existing
+`pending_revocation`, писать `audit_log(revocation_cancelled)` и
+готовить `MSG_ACCESS_KEPT`; без pending revocation active path MUST
+быть no-op для access grants.
 
-#### Scenario: active снимает запланированный отзыв
+При `unknown` она MUST писать `audit_log(status_unknown)` и MUST NOT
+создавать, исполнять или удалять revocation actions. При `inactive` она
+MUST делегировать access-revocation flow: выбрать только bot-admitted
+grants, применить `EXPIRY_MODE`, создать `pending_revocation`,
+поставить warning или вызвать `revokeNow`.
+
+Hard-ban MUST применяться до обычного status aggregation: если
+`users.banned=1`, `recomputeAccess` MUST идти по hard-ban revocation
+path даже при active source verdicts.
+
+#### Scenario: Active снимает запланированный отзыв
 - **WHEN** статус стал `active` и существует `pending_revocation`
-- **THEN** запись отзыва удаляется, пишется
-  `audit_log(revocation_cancelled)` и готовится `MSG_ACCESS_KEPT`
+- **THEN** запись отзыва удаляется
+- **AND** пишется `audit_log(revocation_cancelled)`
+- **AND** готовится `MSG_ACCESS_KEPT`
 
-#### Scenario: active без отзыва — no-op
+#### Scenario: Active без отзыва остаётся no-op
 - **WHEN** статус `active`, но `pending_revocation` нет
-- **THEN** доступ не меняется, `MSG_ACCESS_KEPT` и audit не пишутся
+- **THEN** доступ не меняется
+- **AND** `MSG_ACCESS_KEPT` и revocation audit не пишутся
 
-#### Scenario: unknown ничего не трогает
+#### Scenario: Unknown ничего не трогает
 - **WHEN** статус `unknown`
-- **THEN** пишется `audit_log(status_unknown)`, доступ не изменяется
+- **THEN** пишется `audit_log(status_unknown)`
+- **AND** `pending_revocation`, `access_grants` и revoke actions не
+  меняются
 
-#### Scenario: inactive пока не отзывает
-- **WHEN** статус `inactive`
-- **THEN** durable revoke action в этой фазе не создаётся
+#### Scenario: Inactive планирует или исполняет отзыв
+- **WHEN** статус стал `inactive` и есть bot-admitted grant в state
+  `joined` или `pending`
+- **THEN** `recomputeAccess` применяет `EXPIRY_MODE`
+- **AND** результат соответствует access-revocation capability
+
+#### Scenario: Active в одном источнике блокирует отзыв
+- **WHEN** один source verdict равен `active`, а другой равен
+  `inactive`
+- **THEN** итоговый статус остаётся `active`
+- **AND** `pending_revocation` не создаётся
+
+#### Scenario: Hard-ban сильнее active source
+- **WHEN** `users.banned=1`, но source verdict равен `active`
+- **THEN** итоговый доступ считается `inactive` для пользователя
+- **AND** запускается hard-ban revocation path
 
 ### Requirement: Операции движка сериализуются по пользователю
 
@@ -236,4 +261,3 @@ MUST NOT блокировать друг друга. Агрегатор и `hand
 #### Scenario: Логика не зависит от tier
 - **WHEN** агрегатор или `handleEvent` принимают решение
 - **THEN** результат не зависит от значения `tier` или имени платформы
-

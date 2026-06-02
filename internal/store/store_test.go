@@ -594,6 +594,200 @@ func TestRepositoryLookupAndRecentLists(t *testing.T) {
 	}
 }
 
+func TestRevocationsCreateIfAbsentListDueAndMarkNotified(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	users := NewUsers(db)
+	revocations := NewRevocations(db)
+
+	if err := users.Upsert(ctx, domain.User{TGID: 201}); err != nil {
+		t.Fatalf("upsert user 201: %v", err)
+	}
+
+	if err := users.Upsert(ctx, domain.User{TGID: 202}); err != nil {
+		t.Fatalf("upsert user 202: %v", err)
+	}
+
+	now := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+
+	created, err := revocations.CreateIfAbsent(ctx, domain.PendingRevocation{
+		TGID:        201,
+		Reason:      "expired",
+		ScheduledAt: now.Add(-time.Minute),
+	})
+	if err != nil || !created {
+		t.Fatalf("CreateIfAbsent first = (%v, %v), want created", created, err)
+	}
+
+	created, err = revocations.CreateIfAbsent(ctx, domain.PendingRevocation{
+		TGID:        201,
+		Reason:      "changed",
+		ScheduledAt: now.Add(time.Hour),
+	})
+	if err != nil || created {
+		t.Fatalf("CreateIfAbsent duplicate = (%v, %v), want existing", created, err)
+	}
+
+	if _, err := revocations.CreateIfAbsent(ctx, domain.PendingRevocation{
+		TGID:        202,
+		Reason:      "future",
+		ScheduledAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("CreateIfAbsent future: %v", err)
+	}
+
+	if err := revocations.MarkNotified(ctx, 201); err != nil {
+		t.Fatalf("MarkNotified: %v", err)
+	}
+
+	due, err := revocations.ListDue(ctx, now, 10)
+	if err != nil {
+		t.Fatalf("ListDue: %v", err)
+	}
+
+	if len(due) != 1 || due[0].TGID != 201 || !due[0].Notified {
+		t.Fatalf("due = %+v, want only notified tg_id 201", due)
+	}
+}
+
+func TestManualAccessBanEligibleGrantsAndCleanup(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	users := NewUsers(db)
+	subs := NewSubscriptions(db)
+	grants := NewGrants(db)
+	cleanup := NewCleanup(db)
+
+	if err := users.EnsureStub(ctx, 301); err != nil {
+		t.Fatalf("EnsureStub: %v", err)
+	}
+
+	expires := time.Now().UTC().Add(time.Hour)
+	if _, err := subs.UpsertManual(ctx, 301, &expires, "manual"); err != nil {
+		t.Fatalf("UpsertManual: %v", err)
+	}
+
+	if err := users.SetBanned(ctx, 301, true, "abuse"); err != nil {
+		t.Fatalf("SetBanned: %v", err)
+	}
+
+	user, err := users.Get(ctx, 301)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	if !user.Banned || user.BannedReason != "abuse" {
+		t.Fatalf("user = %+v, want banned abuse", user)
+	}
+
+	if err := grants.Upsert(ctx, domain.AccessGrant{
+		TGID:       301,
+		Resource:   domain.ResourceChat,
+		State:      domain.GrantJoined,
+		AdmittedBy: "bot",
+	}); err != nil {
+		t.Fatalf("upsert bot grant: %v", err)
+	}
+
+	if err := grants.Upsert(ctx, domain.AccessGrant{
+		TGID:       301,
+		Resource:   domain.ResourceChannel,
+		State:      domain.GrantJoined,
+		AdmittedBy: "external",
+	}); err != nil {
+		t.Fatalf("upsert external grant: %v", err)
+	}
+
+	eligible, err := grants.ListEligibleForRevoke(ctx, 301)
+	if err != nil {
+		t.Fatalf("ListEligibleForRevoke: %v", err)
+	}
+
+	if len(eligible) != 1 || eligible[0].Resource != domain.ResourceChat {
+		t.Fatalf("eligible = %+v, want bot chat only", eligible)
+	}
+
+	if ok, err := grants.Revoke(ctx, 301, domain.ResourceChat, "expired"); err != nil || !ok {
+		t.Fatalf("Revoke = (%v, %v), want true nil", ok, err)
+	}
+
+	if _, err := grants.MarkPending(ctx, 301, domain.ResourceChat); err != nil {
+		t.Fatalf("MarkPending after revoke: %v", err)
+	}
+
+	restored, err := grants.Get(ctx, 301, domain.ResourceChat)
+	if err != nil {
+		t.Fatalf("Get restored grant: %v", err)
+	}
+
+	if restored.State != domain.GrantPending ||
+		restored.AdmittedBy != "bot" ||
+		restored.RevokedAt != nil ||
+		restored.RevokedReason != "" {
+		t.Fatalf("restored grant = %+v, want fresh pending bot grant", restored)
+	}
+
+	cutoff := time.Now().UTC().Add(-time.Hour)
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO telegram_updates (
+			update_id, update_type, payload_json, status, error,
+			received_at, processed_at)
+		VALUES
+			(1, 'message', '{}', 'processed', '', ?, ?),
+			(2, 'message', '{}', 'failed', 'boom', ?, ?)`,
+		cutoff.Add(-time.Hour).Format(time.RFC3339),
+		cutoff.Add(-time.Hour).Format(time.RFC3339),
+		cutoff.Add(-time.Hour).Format(time.RFC3339),
+		cutoff.Add(-time.Hour).Format(time.RFC3339)); err != nil {
+		t.Fatalf("seed updates: %v", err)
+	}
+
+	deleted, err := cleanup.DeleteTerminalTelegramUpdates(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("DeleteTerminalTelegramUpdates: %v", err)
+	}
+
+	if deleted != 1 {
+		t.Fatalf("deleted updates = %d, want one processed row", deleted)
+	}
+}
+
+func TestAlertsDedupeAndDurableDelivery(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	outbox := NewOutbox(db)
+	ownerID := int64(401)
+	alerts := NewAlertsWithDelivery(db, outbox, []int64{ownerID}, nil)
+
+	input := AlertInput{
+		Severity:  "critical",
+		Kind:      "bot_rights_lost",
+		Title:     "rights lost",
+		Detail:    "chat_id=-1001",
+		DedupeKey: "rights:-1001",
+	}
+
+	id, created, err := alerts.CreateOpenIfMissing(ctx, input)
+	if err != nil || !created || id == 0 {
+		t.Fatalf("CreateOpenIfMissing = (%d, %v, %v), want new", id, created, err)
+	}
+
+	if _, created, err = alerts.CreateOpenIfMissing(ctx, input); err != nil || created {
+		t.Fatalf("duplicate CreateOpenIfMissing = (%v, %v), want existing", created, err)
+	}
+
+	var actions int
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*) FROM access_actions
+		WHERE action_type = 'send_dm' AND tg_id = ?`, ownerID).Scan(&actions); err != nil {
+		t.Fatalf("count alert deliveries: %v", err)
+	}
+
+	if actions != 1 {
+		t.Fatalf("alert deliveries = %d, want one", actions)
+	}
+}
+
 // TestDatabaseFileMode is the regression test for SPEC §22.1: the
 // database file must not be world-readable. Open pre-creates it 0600,
 // which sql.Open would otherwise leave at the default 0644.

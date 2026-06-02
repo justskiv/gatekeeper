@@ -15,9 +15,16 @@ const (
 	CommandHereDescription   = "показать ID чата"
 	CommandStatusDescription = "показать статус подписки"
 	CommandWhoisDescription  = "показать карточку пользователя"
+	CommandGrantDescription  = "выдать ручной доступ"
+	CommandRevokeDescription = "отозвать ручной доступ"
+	CommandBanDescription    = "заблокировать пользователя"
+	CommandUnbanDescription  = "снять блокировку"
+	CommandSyncDescription   = "запустить сверку доступа"
 
 	RetryAccessCallbackData = "grant_access.retry"
 	RetryAccessButtonText   = "Проверить ещё раз"
+	AdminConfirmButtonText  = "Подтвердить"
+	AdminCancelButtonText   = "Отмена"
 
 	MsgNoSub = "Подписка пока не найдена. " +
 		"Проверьте оформление подписки и напишите боту с того же аккаунта Telegram."
@@ -170,6 +177,108 @@ func Status(
 // AccessKept returns the grace-period cancellation notification.
 func AccessKept() string {
 	return "Подписка снова активна. Запланированный отзыв доступа отменён."
+}
+
+// ExpiryWarning warns a user that access will be revoked after grace.
+func ExpiryWarning(until time.Time) string {
+	return fmt.Sprintf(
+		"Подписка не найдена. Доступ будет отозван после %s, если подписка не вернётся.",
+		dateTimeText(until),
+	)
+}
+
+// ExpiredNotice informs a user about inactive access in notify-only mode.
+func ExpiredNotice() string {
+	return "Подписка не найдена. Доступ пока сохранён, но его нужно продлить."
+}
+
+// Revoked informs a user that club access was revoked.
+func Revoked() string {
+	return "Подписка не активна. Доступ в клубные ресурсы отозван."
+}
+
+// AdminConfirm renders a compact owner confirmation prompt.
+func AdminConfirm(summary string) string {
+	return "Подтвердите действие:\n" + summary
+}
+
+// AdminConfirmed renders a successful owner action result.
+func AdminConfirmed(summary string) string {
+	return "Готово.\n" + summary
+}
+
+// AdminCancelled reports a cancelled confirmation.
+func AdminCancelled() string {
+	return "Действие отменено."
+}
+
+// AdminConfirmationExpired reports an expired confirmation.
+func AdminConfirmationExpired() string {
+	return "Действие устарело. Повторите команду."
+}
+
+// AdminConfirmationInProgress reports a confirmation already being executed.
+func AdminConfirmationInProgress() string {
+	return "Действие уже выполняется."
+}
+
+// AdminSyncUnavailable reports a temporary missing sync dependency.
+func AdminSyncUnavailable() string {
+	return "Сверка сейчас недоступна."
+}
+
+// AdminActionAllUsers renders a full-sync action target.
+func AdminActionAllUsers() string {
+	return "все пользователи"
+}
+
+// AdminActionExpiryLine renders an admin action expiry summary line.
+func AdminActionExpiryLine(until time.Time) string {
+	return "Срок: " + until.Format(time.RFC3339)
+}
+
+// AdminActionReasonLine renders an admin action reason summary line.
+func AdminActionReasonLine(reason string) string {
+	return "Причина: " + reason
+}
+
+// AdminCommandUsage returns a short usage hint for owner commands.
+func AdminCommandUsage(command string) string {
+	switch command {
+	case "grant":
+		return "Используйте: /grant <tg_id|@username> [срок] [причина]"
+	case "revoke":
+		return "Используйте: /revoke <tg_id|@username> [причина]"
+	case "ban":
+		return "Используйте: /ban <tg_id|@username> [причина]"
+	case "unban":
+		return "Используйте: /unban <tg_id|@username> [причина]"
+	case "sync":
+		return "Используйте: /sync [tg_id|@username]"
+	default:
+		return "Команда указана неверно."
+	}
+}
+
+// SyncSummary renders owner-facing reconciliation result counters.
+func SyncSummary(processed, failed int) string {
+	return fmt.Sprintf("Сверка завершена. Обработано: %d. Ошибок: %d.",
+		processed, failed)
+}
+
+// OperatorAlert renders a durable operator alert.
+func OperatorAlert(severity, kind, title, detail string) string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "Тревога: %s\n", title)
+	fmt.Fprintf(&b, "Уровень: %s\n", severity)
+	fmt.Fprintf(&b, "Тип: %s", kind)
+
+	if detail != "" {
+		fmt.Fprintf(&b, "\nДетали: %s", detail)
+	}
+
+	return b.String()
 }
 
 // WhoisUsage returns the /whois usage hint.

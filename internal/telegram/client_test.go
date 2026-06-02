@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -157,6 +158,52 @@ func TestUnbanChatMemberSerializesOnlyIfBanned(t *testing.T) {
 	}
 }
 
+type commandsRequest struct {
+	Commands []struct {
+		Command string `json:"command"`
+	} `json:"commands"`
+	Scope map[string]any `json:"scope"`
+}
+
+func TestSetMyCommandsIncludesOwnerAdminCommands(t *testing.T) {
+	var captured []commandsRequest
+
+	client := newBotAPITestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if methodName(r.URL.Path) != "setMyCommands" {
+			t.Fatalf("unexpected method %s", methodName(r.URL.Path))
+		}
+
+		req := decodeSetMyCommandsRequest(t, r)
+		captured = append(captured, req)
+
+		writeTelegramResult(w, true)
+	})
+
+	if err := client.SetMyCommands(context.Background(), []int64{100}); err != nil {
+		t.Fatalf("SetMyCommands: %v", err)
+	}
+
+	if len(captured) != 2 {
+		t.Fatalf("captured calls = %d, want default and owner scope", len(captured))
+	}
+
+	defaultCommands := commandSet(captured[0].Commands)
+	if defaultCommands["grant"] || defaultCommands["ban"] {
+		t.Fatalf("default commands = %v, want no owner-only commands",
+			defaultCommands)
+	}
+
+	ownerCommands := commandSet(captured[1].Commands)
+	for _, command := range []string{
+		"start", "help", "status", "here", "whois",
+		"grant", "revoke", "ban", "unban", "sync",
+	} {
+		if !ownerCommands[command] {
+			t.Fatalf("owner commands = %v, missing %q", ownerCommands, command)
+		}
+	}
+}
+
 func TestRawRequestNormalizesRetryAfter(t *testing.T) {
 	client := newBotAPITestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -180,4 +227,50 @@ func TestRawRequestNormalizesRetryAfter(t *testing.T) {
 	if !ok || wait != 17*time.Second {
 		t.Fatalf("RetryAfter(%v) = (%v, %v), want 17s true", err, wait, ok)
 	}
+}
+
+func commandSet(commands []struct {
+	Command string `json:"command"`
+}) map[string]bool {
+	out := make(map[string]bool, len(commands))
+	for _, command := range commands {
+		out[command.Command] = true
+	}
+
+	return out
+}
+
+func decodeSetMyCommandsRequest(t *testing.T, r *http.Request) commandsRequest {
+	t.Helper()
+
+	var req commandsRequest
+
+	contentType := r.Header.Get("Content-Type")
+	if strings.HasPrefix(contentType, "application/json") {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		return req
+	}
+
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("parse multipart request: %v", err)
+		}
+	} else if err := r.ParseForm(); err != nil {
+		t.Fatalf("parse form request: %v", err)
+	}
+
+	if err := json.Unmarshal([]byte(r.FormValue("commands")), &req.Commands); err != nil {
+		t.Fatalf("decode commands form field: %v", err)
+	}
+
+	if rawScope := r.FormValue("scope"); rawScope != "" {
+		if err := json.Unmarshal([]byte(rawScope), &req.Scope); err != nil {
+			t.Fatalf("decode scope form field: %v", err)
+		}
+	}
+
+	return req
 }

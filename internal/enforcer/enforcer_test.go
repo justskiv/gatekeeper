@@ -2,13 +2,19 @@ package enforcer
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/go-telegram/bot/models"
+	"github.com/pressly/goose/v3"
 
 	"github.com/justskiv/gatekeeper/internal/domain"
+	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/invite"
 	"github.com/justskiv/gatekeeper/internal/store"
 	"github.com/justskiv/gatekeeper/internal/telegram"
@@ -474,6 +480,216 @@ func TestEnforcerSoftKickBanThenUnban(t *testing.T) {
 	}
 }
 
+func TestEnforcerHardBanSkipsProtectedAdmin(t *testing.T) {
+	tgID := int64(54)
+	outbox := &fakeOutbox{action: resourceAction(domain.ActionHardBan, tgID)}
+	tg := &fakeTelegram{member: &models.ChatMember{
+		Type: models.ChatMemberTypeAdministrator,
+	}}
+	e := newTestEnforcer(outbox, tg, &fakeUsers{}, &fakeAlerts{})
+
+	if _, err := e.runOnce(context.Background()); err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+
+	if !outbox.done {
+		t.Fatal("hard_ban admin was not completed as no-op")
+	}
+
+	if len(tg.calls) != 1 || tg.calls[0] != "getChatMember" {
+		t.Fatalf("calls = %v, want only getChatMember", tg.calls)
+	}
+}
+
+func TestEnforcerUnbanUsesOnlyIfBanned(t *testing.T) {
+	tgID := int64(55)
+	outbox := &fakeOutbox{action: resourceAction(domain.ActionUnban, tgID)}
+	tg := &fakeTelegram{}
+	e := newTestEnforcer(outbox, tg, &fakeUsers{}, &fakeAlerts{})
+
+	if _, err := e.runOnce(context.Background()); err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+
+	if !outbox.done || !tg.onlyIfBanned {
+		t.Fatalf("done=%v only_if_banned=%v, want done true",
+			outbox.done, tg.onlyIfBanned)
+	}
+}
+
+func TestEnforcerVerifyMemberSourceInactiveSchedulesRevocation(t *testing.T) {
+	db := newStoreDB(t)
+	ctx := context.Background()
+	tgID := int64(56)
+	outbox := store.NewOutbox(db)
+
+	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+
+	if _, err := store.NewSubscriptions(db).UpsertActive(ctx, domain.Subscription{
+		TGID:       tgID,
+		Platform:   domain.PlatformBoosty,
+		StartedAt:  time.Now().Add(-time.Hour),
+		LastSignal: "event",
+	}); err != nil {
+		t.Fatalf("upsert subscription: %v", err)
+	}
+
+	if err := store.NewGrants(db).Upsert(ctx, domain.AccessGrant{
+		TGID:       tgID,
+		Resource:   domain.ResourceChat,
+		State:      domain.GrantJoined,
+		AdmittedBy: "bot",
+	}); err != nil {
+		t.Fatalf("upsert grant: %v", err)
+	}
+
+	enqueueVerifyMember(t, ctx, outbox, tgID, nil,
+		[]byte(`{"kind":"source","platform":"boosty","chat_id":-1001}`))
+
+	tg := &fakeTelegram{member: &models.ChatMember{
+		Type: models.ChatMemberTypeLeft,
+	}}
+	e := New(Stores{
+		Outbox:        outbox,
+		Users:         store.NewUsers(db),
+		Subscriptions: store.NewSubscriptions(db),
+		Grants:        store.NewGrants(db),
+		Audit:         store.NewAudit(db),
+		Revocations:   store.NewRevocations(db),
+		Whitelist:     store.NewWhitelist(db),
+		Alerts:        store.NewAlerts(db),
+		StatusEngine:  engine.New(nil),
+	}, tg, &fakeInvites{}, Config{
+		ClubChatID:    -1001,
+		ClubChannelID: -1002,
+	}, WithRateLimiter(noopLimiter{}))
+
+	if _, err := e.runOnce(ctx); err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+
+	if _, ok, err := store.NewSubscriptions(db).GetActive(
+		ctx, tgID, domain.PlatformBoosty,
+	); err != nil || ok {
+		t.Fatalf("active subscription = (_, %v, %v), want expired", ok, err)
+	}
+
+	if _, ok, err := store.NewRevocations(db).Get(ctx, tgID); err != nil || !ok {
+		t.Fatalf("pending revocation = (_, %v, %v), want present", ok, err)
+	}
+
+	if got := countStoreActions(t, db, domain.ActionSoftKick); got != 0 {
+		t.Fatalf("soft_kick actions = %d, want zero during grace", got)
+	}
+}
+
+func TestEnforcerVerifyMemberUnknownLeavesAccessUntouched(t *testing.T) {
+	db := newStoreDB(t)
+	ctx := context.Background()
+	tgID := int64(57)
+	outbox := store.NewOutbox(db)
+
+	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+
+	if _, err := store.NewSubscriptions(db).UpsertActive(ctx, domain.Subscription{
+		TGID:       tgID,
+		Platform:   domain.PlatformBoosty,
+		StartedAt:  time.Now().Add(-time.Hour),
+		LastSignal: "event",
+	}); err != nil {
+		t.Fatalf("upsert subscription: %v", err)
+	}
+
+	enqueueVerifyMember(t, ctx, outbox, tgID, nil,
+		[]byte(`{"kind":"source","platform":"boosty","chat_id":-1001}`))
+
+	tg := &fakeTelegram{memberErr: errors.New("telegram timeout")}
+	e := New(Stores{
+		Outbox:        outbox,
+		Users:         store.NewUsers(db),
+		Subscriptions: store.NewSubscriptions(db),
+		Grants:        store.NewGrants(db),
+		Audit:         store.NewAudit(db),
+		Revocations:   store.NewRevocations(db),
+		Whitelist:     store.NewWhitelist(db),
+		Alerts:        store.NewAlerts(db),
+		StatusEngine:  engine.New(nil),
+	}, tg, &fakeInvites{}, Config{
+		ClubChatID:    -1001,
+		ClubChannelID: -1002,
+	}, WithRateLimiter(noopLimiter{}))
+
+	if _, err := e.runOnce(ctx); err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+
+	if _, ok, err := store.NewSubscriptions(db).GetActive(
+		ctx, tgID, domain.PlatformBoosty,
+	); err != nil || !ok {
+		t.Fatalf("active subscription = (_, %v, %v), want preserved", ok, err)
+	}
+
+	if _, ok, err := store.NewRevocations(db).Get(ctx, tgID); err != nil || ok {
+		t.Fatalf("pending revocation = (_, %v, %v), want absent", ok, err)
+	}
+}
+
+func TestEnforcerVerifyMemberClubPreservesRevokedGrant(t *testing.T) {
+	db := newStoreDB(t)
+	ctx := context.Background()
+	tgID := int64(58)
+	outbox := store.NewOutbox(db)
+	resource := domain.ResourceChat
+
+	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+
+	if err := store.NewGrants(db).Upsert(ctx, domain.AccessGrant{
+		TGID:          tgID,
+		Resource:      resource,
+		State:         domain.GrantRevoked,
+		AdmittedBy:    "bot",
+		RevokedAt:     ptrTime(time.Now().Add(-time.Hour)),
+		RevokedReason: "expired",
+	}); err != nil {
+		t.Fatalf("upsert revoked grant: %v", err)
+	}
+
+	enqueueVerifyMember(t, ctx, outbox, tgID, &resource,
+		[]byte(`{"kind":"club","resource":"chat","chat_id":-1001}`))
+
+	tg := &fakeTelegram{member: &models.ChatMember{
+		Type: models.ChatMemberTypeMember,
+	}}
+	e := New(Stores{
+		Outbox: outbox,
+		Users:  store.NewUsers(db),
+		Grants: store.NewGrants(db),
+		Alerts: store.NewAlerts(db),
+	}, tg, &fakeInvites{}, Config{
+		ClubChatID:    -1001,
+		ClubChannelID: -1002,
+	}, WithRateLimiter(noopLimiter{}))
+
+	if _, err := e.runOnce(ctx); err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+
+	grant, err := store.NewGrants(db).Get(ctx, tgID, resource)
+	if err != nil {
+		t.Fatalf("get grant: %v", err)
+	}
+
+	if grant.State != domain.GrantRevoked {
+		t.Fatalf("grant state = %s, want revoked", grant.State)
+	}
+}
+
 func TestEnforcerDeadActionCreatesAlert(t *testing.T) {
 	tgID := int64(47)
 	outbox := &fakeOutbox{action: sendDMAction(tgID, 7)}
@@ -565,6 +781,84 @@ func TestEnforcerLimitsInviteOperations(t *testing.T) {
 		limiter.calls[0] != (limiterCall{kind: requestKindDefault, chatID: -1001}) {
 		t.Fatalf("revoke calls=%d limiter=%+v", invites.revokeCalls, limiter.calls)
 	}
+}
+
+func enqueueVerifyMember(
+	t *testing.T,
+	ctx context.Context,
+	outbox *store.Outbox,
+	tgID int64,
+	resource *domain.Resource,
+	payload []byte,
+) {
+	t.Helper()
+
+	_, _, err := outbox.Enqueue(ctx, store.AccessActionInput{
+		Type:     domain.ActionVerifyMember,
+		TGID:     &tgID,
+		Resource: resource,
+		IdempotencyKey: domain.AccessActionKey(
+			domain.ActionVerifyMember, &tgID, resource, string(payload)),
+		PayloadJSON: payload,
+	})
+	if err != nil {
+		t.Fatalf("enqueue verify_member: %v", err)
+	}
+}
+
+func ptrTime(value time.Time) *time.Time {
+	return &value
+}
+
+func newStoreDB(t *testing.T) *sql.DB {
+	t.Helper()
+
+	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+
+	t.Cleanup(func() { _ = db.Close() })
+
+	provider, err := goose.NewProvider(
+		goose.DialectSQLite3, db, os.DirFS(enforcerMigrationsDir(t)))
+	if err != nil {
+		t.Fatalf("new goose provider: %v", err)
+	}
+
+	if _, err := provider.Up(context.Background()); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	return db
+}
+
+func enforcerMigrationsDir(t *testing.T) string {
+	t.Helper()
+
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+
+	return filepath.Join(filepath.Dir(file), "..", "..", "migrations")
+}
+
+func countStoreActions(
+	t *testing.T,
+	db *sql.DB,
+	actionType domain.ActionType,
+) int {
+	t.Helper()
+
+	var got int
+	if err := db.QueryRowContext(context.Background(), `
+		SELECT count(*) FROM access_actions WHERE action_type = ?`,
+		string(actionType)).Scan(&got); err != nil {
+		t.Fatalf("count actions: %v", err)
+	}
+
+	return got
 }
 
 func newTestEnforcer(

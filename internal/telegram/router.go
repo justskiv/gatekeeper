@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/messages"
 	"github.com/justskiv/gatekeeper/internal/notify"
+	"github.com/justskiv/gatekeeper/internal/reconcile"
 	"github.com/justskiv/gatekeeper/internal/source"
 	"github.com/justskiv/gatekeeper/internal/store"
 )
@@ -28,10 +30,11 @@ const (
 
 // OutboundMessage is a Telegram call to make after tx2 commits.
 type OutboundMessage struct {
-	Kind   OutboundKind
-	ChatID int64
-	TGID   int64
-	Text   string
+	Kind    OutboundKind
+	ChatID  int64
+	TGID    int64
+	Text    string
+	Buttons [][]commandbot.Button
 }
 
 // RouteResult describes how an update reached a terminal state.
@@ -42,39 +45,44 @@ type RouteResult struct {
 
 // Router dispatches persisted updates to phase-specific handlers.
 type Router struct {
-	users         *store.Users
-	subscriptions *store.Subscriptions
-	grants        *store.Grants
-	meta          *store.Meta
-	audit         *store.Audit
-	alerts        *store.Alerts
-	whitelist     *store.Whitelist
-	revocations   *store.Revocations
-	outbox        *store.Outbox
-	invites       *store.Invites
-	updateID      int64
-	statusEngine  *engine.Engine
-	sourceChats   SourceChats
-	admissionCfg  admission.Config
-	preflight     RoutePreflight
-	chats         []HealthChat
-	ownerIDs      []int64
-	logger        *slog.Logger
+	users          *store.Users
+	db             store.DBTX
+	subscriptions  *store.Subscriptions
+	grants         *store.Grants
+	meta           *store.Meta
+	audit          *store.Audit
+	alerts         *store.Alerts
+	whitelist      *store.Whitelist
+	revocations    *store.Revocations
+	outbox         *store.Outbox
+	invites        *store.Invites
+	updateID       int64
+	statusEngine   *engine.Engine
+	sourceChats    SourceChats
+	admissionCfg   admission.Config
+	preflight      RoutePreflight
+	chats          []HealthChat
+	ownerIDs       []int64
+	adminLogChatID *int64
+	members        engine.MemberChecker
+	logger         *slog.Logger
 }
 
 // RouterDeps are transaction-bound repositories for one update.
 type RouterDeps struct {
-	Users         *store.Users
-	Subscriptions *store.Subscriptions
-	Grants        *store.Grants
-	Meta          *store.Meta
-	Audit         *store.Audit
-	Alerts        *store.Alerts
-	Whitelist     *store.Whitelist
-	Revocations   *store.Revocations
-	Outbox        *store.Outbox
-	Invites       *store.Invites
-	UpdateID      int64
+	DB             store.DBTX
+	Users          *store.Users
+	Subscriptions  *store.Subscriptions
+	Grants         *store.Grants
+	Meta           *store.Meta
+	Audit          *store.Audit
+	Alerts         *store.Alerts
+	Whitelist      *store.Whitelist
+	Revocations    *store.Revocations
+	Outbox         *store.Outbox
+	Invites        *store.Invites
+	UpdateID       int64
+	AdminLogChatID *int64
 }
 
 // SourceChats identifies configured subscription source chats.
@@ -121,6 +129,13 @@ func WithPreflight(preflight RoutePreflight) RouterOption {
 	}
 }
 
+// WithMemberChecker attaches live club membership checks for revocation safety.
+func WithMemberChecker(checker engine.MemberChecker) RouterOption {
+	return func(r *Router) {
+		r.members = checker
+	}
+}
+
 // NewRouter returns a router bound to one tx2 repository set.
 func NewRouter(
 	deps RouterDeps,
@@ -134,20 +149,22 @@ func NewRouter(
 	}
 
 	r := &Router{
-		users:         deps.Users,
-		subscriptions: deps.Subscriptions,
-		grants:        deps.Grants,
-		meta:          deps.Meta,
-		audit:         deps.Audit,
-		alerts:        deps.Alerts,
-		whitelist:     deps.Whitelist,
-		revocations:   deps.Revocations,
-		outbox:        deps.Outbox,
-		invites:       deps.Invites,
-		updateID:      deps.UpdateID,
-		chats:         chats,
-		ownerIDs:      ownerIDs,
-		logger:        logger,
+		users:          deps.Users,
+		db:             deps.DB,
+		subscriptions:  deps.Subscriptions,
+		grants:         deps.Grants,
+		meta:           deps.Meta,
+		audit:          deps.Audit,
+		alerts:         deps.Alerts,
+		whitelist:      deps.Whitelist,
+		revocations:    deps.Revocations,
+		outbox:         deps.Outbox,
+		invites:        deps.Invites,
+		updateID:       deps.UpdateID,
+		adminLogChatID: deps.AdminLogChatID,
+		chats:          chats,
+		ownerIDs:       ownerIDs,
+		logger:         logger,
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -202,8 +219,13 @@ func (r *Router) routeMessage(
 		Grants:        r.grants,
 		Audit:         r.audit,
 		Whitelist:     r.whitelist,
+		Revocations:   r.revocations,
+		Outbox:        r.outbox,
+		Alerts:        r.alerts,
 		StatusEngine:  r.statusEngine,
+		Members:       r.members,
 		Preflight:     r.preflight.Snapshot,
+		AdminSync:     r.adminSync,
 	}, r.ownerIDs)
 	if msg.Chat.Type == models.ChatTypePrivate {
 		result, err := commands.HandlePrivate(ctx, msg)
@@ -245,6 +267,10 @@ func (r *Router) routeChatMember(
 		Audit:         r.audit,
 		Revocations:   r.revocations,
 		Whitelist:     r.whitelist,
+		Grants:        r.grants,
+		Outbox:        r.outbox,
+		Alerts:        r.alerts,
+		Members:       r.members,
 	}, event)
 	if err != nil {
 		return RouteResult{}, err
@@ -291,8 +317,34 @@ func (r *Router) routeCallback(
 	ctx context.Context,
 	query *models.CallbackQuery,
 ) (RouteResult, error) {
-	if query == nil || query.Data != messages.RetryAccessCallbackData ||
-		!r.canRunAdmission() {
+	if query == nil {
+		return ignored(), nil
+	}
+
+	if commandbot.IsAdminCallback(query.Data) {
+		commands := commandbot.NewCommands(commandbot.CommandDeps{
+			Users:         r.users,
+			Subscriptions: r.subscriptions,
+			Grants:        r.grants,
+			Audit:         r.audit,
+			Whitelist:     r.whitelist,
+			Revocations:   r.revocations,
+			Outbox:        r.outbox,
+			Alerts:        r.alerts,
+			StatusEngine:  r.statusEngine,
+			Members:       r.members,
+			AdminSync:     r.adminSync,
+		}, r.ownerIDs)
+
+		result, err := commands.HandleCallback(ctx, query)
+		if err != nil {
+			return RouteResult{}, err
+		}
+
+		return r.fromCommandResult(ctx, result)
+	}
+
+	if query.Data != messages.RetryAccessCallbackData || !r.canRunAdmission() {
 		return ignored(), nil
 	}
 
@@ -373,6 +425,7 @@ func (r *Router) admissionHandler() *admission.Handler {
 		Whitelist:     r.whitelist,
 		Revocations:   r.revocations,
 		StatusEngine:  r.statusEngine,
+		Members:       r.members,
 	}, r.admissionCfg)
 }
 
@@ -544,10 +597,11 @@ func (r *Router) fromCommandResult(
 		}
 
 		effects = append(effects, OutboundMessage{
-			Kind:   kind,
-			ChatID: reply.ChatID,
-			TGID:   reply.TGID,
-			Text:   reply.Text,
+			Kind:    kind,
+			ChatID:  reply.ChatID,
+			TGID:    reply.TGID,
+			Text:    reply.Text,
+			Buttons: reply.Buttons,
 		})
 	}
 
@@ -564,6 +618,61 @@ func (r *Router) processedEffects(
 	}
 
 	return processed(direct), nil
+}
+
+func (r *Router) adminSync(ctx context.Context, tgID *int64) (string, error) {
+	if r.statusEngine == nil || r.db == nil {
+		return messages.SyncSummary(0, 1), nil
+	}
+
+	runner := reconcile.New(
+		r.db,
+		r.statusEngine,
+		nil,
+		reconcile.Config{
+			InviteMode: r.admissionCfg.InviteMode,
+			Sources: []reconcile.SourceChat{
+				{
+					Platform: domain.PlatformBoosty,
+					ChatID:   r.sourceChats.BoostyGroupID,
+					Enabled:  r.sourceChats.BoostyGroupID != 0,
+				},
+				{
+					Platform: domain.PlatformTribute,
+					ChatID:   r.sourceChats.TributeChannelID,
+					Enabled:  r.sourceChats.TributeObservation,
+				},
+			},
+			Resources: []reconcile.ResourceChat{
+				{Resource: domain.ResourceChat, ChatID: r.admissionCfg.ClubChatID},
+				{Resource: domain.ResourceChannel, ChatID: r.admissionCfg.ClubChannelID},
+			},
+			OwnerIDs:       r.ownerIDs,
+			AdminLogChatID: r.adminLogChatID,
+		},
+		r.logger,
+		reconcile.WithMemberChecker(r.members),
+	)
+
+	var (
+		summary reconcile.Summary
+		err     error
+	)
+
+	if tgID != nil {
+		summary, err = runner.RunUser(ctx, *tgID)
+	} else {
+		summary, err = runner.RunOnce(ctx)
+	}
+
+	if err != nil {
+		return "", err
+	}
+
+	return messages.SyncSummary(
+		summary.DueRevocations+summary.VerifyActions+summary.InviteActions,
+		summary.Failed,
+	), nil
 }
 
 func (r *Router) durableDMEffects(
@@ -585,6 +694,14 @@ func (r *Router) durableDMEffects(
 		}
 
 		marker := fmt.Sprintf("telegram_update:%d:%d", r.updateID, i)
+		if len(effect.Buttons) > 0 {
+			if err := r.enqueueDMEffect(ctx, effect, marker); err != nil {
+				return nil, err
+			}
+
+			continue
+		}
+
 		if err := notifier.SendDurableDM(
 			ctx, effect.TGID, effect.Text, marker,
 		); err != nil {
@@ -593,6 +710,33 @@ func (r *Router) durableDMEffects(
 	}
 
 	return direct, nil
+}
+
+func (r *Router) enqueueDMEffect(
+	ctx context.Context,
+	effect OutboundMessage,
+	marker string,
+) error {
+	payload, err := json.Marshal(struct {
+		Text    string                `json:"text"`
+		Buttons [][]commandbot.Button `json:"buttons,omitempty"`
+	}{
+		Text:    effect.Text,
+		Buttons: effect.Buttons,
+	})
+	if err != nil {
+		return fmt.Errorf("encode dm effect: %w", err)
+	}
+
+	_, _, err = r.outbox.Enqueue(ctx, store.AccessActionInput{
+		Type: domain.ActionSendDM,
+		TGID: &effect.TGID,
+		IdempotencyKey: domain.AccessActionKey(
+			domain.ActionSendDM, &effect.TGID, nil, marker),
+		PayloadJSON: payload,
+	})
+
+	return err
 }
 
 func processed(effects []OutboundMessage) RouteResult {

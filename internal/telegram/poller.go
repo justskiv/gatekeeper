@@ -37,13 +37,14 @@ type Poller struct {
 	client   *Client
 	notifier *notify.Notifier
 
-	statusEngine *engine.Engine
-	sourceChats  SourceChats
-	admissionCfg admission.Config
-	rateLimiter  *admissionRateLimiter
-	chats        []HealthChat
-	ownerIDs     []int64
-	logger       *slog.Logger
+	statusEngine   *engine.Engine
+	sourceChats    SourceChats
+	admissionCfg   admission.Config
+	rateLimiter    *admissionRateLimiter
+	chats          []HealthChat
+	ownerIDs       []int64
+	adminLogChatID *int64
+	logger         *slog.Logger
 
 	afterBeginTx func() // test hook for tx-boundary assertions
 
@@ -72,6 +73,13 @@ func WithPollerSourceChats(sourceChats SourceChats) PollerOption {
 func WithPollerAdmissionConfig(cfg admission.Config) PollerOption {
 	return func(p *Poller) {
 		p.admissionCfg = cfg
+	}
+}
+
+// WithPollerAdminLogChatID attaches an optional alert delivery chat.
+func WithPollerAdminLogChatID(chatID *int64) PollerOption {
+	return func(p *Poller) {
+		p.adminLogChatID = chatID
 	}
 }
 
@@ -290,23 +298,30 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 		p.afterBeginTx()
 	}
 
+	outbox := store.NewOutbox(tx)
+	alerts := store.NewAlertsWithDelivery(tx, outbox, p.ownerIDs, p.adminLogChatID)
+
 	router := NewRouter(RouterDeps{
-		Users:         store.NewUsers(tx),
-		Subscriptions: store.NewSubscriptions(tx),
-		Grants:        store.NewGrants(tx),
-		Meta:          store.NewMeta(tx),
-		Audit:         store.NewAudit(tx),
-		Alerts:        store.NewAlerts(tx),
-		Whitelist:     store.NewWhitelist(tx),
-		Revocations:   store.NewRevocations(tx),
-		Outbox:        store.NewOutbox(tx),
-		Invites:       store.NewInvites(tx),
-		UpdateID:      row.UpdateID,
+		DB:             tx,
+		Users:          store.NewUsers(tx),
+		Subscriptions:  store.NewSubscriptions(tx),
+		Grants:         store.NewGrants(tx),
+		Meta:           store.NewMeta(tx),
+		Audit:          store.NewAudit(tx),
+		Alerts:         alerts,
+		Whitelist:      store.NewWhitelist(tx),
+		Revocations:    store.NewRevocations(tx),
+		Outbox:         outbox,
+		Invites:        store.NewInvites(tx),
+		UpdateID:       row.UpdateID,
+		AdminLogChatID: p.adminLogChatID,
 	}, p.chats, p.ownerIDs, p.logger,
 		WithStatusEngine(p.statusEngine),
 		WithSourceChats(p.sourceChats),
 		WithAdmissionConfig(p.admissionCfg),
-		WithPreflight(preflight))
+		WithPreflight(preflight),
+		WithMemberChecker(NewClubMemberChecker(
+			p.client, p.admissionCfg.ClubChatID, p.admissionCfg.ClubChannelID)))
 
 	result, err := router.Route(ctx, &update)
 	if err != nil {
@@ -622,7 +637,10 @@ func (p *Poller) markFailed(ctx context.Context, updateID int64, cause error) er
 		return err
 	}
 
-	if _, err := store.NewAlerts(tx).Create(ctx, store.AlertInput{
+	outbox := store.NewOutbox(tx)
+	if _, err := store.NewAlertsWithDelivery(
+		tx, outbox, p.ownerIDs, p.adminLogChatID,
+	).Create(ctx, store.AlertInput{
 		Severity: "error",
 		Kind:     "telegram_update_failed",
 		Title:    "telegram update failed",
