@@ -16,7 +16,8 @@
 - **`OWNER_TG_IDS`** — список положительных `int64` через запятую. Пусто/пробелы → `"OWNER_TG_IDS is required"`; любой `<= 0` → ошибка с конкретным значением.
 - **Условные секреты** — режим тянет за собой секрет: `TRIBUTE_MODE=webhook` требует `TRIBUTE_API_KEY`; `TELEGRAM_MODE=webhook` требует `TELEGRAM_WEBHOOK_PUBLIC_URL` и `TELEGRAM_WEBHOOK_SECRET`; `INVITE_MODE=direct` требует `ALLOW_DIRECT_INVITES=true` и `INVITE_TTL <= 1h` (лимит Telegram на direct-ссылки).
 - **URL и пути** — URL-ключи (`BOOSTY_SUBSCRIBE_URL`, `TRIBUTE_SUBSCRIBE_URL`, при наличии `TELEGRAM_WEBHOOK_PUBLIC_URL`) парсятся как абсолютные `http(s)`; webhook-пути (`TRIBUTE_WEBHOOK_PATH`, `TELEGRAM_WEBHOOK_PATH`) начинаются с `/`, иначе handler тихо смонтируется не туда.
-- **Типы** — durations через `time.ParseDuration`, строго `> 0`; булевы через `strconv.ParseBool`; enum'ы (`INVITE_MODE`, `TRIBUTE_MODE`, `TELEGRAM_MODE`, `EXPIRY_MODE`, `LOG_LEVEL`, `LOG_FORMAT`) — только из своего набора; `ENFORCER_WORKERS > 0`; `TIMEZONE` через `time.LoadLocation`.
+- **Типы** — durations через `time.ParseDuration`, строго `> 0`; булевы через `strconv.ParseBool`; enum'ы (`INVITE_MODE`, `TRIBUTE_MODE`, `TELEGRAM_MODE`, `EXPIRY_MODE`, `LOG_LEVEL`, `LOG_FORMAT`) — только из своего набора; `ENFORCER_WORKERS > 0`; `ADMISSION_JOIN_REQUEST_RETRIES >= 0`; `TIMEZONE` через `time.LoadLocation`.
+- **`TRIBUTE_CANCEL_IS_IMMEDIATE`** — опциональный булев операторский override (дефолт `false`). При `false` запись Tribute `cancelled_subscription` фиксирует отмену, но сохраняет доступ до `expires_at`. При `true` обработчик webhook вправе превратить `cancelled_subscription` в немедленную деактивацию (по правилам status-core). Невалидное булево значение попадает в тот же агрегированный отчёт об ошибках с именем ключа.
 
 ## Дефолты опциональных ключей
 
@@ -26,7 +27,9 @@
 |---|---|
 | `DB_PATH` | `./data/gatekeeper.db` |
 | `INVITE_MODE` / `INVITE_TTL` | `shared_join_request` / `24h` |
+| `ADMISSION_FALLBACK_MAX_AGE` / `ADMISSION_JOIN_REQUEST_RETRIES` | `1h` / `2` |
 | `TRIBUTE_MODE` / `WEBHOOK_LISTEN_ADDR` | `observation` / `:8080` |
+| `TRIBUTE_CANCEL_IS_IMMEDIATE` | `false` |
 | `TRIBUTE_WEBHOOK_PATH` | `/webhooks/tribute` |
 | `TELEGRAM_MODE` / `TELEGRAM_WEBHOOK_PATH` | `polling` / `/webhooks/telegram` |
 | `EXPIRY_MODE` / `GRACE_PERIOD` | `grace` / `72h` |

@@ -31,23 +31,74 @@ SQL-транзакцией.
 
 Доступны узкие методы:
 
-- `Users`: `Upsert`, `Get`, `SetDMState`.
-- `Subscriptions`: `Create`, `GetActive`.
-- `Grants`: `Upsert`, `Get`.
+- `Users`: `Upsert`, `Get`, `FindByUsername`, `SetDMState`.
+- `Subscriptions`: `Create`, `GetActive`, `UpsertActive`, `ExpireActive`,
+  `ListActiveByUser`, `ListByUser`.
+- `Grants`: `Upsert`, `Get`, `ListByUser`.
+- `Whitelist`: `Has`.
+- `Revocations`: `Get`, `Delete`.
 - `Meta`: `Get`, `Set`, `GetUpdateOffset`, `SetUpdateOffset`,
   `SetHealth`.
 - `TelegramUpdates`: `InsertBatch`, `ListPending`, `MarkTerminal`.
-- `Audit`: `Append`.
+- `Audit`: `Append`, `ListRecentByUser`.
 - `Alerts`: `Create`, `CreateOpenIfMissing`, `ResolveOpenByTitle`.
 
-Репозитории `Revocations` и `Whitelist` конструируемы, но их полные
-наборы методов добавят фазы, которым они нужны. `Get` по отсутствующей
-строке возвращает ошибку, оборачивающую `ErrNotFound`; `Upsert`
-идемпотентен по ключу.
+История подписок append-only: `UpsertActive` обновляет активную строку
+`(tg_id, platform)` вместо создания второй (не нарушая
+`idx_subscriptions_active_unique`); `ExpireActive` переводит активную
+строку в `status='expired'` с `ended_at`, не удаляя её, и возвращает
+признак, была ли строка закрыта. Чтения для команд (`ListByUser`,
+`ListRecentByUser`) упорядочены от новых записей к старым. Методы
+`FindByUsername`, `ListActiveByUser`, `Grants.ListByUser`,
+`Audit.ListRecentByUser`, `Whitelist.Has` и `Revocations.Get` нужны
+ядру [status-core](status-core.md) и командам `/status`/`/whois`.
 
-`Users.Upsert` обновляет профильные поля из Telegram, но не затирает
-admin-owned поля (`banned`, `banned_reason`, `notes`). `SetDMState`
-меняет только состояние лички, `updated_at` и, для `open`, `last_seen_at`.
+`Get` по отсутствующей строке возвращает ошибку, оборачивающую
+`ErrNotFound`; `Upsert` идемпотентен по ключу. `Users.Upsert` обновляет
+профильные поля из Telegram, но не затирает admin-owned поля (`banned`,
+`banned_reason`, `notes`); `FindByUsername` ищет только локальную строку,
+без Telegram-lookup. `SetDMState` меняет только состояние лички,
+`updated_at` и, для `open`, `last_seen_at`.
+
+## Admission: grants и invites
+
+Grant-операции поддерживают идемпотентный переход одной строки
+`(tg_id, resource)` в `pending`, `joined`, `left` или `revoked` при
+сохранении одной строки на пару. Переход в `left` обновляет `state` и
+`updated_at` — отдельной колонки времени выхода нет. Joined-строка от
+approval сохраняет `admitted_by='bot'` и `joined_at`; external join
+представим как `joined` с `admitted_by='external'`.
+
+Invite-операции позволяют искать active invite по `invite_link_hash` и
+resource, active shared link для resource, active personal/direct link
+для `(tg_id, resource, mode)` и помечать link как `used` или
+`used_by_other` с `attempted_by`. Lookup по hash не требует логировать
+полный URL. Все эти операции пригодны для `*sql.Tx` через `DBTX`, чтобы
+изменения grant/invite, audit, outbox и terminal update status
+коммитились вместе (см. [grant-access](grant-access.md),
+[invite-links](invite-links.md)).
+
+## Outbox repository
+
+Repository для `access_actions` (паттерн `NewX(q DBTX)`) умеет
+идемпотентно ставить action, брать одно готовое действие lease'ом,
+завершать его как `done`, перепланировать retry с новым `run_after`,
+писать `last_error`, увеличивать счётчик попыток и помечать action
+`dead`. Готовым считается `queued` с `run_after<=now` либо просроченный
+`running` с `locked_until<now`. `payload_json` не интерпретируется за
+пределами хранения/чтения. Подробности исполнения — в
+[outbox-enforcer](outbox-enforcer.md).
+
+## Invite links repository
+
+Repository для `invite_links` (тот же паттерн) умеет искать активную
+shared ссылку по resource, активную personal/direct по
+`(tg_id, resource, mode)`, сохранять созданную Telegram-ссылку,
+помечать строку `sent`/`used`/`used_by_other`/`revoked`/`expired`/`failed`
+и выбирать истёкшие активные ссылки для обслуживания. Полный
+`invite_link` хранится только в БД; `invite_link_hash` доступен
+вызывающему коду для логов и аудита. Правила активной уникальности из
+схемы остаются наблюдаемыми через методы repository.
 
 ## Telegram inbox
 
@@ -68,6 +119,46 @@ admin-owned поля (`banned`, `banned_reason`, `notes`). `SetDMState`
 используется для recovery: стартовый offset вычисляется как максимум
 между сохранённым offset и `MAX(update_id)+1`.
 
+## Tribute events inbox
+
+Repository для `tribute_events` (тот же паттерн `NewX(q DBTX)`) даёт
+webhook-обработчику inbox-семантику. Полученное событие вставляется с
+`dedup_key`, именем события, опциональными `tg_id` и subscription id,
+`signature_valid`, редактированным `payload_json` и `received_at`. Перед
+обработкой существующее событие распознаётся по `dedup_key` —
+идемпотентность держится `ON CONFLICT(dedup_key) DO NOTHING`, повторная
+доставка не плодит строку. Событие доводится до терминального статуса
+`processed`, `ignored` или `failed` с `processed_at` и опциональным
+текстом ошибки. Набор статусов — ровно `received|processed|ignored|failed`;
+`error` — это колонка, а не значение статуса. Failed-строки сохраняются
+для расследования оператором, пока retention-правила явно не разрешат
+очистку. Методы пригодны для `*sql.Tx`, поэтому изменение подписки,
+audit-запись и терминальный статус события коммитятся одной транзакцией.
+
+## Редакция raw payload
+
+Перед записью `telegram_updates.payload_json` и
+`tribute_events.payload_json` из raw JSON удаляются/маскируются PII и
+секреты: email, `web_app_link`, поля адреса/трекинга, provider keys,
+bot tokens, Telegram webhook secrets и полные invite-URL. Forensic-поля,
+нужные для разбора (имя события, timestamps, `tg_id`, subscription id,
+period id, status), сохраняются. Типизированные поля для доменной
+обработки извлекаются до/во время парсинга, но в БД ложится только
+редактированный payload. Технические логи следуют тому же правилу — raw
+payload с нередактированными PII или секретами в логи не попадает.
+
+## Ops read models
+
+Для owner-команд `store` отдаёт узкие read-методы, не протаскивая
+write-заботы в bot-обработчики: активные подписки по платформам; club
+grants по resource и state; due/pending revocations; значения
+`meta.health.*`; `meta.reconcile.last_run_at`; счётчики outbox по статусу
+и число `dead`; открытые alerts с id, severity, kind, title, detail и
+timestamps; известные чаты и сконфигурированные chat ID; CSV-экспорт
+строк по users и текущим подпискам. Чтения, где размер результата может
+расти, ограничены или пагинируются, и не включают raw provider payload
+JSON в owner-сводки или CSV.
+
 ## Audit и alerts
 
 `audit_log` фиксирует операторски важные события, например потерю и
@@ -79,4 +170,4 @@ admin-owned поля (`banned`, `banned_reason`, `notes`). `SetDMState`
 
 ## Время на границе
 
-`store` — единственное место, где `time.Time` кодируется в SQL и обратно: запись `time.RFC3339` в UTC, чтение того же формата. Опциональные метки round-trip'ят через `*time.Time` с соответствием `NULL ↔ nil`.
+`store` — единственное место, где `time.Time` кодируется в SQL и обратно: запись `time.RFC3339` в UTC, чтение того же формата. Опциональные метки round-trip'ят через `*time.Time` с соответствием `NULL ↔ nil`. Метки, которым нужна суб-секундная упорядоченность (например `last_event_at`), round-trip'ят как RFC3339Nano.
