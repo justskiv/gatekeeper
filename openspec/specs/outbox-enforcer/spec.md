@@ -87,6 +87,22 @@ HTML и вызывать `can't parse entities`, отравляя outbox пос�
 ретраями. Inline keyboard button labels и callback data MUST оставаться
 plain reply-markup fields, а не HTML-rendered content.
 
+Категоризация Telegram `403` для `send_dm` MUST зависеть от типа
+таргета, определяемого по `chat_id`, а не по сравнению с `action.TGID`.
+**Private-DM таргет** — payload без `chat_id` либо положительный
+`chat_id` личного чата пользователя (включая `user_chat_id`, который
+admission проставляет в grant-DM при одобрении join-request): для него
+`403` MUST трактоваться как блокировка ботом в личке — action помечает
+`users.dm_state='blocked'` по `action.TGID` и завершается без retry.
+**Group/feed таргет** — отрицательный `chat_id` группы/супергруппы/
+канала, в частности настроенные `EVENT_LOG_CHAT_ID` или
+`ADMIN_LOG_CHAT_ID`: для него `403`/forbidden MUST NOT трактоваться как
+блокировка субъектом — action MUST NOT помечать `users.dm_state='blocked'`
+по `action.TGID` и MUST NOT считаться доставленным; сбой прав MUST идти
+по permanent-failure пути (`status='dead'` и
+`admin_alert(kind='outbox_action_dead')`), чтобы недоступность feed-чата
+была видна оператору, а не терялась тихо.
+
 `edit_message` MUST редактировать текст и inline-клавиатуру
 существующего сообщения по `chat_id` и `message_id` из payload с тем же
 HTML parse mode. Payload без `chat_id`, `message_id` или текста MUST
@@ -114,9 +130,20 @@ HTML parse mode. Payload без `chat_id`, `message_id` или текста MUST
 - **AND** событие логируется как warning, а не ретраится
 
 #### Scenario: Закрытая личка не ретраится
-- **WHEN** `send_dm` получает Telegram `403`
+- **WHEN** `send_dm` без `chat_id` либо с положительным `chat_id`
+  личного чата (включая `user_chat_id` grant-DM из join-request)
+  получает Telegram `403`
 - **THEN** пользователь помечается `dm_state='blocked'`
 - **AND** action завершается без retry
+
+#### Scenario: 403 в feed-чате не блокирует субъекта и поднимает dead alert
+- **WHEN** `send_dm` с отрицательным `payload.chat_id` группы feed-чата
+  (`EVENT_LOG_CHAT_ID` или `ADMIN_LOG_CHAT_ID`) получает Telegram `403`
+  из-за отсутствия прав постинга
+- **THEN** `action.TGID` НЕ помечается `dm_state='blocked'`
+- **AND** action НЕ помечается `done` как доставленный
+- **AND** сбой идёт по permanent-failure пути: `status='dead'` и
+  `admin_alert(kind='outbox_action_dead')`
 
 #### Scenario: Durable DM сохраняет parse mode
 
