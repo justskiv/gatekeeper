@@ -1,37 +1,36 @@
-//nolint:wsl_v5 // HTTP tests group arrange/assert blocks tightly.
 package webhook
 
 import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/justskiv/gatekeeper/internal/store"
+	"github.com/justskiv/gatekeeper/internal/testutil"
 )
 
 func TestServerRoutesHealthReadinessMetricsAndGating(t *testing.T) {
-	db := newWebhookTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	meta := store.NewMeta(db)
+
 	for _, key := range []string{
 		"boosty_group",
 		"tribute_channel",
 		"club_chat",
 		"club_channel",
 	} {
-		if err := meta.SetHealth(ctx, key, "ok"); err != nil {
-			t.Fatalf("set health: %v", err)
-		}
+		require.NoError(t, meta.SetHealth(ctx, key, "ok"), "set health")
 	}
 
 	now := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
-	if err := meta.Set(ctx, "reconcile.last_run_at",
-		now.Add(-time.Hour).Format(time.RFC3339)); err != nil {
-		t.Fatalf("set reconcile: %v", err)
-	}
+	require.NoError(t, meta.Set(ctx, "reconcile.last_run_at",
+		now.Add(-time.Hour).Format(time.RFC3339)), "set reconcile")
 
 	server := NewServer(Config{
 		MetricsEnabled: true,
@@ -64,30 +63,23 @@ func TestServerRoutesHealthReadinessMetricsAndGating(t *testing.T) {
 		"/webhooks/telegram", http.StatusNotFound)
 
 	resp := request(server.Handler(), http.MethodGet, "/metrics")
-	if !strings.Contains(resp.Body.String(), "gatekeeper_updates_total") {
-		t.Fatalf("metrics body missing update metric: %s", resp.Body.String())
-	}
-
-	if strings.Contains(resp.Body.String(),
-		`gatekeeper_telegram_api_errors_total{code="none",method="unknown"} 0`) {
-		t.Fatalf("metrics body contains fake telegram error sample: %s",
-			resp.Body.String())
-	}
+	assert.Contains(t, resp.Body.String(), "gatekeeper_updates_total",
+		"metrics body must expose the update metric")
+	assert.NotContains(t, resp.Body.String(),
+		`gatekeeper_telegram_api_errors_total{code="none",method="unknown"} 0`,
+		"metrics body must not contain a fake telegram error sample")
 }
 
 func TestReadinessFailsForHealthStaleReconcileAndTelegramRegistration(t *testing.T) {
-	db := newWebhookTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	meta := store.NewMeta(db)
-	if err := meta.SetHealth(ctx, "club_chat", "fail:not_admin"); err != nil {
-		t.Fatalf("set health: %v", err)
-	}
+	require.NoError(t, meta.SetHealth(ctx, "club_chat", "fail:not_admin"),
+		"set health")
 
 	now := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
-	if err := meta.Set(ctx, "reconcile.last_run_at",
-		now.Add(-3*time.Hour).Format(time.RFC3339)); err != nil {
-		t.Fatalf("set reconcile: %v", err)
-	}
+	require.NoError(t, meta.Set(ctx, "reconcile.last_run_at",
+		now.Add(-3*time.Hour).Format(time.RFC3339)), "set reconcile")
 
 	server := NewServer(Config{
 		Readiness: Readiness{
@@ -102,9 +94,7 @@ func TestReadinessFailsForHealthStaleReconcileAndTelegramRegistration(t *testing
 	})
 
 	resp := request(server.Handler(), http.MethodGet, "/readyz")
-	if resp.Code != http.StatusServiceUnavailable {
-		t.Fatalf("readyz status = %d, want 503", resp.Code)
-	}
+	require.Equal(t, http.StatusServiceUnavailable, resp.Code, "readyz status")
 
 	body := resp.Body.String()
 	for _, want := range []string{
@@ -112,9 +102,7 @@ func TestReadinessFailsForHealthStaleReconcileAndTelegramRegistration(t *testing
 		"reconcile.stale",
 		"telegram_webhook_registration",
 	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("readyz body missing %q: %s", want, body)
-		}
+		assert.Containsf(t, body, want, "readyz body missing %q", want)
 	}
 }
 
@@ -129,10 +117,7 @@ func TestWriteJSONEncodeErrorUsesInternalServerError(t *testing.T) {
 
 	writeJSON(resp, http.StatusOK, make(chan int))
 
-	if resp.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d body=%s, want 500",
-			resp.Code, resp.Body.String())
-	}
+	assert.Equal(t, http.StatusInternalServerError, resp.Code)
 }
 
 func assertStatus(
@@ -145,10 +130,8 @@ func assertStatus(
 	t.Helper()
 
 	resp := request(handler, method, path)
-	if resp.Code != want {
-		t.Fatalf("%s %s status = %d body=%s, want %d",
-			method, path, resp.Code, resp.Body.String(), want)
-	}
+	assert.Equalf(t, want, resp.Code, "%s %s body=%s",
+		method, path, resp.Body.String())
 }
 
 func request(handler http.Handler, method, path string) *httptest.ResponseRecorder {

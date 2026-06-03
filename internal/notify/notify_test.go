@@ -2,19 +2,18 @@ package notify
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
-	"runtime"
 	"testing"
 
-	"github.com/pressly/goose/v3"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/justskiv/gatekeeper/internal/domain"
+	"github.com/justskiv/gatekeeper/internal/lib/random"
 	"github.com/justskiv/gatekeeper/internal/messages"
 	"github.com/justskiv/gatekeeper/internal/store"
+	"github.com/justskiv/gatekeeper/internal/testutil"
 )
 
 type fakeSender struct {
@@ -54,188 +53,115 @@ func (blockedDMError) TelegramCategory() string {
 }
 
 func TestSendDMSkipsKnownBlockedUser(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
+	tgID := random.TGID()
 
 	users := store.NewUsers(db)
-	if err := users.Upsert(ctx, domain.User{
-		TGID:    1,
+	require.NoError(t, users.Upsert(ctx, domain.User{
+		TGID:    tgID,
 		DMState: domain.DMBlocked,
-	}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	}), "upsert user")
 
 	sender := &fakeSender{}
 
-	if err := New(users, sender, nil).SendDM(ctx, 1, "hello"); err != nil {
-		t.Fatalf("SendDM: %v", err)
-	}
-
-	if sender.calls != 0 {
-		t.Fatalf("send calls = %d, want 0", sender.calls)
-	}
+	require.NoError(t, New(users, sender, nil).SendDM(ctx, tgID, "hello"), "SendDM")
+	assert.Equal(t, 0, sender.calls, "send calls")
 }
 
 func TestDurableSendDMEnqueuesInsteadOfSending(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(10)
+	tgID := random.TGID()
 
 	users := store.NewUsers(db)
-	if err := users.Upsert(ctx, domain.User{
+	require.NoError(t, users.Upsert(ctx, domain.User{
 		TGID:    tgID,
 		DMState: domain.DMOpen,
-	}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	}), "upsert user")
 
 	outbox := &fakeOutbox{}
-	if err := NewDurable(users, outbox, nil).SendDurableDM(
+	require.NoError(t, NewDurable(users, outbox, nil).SendDurableDM(
 		ctx, tgID, "hello", "update:1:0",
-	); err != nil {
-		t.Fatalf("SendDurableDM: %v", err)
-	}
+	), "SendDurableDM")
 
-	if outbox.calls != 1 {
-		t.Fatalf("enqueue calls = %d, want 1", outbox.calls)
-	}
-
-	if outbox.input.Type != domain.ActionSendDM || outbox.input.TGID == nil ||
-		*outbox.input.TGID != tgID {
-		t.Fatalf("outbox input = %+v, want send_dm for user", outbox.input)
-	}
+	assert.Equal(t, 1, outbox.calls, "enqueue calls")
+	assert.Equal(t, domain.ActionSendDM, outbox.input.Type)
+	require.NotNil(t, outbox.input.TGID)
+	assert.Equal(t, tgID, *outbox.input.TGID)
 }
 
 func TestDurableFormattedDMEnqueuesParseMode(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(12)
+	tgID := random.TGID()
 
 	users := store.NewUsers(db)
-	if err := users.Upsert(ctx, domain.User{
+	require.NoError(t, users.Upsert(ctx, domain.User{
 		TGID:    tgID,
 		DMState: domain.DMOpen,
-	}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	}), "upsert user")
 
 	outbox := &fakeOutbox{}
-	if err := NewDurable(users, outbox, nil).SendFormattedDurableDM(
+	require.NoError(t, NewDurable(users, outbox, nil).SendFormattedDurableDM(
 		ctx, tgID, "<b>hello</b>", messages.ParseModeHTML, "update:1:1",
-	); err != nil {
-		t.Fatalf("SendFormattedDurableDM: %v", err)
-	}
+	), "SendFormattedDurableDM")
 
 	var payload struct {
 		Text      string `json:"text"`
 		ParseMode string `json:"parse_mode"`
 	}
-	if err := json.Unmarshal(outbox.input.PayloadJSON, &payload); err != nil {
-		t.Fatalf("decode payload: %v", err)
-	}
+	require.NoError(t, json.Unmarshal(outbox.input.PayloadJSON, &payload),
+		"decode payload")
 
-	if payload.Text != "<b>hello</b>" || payload.ParseMode != messages.ParseModeHTML {
-		t.Fatalf("payload = %+v, want formatted HTML", payload)
-	}
+	assert.Equal(t, "<b>hello</b>", payload.Text)
+	assert.Equal(t, messages.ParseModeHTML, payload.ParseMode)
 }
 
 func TestDurableSendDMSkipsKnownBlockedUser(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(11)
+	tgID := random.TGID()
 
 	users := store.NewUsers(db)
-	if err := users.Upsert(ctx, domain.User{
+	require.NoError(t, users.Upsert(ctx, domain.User{
 		TGID:    tgID,
 		DMState: domain.DMBlocked,
-	}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	}), "upsert user")
 
 	outbox := &fakeOutbox{}
-	if err := NewDurable(users, outbox, nil).SendDurableDM(
+	require.NoError(t, NewDurable(users, outbox, nil).SendDurableDM(
 		ctx, tgID, "hello", "update:1:0",
-	); err != nil {
-		t.Fatalf("SendDurableDM: %v", err)
-	}
+	), "SendDurableDM")
 
-	if outbox.calls != 0 {
-		t.Fatalf("enqueue calls = %d, want 0 for blocked user", outbox.calls)
-	}
+	assert.Equal(t, 0, outbox.calls, "enqueue calls for blocked user")
 }
 
 func TestSendDMMarksBlockedWithoutRetry(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
+	tgID := random.TGID()
 
 	users := store.NewUsers(db)
-	if err := users.Upsert(ctx, domain.User{
-		TGID:    2,
+	require.NoError(t, users.Upsert(ctx, domain.User{
+		TGID:    tgID,
 		DMState: domain.DMOpen,
-	}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	}), "upsert user")
 
 	sender := &fakeSender{err: blockedDMError{}}
 
-	if err := New(users, sender, nil).SendDM(ctx, 2, "hello"); err != nil {
-		t.Fatalf("SendDM: %v", err)
-	}
+	require.NoError(t, New(users, sender, nil).SendDM(ctx, tgID, "hello"), "SendDM")
+	assert.Equal(t, 1, sender.calls, "send calls")
 
-	if sender.calls != 1 {
-		t.Fatalf("send calls = %d, want 1", sender.calls)
-	}
-
-	user, err := users.Get(ctx, 2)
-	if err != nil {
-		t.Fatalf("get user: %v", err)
-	}
-
-	if user.DMState != domain.DMBlocked {
-		t.Fatalf("dm_state = %s, want blocked", user.DMState)
-	}
+	user, err := users.Get(ctx, tgID)
+	require.NoError(t, err, "get user")
+	assert.Equal(t, domain.DMBlocked, user.DMState)
 }
 
 func TestSendDMReturnsNonBlockedErrors(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 
 	err := New(store.NewUsers(db), &fakeSender{err: errors.New("network")}, nil).
-		SendDM(context.Background(), 3, "hello")
-	if err == nil {
-		t.Fatal("SendDM returned nil, want error")
-	}
-}
-
-func newTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-
-	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("open database: %v", err)
-	}
-
-	t.Cleanup(func() { _ = db.Close() })
-
-	provider, err := goose.NewProvider(
-		goose.DialectSQLite3, db, os.DirFS(migrationsDir(t)))
-	if err != nil {
-		t.Fatalf("new goose provider: %v", err)
-	}
-
-	if _, err := provider.Up(context.Background()); err != nil {
-		t.Fatalf("apply migrations: %v", err)
-	}
-
-	return db
-}
-
-func migrationsDir(t *testing.T) string {
-	t.Helper()
-
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-
-	return filepath.Join(filepath.Dir(file), "..", "..", "migrations")
+		SendDM(context.Background(), random.TGID(), "hello")
+	require.Error(t, err, "SendDM must return non-blocked error")
 }

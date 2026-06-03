@@ -4,63 +4,53 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"os"
-	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
-	"github.com/pressly/goose/v3"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/engine"
+	"github.com/justskiv/gatekeeper/internal/lib/random"
 	"github.com/justskiv/gatekeeper/internal/store"
+	"github.com/justskiv/gatekeeper/internal/testutil"
 )
 
 func TestRunOnceExecutesDueRevocationAndEnqueuesVerify(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	revokedID := random.TGID()
+	activeID := random.TGID()
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: 701}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{TGID: revokedID}),
+		"upsert user")
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{TGID: activeID}),
+		"upsert active user")
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: 702}); err != nil {
-		t.Fatalf("upsert active user: %v", err)
-	}
+	_, err := store.NewSubscriptions(db).UpsertManual(ctx, activeID, nil, "test")
+	require.NoError(t, err, "upsert active subscription")
 
-	if _, err := store.NewSubscriptions(db).UpsertManual(
-		ctx, 702, nil, "test",
-	); err != nil {
-		t.Fatalf("upsert active subscription: %v", err)
-	}
-
-	if err := store.NewGrants(db).Upsert(ctx, domain.AccessGrant{
-		TGID:       701,
+	require.NoError(t, store.NewGrants(db).Upsert(ctx, domain.AccessGrant{
+		TGID:       revokedID,
 		Resource:   domain.ResourceChat,
 		State:      domain.GrantJoined,
 		AdmittedBy: "bot",
-	}); err != nil {
-		t.Fatalf("upsert chat grant: %v", err)
-	}
+	}), "upsert chat grant")
 
-	if err := store.NewGrants(db).Upsert(ctx, domain.AccessGrant{
-		TGID:       701,
+	require.NoError(t, store.NewGrants(db).Upsert(ctx, domain.AccessGrant{
+		TGID:       revokedID,
 		Resource:   domain.ResourceChannel,
 		State:      domain.GrantJoined,
 		AdmittedBy: "bot",
-	}); err != nil {
-		t.Fatalf("upsert channel grant: %v", err)
-	}
+	}), "upsert channel grant")
 
-	if err := store.NewRevocations(db).Upsert(ctx, domain.PendingRevocation{
-		TGID:        701,
+	require.NoError(t, store.NewRevocations(db).Upsert(ctx, domain.PendingRevocation{
+		TGID:        revokedID,
 		Reason:      "expired",
 		ScheduledAt: now.Add(-time.Minute),
-	}); err != nil {
-		t.Fatalf("upsert pending: %v", err)
-	}
+	}), "upsert pending")
 
 	r := New(db, engine.New(nil), nil, Config{
 		Sources: []SourceChat{{
@@ -75,34 +65,29 @@ func TestRunOnceExecutesDueRevocationAndEnqueuesVerify(t *testing.T) {
 	}, nil, WithClock(func() time.Time { return now }))
 
 	summary, err := r.RunOnce(ctx)
-	if err != nil {
-		t.Fatalf("RunOnce: %v", err)
-	}
+	require.NoError(t, err, "RunOnce")
 
-	if summary.DueRevocations != 1 || summary.VerifyActions == 0 {
-		t.Fatalf("summary = %+v, want due revocation and verify actions", summary)
-	}
+	assert.Equal(t, 1, summary.DueRevocations, "due revocations")
+	assert.NotZero(t, summary.VerifyActions, "verify actions")
 
-	if got := countActions(t, db, domain.ActionSoftKick); got != 2 {
-		t.Fatalf("soft_kick actions = %d, want chat and channel", got)
-	}
+	assert.Equal(t, 2, countActions(t, db, domain.ActionSoftKick),
+		"soft_kick actions for chat and channel")
+	assert.NotZero(t, countActions(t, db, domain.ActionVerifyMember),
+		"verify_member actions")
 
-	if got := countActions(t, db, domain.ActionVerifyMember); got == 0 {
-		t.Fatal("verify_member actions = 0, want candidates")
-	}
-
-	if _, ok, err := store.NewMeta(db).Get(ctx, "reconcile.last_run_at"); err != nil || !ok {
-		t.Fatalf("last_run_at = (_, %v, %v), want present", ok, err)
-	}
+	_, ok, err := store.NewMeta(db).Get(ctx, "reconcile.last_run_at")
+	require.NoError(t, err, "get last_run_at")
+	assert.True(t, ok, "last_run_at must be present")
 }
 
 func TestRunOnceReportsHealthFailureWithoutReturningError(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	ownerID := random.TGID()
 
 	r := New(db, nil, nil, Config{
-		OwnerIDs: []int64{9001},
+		OwnerIDs: []int64{ownerID},
 	}, nil,
 		WithClock(func() time.Time { return now }),
 		WithHealthCheck(func(context.Context) error {
@@ -110,36 +95,27 @@ func TestRunOnceReportsHealthFailureWithoutReturningError(t *testing.T) {
 		}))
 
 	summary, err := r.RunOnce(ctx)
-	if err != nil {
-		t.Fatalf("RunOnce: %v", err)
-	}
+	require.NoError(t, err, "RunOnce")
 
-	if summary.Failed != 1 {
-		t.Fatalf("summary = %+v, want one recoverable failure", summary)
-	}
+	assert.Equal(t, 1, summary.Failed, "one recoverable failure")
 
-	if got := countRows(t, db, "admin_alerts",
-		"kind = 'reconcile_health_failed'"); got != 1 {
-		t.Fatalf("health alerts = %d, want one", got)
-	}
-
-	if got := countActions(t, db, domain.ActionSendDM); got != 1 {
-		t.Fatalf("operator deliveries = %d, want one", got)
-	}
+	assert.Equal(t, 1, countRows(t, db, "admin_alerts",
+		"kind = 'reconcile_health_failed'"), "health alerts")
+	assert.Equal(t, 1, countActions(t, db, domain.ActionSendDM),
+		"operator deliveries")
 }
 
 func TestRunOnceRepeatsVerifyInNewCycleOnly(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	tgID := random.TGID()
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: 703}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
-	if _, err := store.NewSubscriptions(db).UpsertManual(ctx, 703, nil, "test"); err != nil {
-		t.Fatalf("upsert subscription: %v", err)
-	}
+	_, err := store.NewSubscriptions(db).UpsertManual(ctx, tgID, nil, "test")
+	require.NoError(t, err, "upsert subscription")
 
 	r := New(db, nil, nil, Config{
 		Interval: time.Hour,
@@ -154,31 +130,26 @@ func TestRunOnceRepeatsVerifyInNewCycleOnly(t *testing.T) {
 		}},
 	}, nil, WithClock(func() time.Time { return now }))
 
-	if _, err := r.RunOnce(ctx); err != nil {
-		t.Fatalf("RunOnce first: %v", err)
-	}
+	_, err = r.RunOnce(ctx)
+	require.NoError(t, err, "RunOnce first")
 
-	if _, err := r.RunOnce(ctx); err != nil {
-		t.Fatalf("RunOnce same bucket: %v", err)
-	}
+	_, err = r.RunOnce(ctx)
+	require.NoError(t, err, "RunOnce same bucket")
 
-	if got := countActions(t, db, domain.ActionVerifyMember); got != 2 {
-		t.Fatalf("verify actions same bucket = %d, want source and club", got)
-	}
+	assert.Equal(t, 2, countActions(t, db, domain.ActionVerifyMember),
+		"verify actions same bucket for source and club")
 
 	now = now.Add(2 * time.Hour)
 
-	if _, err := r.RunOnce(ctx); err != nil {
-		t.Fatalf("RunOnce next bucket: %v", err)
-	}
+	_, err = r.RunOnce(ctx)
+	require.NoError(t, err, "RunOnce next bucket")
 
-	if got := countActions(t, db, domain.ActionVerifyMember); got != 4 {
-		t.Fatalf("verify actions next bucket = %d, want repeated source and club", got)
-	}
+	assert.Equal(t, 4, countActions(t, db, domain.ActionVerifyMember),
+		"verify actions next bucket repeated source and club")
 }
 
 func TestRunOnceEnqueuesMissingSharedInvite(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
 
@@ -191,50 +162,42 @@ func TestRunOnceEnqueuesMissingSharedInvite(t *testing.T) {
 	}, nil, WithClock(func() time.Time { return now }))
 
 	summary, err := r.RunOnce(ctx)
-	if err != nil {
-		t.Fatalf("RunOnce: %v", err)
-	}
+	require.NoError(t, err, "RunOnce")
 
-	if summary.InviteActions != 1 {
-		t.Fatalf("summary = %+v, want one invite action", summary)
-	}
-
-	if got := countActions(t, db, domain.ActionEnsureInvite); got != 1 {
-		t.Fatalf("ensure_invite actions = %d, want one", got)
-	}
+	assert.Equal(t, 1, summary.InviteActions, "one invite action")
+	assert.Equal(t, 1, countActions(t, db, domain.ActionEnsureInvite),
+		"ensure_invite actions")
 }
 
 func TestCleanupPreservesFailedAndDeadRows(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
 	old := now.Add(-48 * time.Hour).Format(time.RFC3339)
+	tgID := random.TGID()
 
-	if _, err := db.ExecContext(ctx, `
+	_, err := db.ExecContext(ctx, `
 		INSERT INTO telegram_updates (
 			update_id, update_type, payload_json, status, error,
 			received_at, processed_at)
 		VALUES
 			(1, 'message', '{}', 'processed', '', ?, ?),
 			(2, 'message', '{}', 'failed', 'boom', ?, ?)`,
-		old, old, old, old); err != nil {
-		t.Fatalf("seed updates: %v", err)
-	}
+		old, old, old, old)
+	require.NoError(t, err, "seed updates")
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: 702}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
-	if _, err := db.ExecContext(ctx, `
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO access_actions (
 			action_type, tg_id, idempotency_key, payload_json, status,
 			run_after, attempts, max_attempts, last_error, created_at, updated_at)
 		VALUES
-			('send_dm', 702, 'done-key', '{}', 'done', ?, 0, 8, '', ?, ?),
-			('send_dm', 702, 'dead-key', '{}', 'dead', ?, 1, 8, 'boom', ?, ?)`,
-		old, old, old, old, old, old); err != nil {
-		t.Fatalf("seed actions: %v", err)
-	}
+			('send_dm', ?, 'done-key', '{}', 'done', ?, 0, 8, '', ?, ?),
+			('send_dm', ?, 'dead-key', '{}', 'dead', ?, 1, 8, 'boom', ?, ?)`,
+		tgID, old, old, old, tgID, old, old, old)
+	require.NoError(t, err, "seed actions")
 
 	cleanup := NewCleanupService(db, Config{
 		RawRetention:   24 * time.Hour,
@@ -242,21 +205,14 @@ func TestCleanupPreservesFailedAndDeadRows(t *testing.T) {
 	}, nil)
 	cleanup.now = func() time.Time { return now }
 
-	if err := cleanup.RunOnce(ctx); err != nil {
-		t.Fatalf("cleanup RunOnce: %v", err)
-	}
+	require.NoError(t, cleanup.RunOnce(ctx), "cleanup RunOnce")
 
-	if got := countRows(t, db, "telegram_updates", "status = 'failed'"); got != 1 {
-		t.Fatalf("failed updates = %d, want preserved", got)
-	}
-
-	if got := countRows(t, db, "access_actions", "status = 'dead'"); got != 1 {
-		t.Fatalf("dead actions = %d, want preserved", got)
-	}
-
-	if got := countRows(t, db, "access_actions", "status = 'done'"); got != 0 {
-		t.Fatalf("done actions = %d, want deleted", got)
-	}
+	assert.Equal(t, 1, countRows(t, db, "telegram_updates", "status = 'failed'"),
+		"failed updates preserved")
+	assert.Equal(t, 1, countRows(t, db, "access_actions", "status = 'dead'"),
+		"dead actions preserved")
+	assert.Equal(t, 0, countRows(t, db, "access_actions", "status = 'done'"),
+		"done actions deleted")
 }
 
 type fakeInviteMaintainer struct{}
@@ -268,49 +224,13 @@ func (fakeInviteMaintainer) ActiveShared(
 	return domain.InviteLink{}, false, nil
 }
 
-func newTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-
-	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("open database: %v", err)
-	}
-
-	t.Cleanup(func() { _ = db.Close() })
-
-	provider, err := goose.NewProvider(
-		goose.DialectSQLite3, db, os.DirFS(migrationsDir(t)))
-	if err != nil {
-		t.Fatalf("new goose provider: %v", err)
-	}
-
-	if _, err := provider.Up(context.Background()); err != nil {
-		t.Fatalf("apply migrations: %v", err)
-	}
-
-	return db
-}
-
-func migrationsDir(t *testing.T) string {
-	t.Helper()
-
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-
-	return filepath.Join(filepath.Dir(file), "..", "..", "migrations")
-}
-
 func countActions(t *testing.T, db *sql.DB, actionType domain.ActionType) int {
 	t.Helper()
 
 	var got int
-	if err := db.QueryRowContext(context.Background(), `
+	require.NoError(t, db.QueryRowContext(context.Background(), `
 		SELECT count(*) FROM access_actions WHERE action_type = ?`,
-		string(actionType)).Scan(&got); err != nil {
-		t.Fatalf("count actions: %v", err)
-	}
+		string(actionType)).Scan(&got), "count actions")
 
 	return got
 }
@@ -319,10 +239,9 @@ func countRows(t *testing.T, db *sql.DB, table, where string) int {
 	t.Helper()
 
 	var got int
-	if err := db.QueryRowContext(context.Background(),
-		"SELECT count(*) FROM "+table+" WHERE "+where).Scan(&got); err != nil {
-		t.Fatalf("count %s: %v", table, err)
-	}
+	require.NoError(t, db.QueryRowContext(context.Background(),
+		"SELECT count(*) FROM "+table+" WHERE "+where).Scan(&got),
+		"count %s", table)
 
 	return got
 }

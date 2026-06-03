@@ -3,6 +3,9 @@ package engine
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/justskiv/gatekeeper/internal/domain"
 )
 
@@ -52,21 +55,15 @@ func TestAggregatePriorities(t *testing.T) {
 			}
 
 			status, decision := Aggregate(verdicts, tt.banned)
-			if status != tt.want || decision.Status != tt.want {
-				t.Fatalf("status = %s/%s, want %s",
-					status, decision.Status, tt.want)
-			}
+			assert.Equal(t, tt.want, status, "status")
+			assert.Equal(t, tt.want, decision.Status, "decision status")
+			assert.Equal(t, tt.want == domain.StatusActive, decision.Allowed,
+				"allowed")
+			require.NotEmpty(t, decision.Reasons, "decision has no reasons")
 
-			if decision.Allowed != (tt.want == domain.StatusActive) {
-				t.Fatalf("allowed = %v for status %s", decision.Allowed, tt.want)
-			}
-
-			if len(decision.Reasons) == 0 {
-				t.Fatal("decision has no reasons")
-			}
-
-			if tt.banned && len(decision.Reasons) != len(tt.verdicts)+1 {
-				t.Fatalf("reasons = %+v, want source reasons plus ban", decision.Reasons)
+			if tt.banned {
+				assert.Len(t, decision.Reasons, len(tt.verdicts)+1,
+					"source reasons plus ban")
 			}
 		})
 	}

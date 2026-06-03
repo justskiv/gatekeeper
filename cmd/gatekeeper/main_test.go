@@ -2,23 +2,21 @@ package main
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/pressly/goose/v3"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/justskiv/gatekeeper/internal/config"
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/store"
 	"github.com/justskiv/gatekeeper/internal/telegram"
+	"github.com/justskiv/gatekeeper/internal/testutil"
 )
 
 func TestRunFailsFastForDirectWithoutAllowBeforeDB(t *testing.T) {
@@ -33,17 +31,12 @@ func TestRunFailsFastForDirectWithoutAllowBeforeDB(t *testing.T) {
 	}
 
 	err := run()
-	if err == nil {
-		t.Fatal("run returned nil, want direct invite config error")
-	}
+	require.Error(t, err, "run must reject direct invites without the allow flag")
+	assert.Contains(t, err.Error(), "ALLOW_DIRECT_INVITES")
 
-	if !strings.Contains(err.Error(), "ALLOW_DIRECT_INVITES") {
-		t.Fatalf("run error = %v, want ALLOW_DIRECT_INVITES", err)
-	}
-
-	if _, statErr := os.Stat(dbPath); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("invalid direct config touched db path: %v", statErr)
-	}
+	_, statErr := os.Stat(dbPath)
+	assert.ErrorIs(t, statErr, os.ErrNotExist,
+		"invalid direct config must not touch the db path")
 }
 
 func TestShouldStartHTTPServer(t *testing.T) {
@@ -73,62 +66,42 @@ func TestShouldStartHTTPServer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldStartHTTPServer(tt.cfg); got != tt.want {
-				t.Fatalf("shouldStartHTTPServer = %v, want %v", got, tt.want)
-			}
+			assert.Equal(t, tt.want, shouldStartHTTPServer(tt.cfg))
 		})
 	}
 }
 
 func TestCreateDirectModeAlert(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 
-	if err := createDirectModeAlert(ctx, store.NewAlerts(db)); err != nil {
-		t.Fatalf("createDirectModeAlert: %v", err)
-	}
-
-	if err := createDirectModeAlert(ctx, store.NewAlerts(db)); err != nil {
-		t.Fatalf("createDirectModeAlert second call: %v", err)
-	}
+	require.NoError(t, createDirectModeAlert(ctx, store.NewAlerts(db)),
+		"first createDirectModeAlert")
+	require.NoError(t, createDirectModeAlert(ctx, store.NewAlerts(db)),
+		"second createDirectModeAlert")
 
 	var alerts int
-	if err := db.QueryRowContext(ctx, `
+	require.NoError(t, db.QueryRowContext(ctx, `
 		SELECT count(*) FROM admin_alerts
 		WHERE kind = 'invite_mode_degraded'`,
-	).Scan(&alerts); err != nil {
-		t.Fatalf("count alerts: %v", err)
-	}
-
-	if alerts != 1 {
-		t.Fatalf("alerts = %d, want one open degraded alert", alerts)
-	}
+	).Scan(&alerts), "count alerts")
+	assert.Equal(t, 1, alerts, "only one open degraded alert must exist")
 }
 
 func TestEnqueueSharedInvitesIsIdempotent(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	outbox := store.NewOutbox(db)
 
-	if err := enqueueSharedInvites(ctx, outbox); err != nil {
-		t.Fatalf("enqueueSharedInvites: %v", err)
-	}
-
-	if err := enqueueSharedInvites(ctx, outbox); err != nil {
-		t.Fatalf("enqueueSharedInvites second call: %v", err)
-	}
+	require.NoError(t, enqueueSharedInvites(ctx, outbox), "first enqueueSharedInvites")
+	require.NoError(t, enqueueSharedInvites(ctx, outbox), "second enqueueSharedInvites")
 
 	var actions int
-	if err := db.QueryRowContext(ctx, `
+	require.NoError(t, db.QueryRowContext(ctx, `
 		SELECT count(*) FROM access_actions
 		WHERE action_type = 'ensure_invite'`,
-	).Scan(&actions); err != nil {
-		t.Fatalf("count actions: %v", err)
-	}
-
-	if actions != 2 {
-		t.Fatalf("ensure_invite actions = %d, want chat and channel", actions)
-	}
+	).Scan(&actions), "count actions")
+	assert.Equal(t, 2, actions, "expected chat and channel ensure_invite actions")
 }
 
 func TestSharedInvitesReadyRequiresChatAndChannel(t *testing.T) {
@@ -140,37 +113,25 @@ func TestSharedInvitesReadyRequiresChatAndChannel(t *testing.T) {
 	}
 
 	ok, err := sharedInvitesReady(ctx, readiness)
-	if err != nil {
-		t.Fatalf("sharedInvitesReady: %v", err)
-	}
-
-	if ok {
-		t.Fatal("shared readiness succeeded with channel missing")
-	}
+	require.NoError(t, err, "sharedInvitesReady")
+	assert.False(t, ok, "readiness must fail with the channel link missing")
 
 	readiness[domain.ResourceChannel] = domain.InviteLink{
 		CreatesJoinRequest: true,
 	}
 
 	ok, err = sharedInvitesReady(ctx, readiness)
-	if err != nil {
-		t.Fatalf("sharedInvitesReady complete: %v", err)
-	}
-
-	if !ok {
-		t.Fatal("shared readiness failed with both links present")
-	}
+	require.NoError(t, err, "sharedInvitesReady complete")
+	assert.True(t, ok, "readiness must succeed with both links present")
 }
 
 func TestRuntimeInitialReconcileAndGracefulShutdown(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
 	client, err := telegram.NewClient("123:ABC")
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 
 	runtime, runtimeCtx := startRuntime(
 		ctx,
@@ -182,17 +143,20 @@ func TestRuntimeInitialReconcileAndGracefulShutdown(t *testing.T) {
 		slog.Default(),
 	)
 
-	if _, err := runtime.reconciler.RunOnce(runtimeCtx); err != nil {
+	_, err = runtime.reconciler.RunOnce(runtimeCtx)
+	if err != nil {
 		runtime.stopAndWait()
-		t.Fatalf("initial RunOnce: %v", err)
 	}
 
-	if _, ok, err := store.NewMeta(db).Get(
-		context.Background(), "reconcile.last_run_at",
-	); err != nil || !ok {
+	require.NoError(t, err, "initial RunOnce")
+
+	_, ok, err := store.NewMeta(db).Get(context.Background(), "reconcile.last_run_at")
+	if err != nil || !ok {
 		runtime.stopAndWait()
-		t.Fatalf("last_run_at = (_, %v, %v), want present", ok, err)
 	}
+
+	require.NoError(t, err, "Get last_run_at")
+	require.True(t, ok, "last_run_at must be present after initial reconcile")
 
 	runtime.startPeriodic(runtimeCtx)
 	runtime.stopAndWait()
@@ -213,40 +177,6 @@ func (r fakeReadiness) ActiveShared(
 	link, ok := r[resource]
 
 	return link, ok, nil
-}
-
-func newTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-
-	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("open database: %v", err)
-	}
-
-	t.Cleanup(func() { _ = db.Close() })
-
-	provider, err := goose.NewProvider(
-		goose.DialectSQLite3, db, os.DirFS(migrationsDir(t)))
-	if err != nil {
-		t.Fatalf("new goose provider: %v", err)
-	}
-
-	if _, err := provider.Up(context.Background()); err != nil {
-		t.Fatalf("apply migrations: %v", err)
-	}
-
-	return db
-}
-
-func migrationsDir(t *testing.T) string {
-	t.Helper()
-
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-
-	return filepath.Join(filepath.Dir(file), "..", "..", "migrations")
 }
 
 func validEnv(dbPath string) map[string]string {

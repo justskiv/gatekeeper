@@ -1,9 +1,14 @@
-//nolint:wsl_v5 // Test setup and assertions stay grouped by scenario.
 package store
 
 import (
 	"context"
 	"testing"
+
+	"github.com/brianvoe/gofakeit/v7"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/justskiv/gatekeeper/internal/lib/random"
 )
 
 func TestTributeEventsInsertDedupAndTerminalStatus(t *testing.T) {
@@ -11,52 +16,37 @@ func TestTributeEventsInsertDedupAndTerminalStatus(t *testing.T) {
 	ctx := context.Background()
 	repo := NewTributeEvents(db)
 
-	tgID := int64(123)
+	tgID := random.TGID()
+	dedupKey := gofakeit.UUID()
+	payload := []byte(`{"name":"new_subscription"}`)
+
 	event, inserted, err := repo.InsertReceived(ctx, TributeEventInput{
-		DedupKey:       "dedup",
+		DedupKey:       dedupKey,
 		EventName:      "new_subscription",
 		TGID:           &tgID,
-		SubscriptionID: "sub-1",
+		SubscriptionID: gofakeit.UUID(),
 		SignatureValid: true,
-		PayloadJSON:    []byte(`{"name":"new_subscription"}`),
+		PayloadJSON:    payload,
 	})
-	if err != nil {
-		t.Fatalf("InsertReceived: %v", err)
-	}
-
-	if !inserted {
-		t.Fatal("inserted = false, want true")
-	}
+	require.NoError(t, err, "InsertReceived")
+	require.True(t, inserted, "first insert must report inserted")
 
 	duplicate, inserted, err := repo.InsertReceived(ctx, TributeEventInput{
-		DedupKey:       "dedup",
+		DedupKey:       dedupKey,
 		EventName:      "new_subscription",
 		SignatureValid: true,
-		PayloadJSON:    []byte(`{"name":"new_subscription"}`),
+		PayloadJSON:    payload,
 	})
-	if err != nil {
-		t.Fatalf("InsertReceived duplicate: %v", err)
-	}
+	require.NoError(t, err, "InsertReceived duplicate")
+	assert.False(t, inserted, "duplicate must not report inserted")
+	assert.Equal(t, event.ID, duplicate.ID, "duplicate reuses the row")
 
-	if inserted {
-		t.Fatal("duplicate inserted = true, want false")
-	}
+	require.NoError(t,
+		repo.MarkTerminal(ctx, event.ID, TributeEventProcessed, ""),
+		"MarkTerminal")
 
-	if duplicate.ID != event.ID {
-		t.Fatalf("duplicate ID = %d, want %d", duplicate.ID, event.ID)
-	}
-
-	if err := repo.MarkTerminal(ctx, event.ID, TributeEventProcessed, ""); err != nil {
-		t.Fatalf("MarkTerminal: %v", err)
-	}
-
-	got, err := repo.GetByDedupKey(ctx, "dedup")
-	if err != nil {
-		t.Fatalf("GetByDedupKey: %v", err)
-	}
-
-	if got.Status != TributeEventProcessed || got.ProcessedAt == nil {
-		t.Fatalf("event status = %s processed_at=%v, want processed timestamp",
-			got.Status, got.ProcessedAt)
-	}
+	got, err := repo.GetByDedupKey(ctx, dedupKey)
+	require.NoError(t, err, "GetByDedupKey")
+	assert.Equal(t, TributeEventProcessed, got.Status)
+	assert.NotNil(t, got.ProcessedAt, "processed event must carry a timestamp")
 }

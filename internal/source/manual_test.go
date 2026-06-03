@@ -6,7 +6,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/justskiv/gatekeeper/internal/domain"
+	"github.com/justskiv/gatekeeper/internal/lib/random"
 )
 
 type fakeWhitelist struct {
@@ -35,14 +39,9 @@ func (s fakeManualSubs) GetActive(
 func TestManualVerdictWhitelistActive(t *testing.T) {
 	source := NewManual(fakeWhitelist{has: true}, fakeManualSubs{})
 
-	got, err := source.Verdict(context.Background(), 42)
-	if err != nil {
-		t.Fatalf("Verdict: %v", err)
-	}
-
-	if got.Verdict != domain.VerdictActive {
-		t.Fatalf("verdict = %s, want active", got.Verdict)
-	}
+	got, err := source.Verdict(context.Background(), random.TGID())
+	require.NoError(t, err, "Verdict")
+	assert.Equal(t, domain.VerdictActive, got.Verdict)
 }
 
 func TestManualVerdictActiveSubscriptionOrNoSignal(t *testing.T) {
@@ -57,25 +56,15 @@ func TestManualVerdictActiveSubscriptionOrNoSignal(t *testing.T) {
 		WithManualClock(func() time.Time { return now }),
 	)
 
-	got, err := source.Verdict(context.Background(), 42)
-	if err != nil {
-		t.Fatalf("Verdict active: %v", err)
-	}
-
-	if got.Verdict != domain.VerdictActive {
-		t.Fatalf("active verdict = %s, want active", got.Verdict)
-	}
+	got, err := source.Verdict(context.Background(), random.TGID())
+	require.NoError(t, err, "Verdict active")
+	assert.Equal(t, domain.VerdictActive, got.Verdict)
 
 	source = NewManual(fakeWhitelist{}, fakeManualSubs{})
 
-	got, err = source.Verdict(context.Background(), 42)
-	if err != nil {
-		t.Fatalf("Verdict no signal: %v", err)
-	}
-
-	if got.Verdict != domain.VerdictNoSignal {
-		t.Fatalf("empty verdict = %s, want no_signal", got.Verdict)
-	}
+	got, err = source.Verdict(context.Background(), random.TGID())
+	require.NoError(t, err, "Verdict no signal")
+	assert.Equal(t, domain.VerdictNoSignal, got.Verdict)
 }
 
 func TestManualVerdictErrorsBecomeUnknown(t *testing.T) {
@@ -84,26 +73,16 @@ func TestManualVerdictErrorsBecomeUnknown(t *testing.T) {
 		fakeManualSubs{},
 	)
 
-	got, err := source.Verdict(context.Background(), 42)
-	if err != nil {
-		t.Fatalf("Verdict whitelist error: %v", err)
-	}
-
-	if got.Verdict != domain.VerdictUnknown {
-		t.Fatalf("whitelist error verdict = %s, want unknown", got.Verdict)
-	}
+	got, err := source.Verdict(context.Background(), random.TGID())
+	require.NoError(t, err, "Verdict whitelist error")
+	assert.Equal(t, domain.VerdictUnknown, got.Verdict)
 
 	source = NewManual(
 		fakeWhitelist{},
 		fakeManualSubs{err: errors.New("subscriptions unavailable")},
 	)
 
-	got, err = source.Verdict(context.Background(), 42)
-	if err != nil {
-		t.Fatalf("Verdict subscription error: %v", err)
-	}
-
-	if got.Verdict != domain.VerdictUnknown {
-		t.Fatalf("subscription error verdict = %s, want unknown", got.Verdict)
-	}
+	got, err = source.Verdict(context.Background(), random.TGID())
+	require.NoError(t, err, "Verdict subscription error")
+	assert.Equal(t, domain.VerdictUnknown, got.Verdict)
 }

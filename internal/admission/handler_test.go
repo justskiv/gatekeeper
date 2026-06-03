@@ -4,377 +4,303 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
-	"os"
-	"path/filepath"
-	"runtime"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/pressly/goose/v3"
+	"github.com/brianvoe/gofakeit/v7"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/engine"
 	invitepkg "github.com/justskiv/gatekeeper/internal/invite"
+	"github.com/justskiv/gatekeeper/internal/lib/random"
 	"github.com/justskiv/gatekeeper/internal/messages"
 	"github.com/justskiv/gatekeeper/internal/store"
+	"github.com/justskiv/gatekeeper/internal/testutil"
 )
 
 func TestAccessRequestActiveSharedCreatesPendingGrantsAndDM(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(5001)
+	tgID := random.TGID()
+	chatLink := "https://t.me/+" + gofakeit.LetterN(10)
+	channelLink := "https://t.me/+" + gofakeit.LetterN(10)
 
-	seedSharedInvite(t, db, domain.ResourceChat, "https://t.me/+chat")
-	seedSharedInvite(t, db, domain.ResourceChannel, "https://t.me/+channel")
+	seedSharedInvite(t, db, domain.ResourceChat, chatLink)
+	seedSharedInvite(t, db, domain.ResourceChannel, channelLink)
 
 	handler := newTestHandler(db, domain.InviteSharedJoinRequest)
 	for range 2 {
-		if err := handler.HandleAccessRequest(ctx, AccessRequest{
-			User:     domain.User{TGID: tgID, FirstName: "Active"},
+		require.NoError(t, handler.HandleAccessRequest(ctx, AccessRequest{
+			User:     domain.User{TGID: tgID, FirstName: gofakeit.FirstName()},
 			Snapshot: activeSnapshot(tgID),
 			Trigger:  "start",
-		}); err != nil {
-			t.Fatalf("HandleAccessRequest: %v", err)
-		}
+		}), "HandleAccessRequest")
 	}
 
-	if got := countRows(t, db, `
+	assert.Equal(t, 2, countRows(t, db, `
 		SELECT count(*)
 		FROM access_grants
-		WHERE tg_id = ? AND state = 'pending'`, tgID); got != 2 {
-		t.Fatalf("pending grants = %d, want 2", got)
-	}
+		WHERE tg_id = ? AND state = 'pending'`, tgID), "pending grants")
 
-	if got := countActions(t, db, domain.ActionSendDM); got != 1 {
-		t.Fatalf("send_dm actions = %d, want 1", got)
-	}
+	assert.Equal(t, 2, countActions(t, db, domain.ActionSendDM), "send_dm actions")
 
 	payload := firstDMPayload(t, db)
-	if !strings.Contains(payload.Text, "https://t.me/+chat") ||
-		!strings.Contains(payload.Text, "https://t.me/+channel") {
-		t.Fatalf("dm payload = %+v, want shared links", payload)
-	}
-	if payload.ParseMode != messages.ParseModeHTML {
-		t.Fatalf("parse_mode = %q, want HTML", payload.ParseMode)
-	}
+	assert.Contains(t, payload.Text, chatLink, "dm must carry shared chat link")
+	assert.Contains(t, payload.Text, channelLink, "dm must carry shared channel link")
+	assert.Equal(t, messages.ParseModeHTML, payload.ParseMode)
 
-	if got := countActions(t, db, domain.ActionSendInvite); got != 0 {
-		t.Fatalf("send_invite actions = %d, want 0 in shared mode", got)
-	}
+	assert.Equal(t, 0, countActions(t, db, domain.ActionSendInvite),
+		"shared mode must not enqueue send_invite")
 }
 
 func TestAccessRequestInactiveDoesNotCreateGrants(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(5002)
+	tgID := random.TGID()
 
 	handler := newTestHandler(db, domain.InviteSharedJoinRequest)
-	if err := handler.HandleAccessRequest(ctx, AccessRequest{
+	require.NoError(t, handler.HandleAccessRequest(ctx, AccessRequest{
 		User:     domain.User{TGID: tgID},
 		Snapshot: inactiveSnapshot(tgID),
-	}); err != nil {
-		t.Fatalf("HandleAccessRequest: %v", err)
-	}
+	}), "HandleAccessRequest")
 
-	if got := countRows(t, db,
-		`SELECT count(*) FROM access_grants WHERE tg_id = ?`, tgID); got != 0 {
-		t.Fatalf("grants = %d, want none", got)
-	}
+	assert.Equal(t, 0, countRows(t, db,
+		`SELECT count(*) FROM access_grants WHERE tg_id = ?`, tgID), "grants")
 
 	payload := firstDMPayload(t, db)
-	if payload.Text != messages.MsgNoSub {
-		t.Fatalf("dm text = %q, want no-sub", payload.Text)
-	}
+	assert.Equal(t, messages.NoSub(), payload.Text, "dm text")
 }
 
 func TestAccessRequestUnknownUsesFreshLocalFallback(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(5003)
+	tgID := random.TGID()
 	now := time.Unix(1_700_000_000, 0)
 
-	seedSharedInvite(t, db, domain.ResourceChat, "https://t.me/+chat-fallback")
-	seedSharedInvite(t, db, domain.ResourceChannel, "https://t.me/+channel-fallback")
+	seedSharedInvite(t, db, domain.ResourceChat, "https://t.me/+"+gofakeit.LetterN(10))
+	seedSharedInvite(t, db, domain.ResourceChannel, "https://t.me/+"+gofakeit.LetterN(10))
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
-	if _, err := store.NewSubscriptions(db).UpsertActive(ctx, domain.Subscription{
+	_, err := store.NewSubscriptions(db).UpsertActive(ctx, domain.Subscription{
 		TGID:          tgID,
 		Platform:      domain.PlatformBoosty,
 		StartedAt:     now.Add(-time.Hour),
 		LastCheckedAt: &now,
 		LastSignal:    "on_demand",
-	}); err != nil {
-		t.Fatalf("upsert active subscription: %v", err)
-	}
+	})
+	require.NoError(t, err, "upsert active subscription")
 
 	handler := newTestHandler(db, domain.InviteSharedJoinRequest,
 		WithClock(func() time.Time { return now }))
-	if err := handler.HandleAccessRequest(ctx, AccessRequest{
+	require.NoError(t, handler.HandleAccessRequest(ctx, AccessRequest{
 		User:     domain.User{TGID: tgID},
 		Snapshot: unknownSnapshot(tgID),
-	}); err != nil {
-		t.Fatalf("HandleAccessRequest: %v", err)
-	}
+	}), "HandleAccessRequest")
 
-	if got := countRows(t, db, `
+	assert.Equal(t, 2, countRows(t, db, `
 		SELECT count(*)
 		FROM access_grants
-		WHERE tg_id = ? AND state = 'pending'`, tgID); got != 2 {
-		t.Fatalf("pending grants = %d, want fallback to active", got)
-	}
+		WHERE tg_id = ? AND state = 'pending'`, tgID), "pending grants from fallback")
 }
 
 func TestAccessRequestUnknownFallbackUsesFreshestSubscriptionSignal(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(5010)
+	tgID := random.TGID()
 	now := time.Unix(1_700_000_000, 0)
 	lastEventAt := now.Add(-30 * time.Minute)
 	lastCheckedAt := now.Add(-2 * time.Hour)
 
-	seedSharedInvite(t, db, domain.ResourceChat, "https://t.me/+chat-freshest")
-	seedSharedInvite(t, db, domain.ResourceChannel, "https://t.me/+channel-freshest")
+	seedSharedInvite(t, db, domain.ResourceChat, "https://t.me/+"+gofakeit.LetterN(10))
+	seedSharedInvite(t, db, domain.ResourceChannel, "https://t.me/+"+gofakeit.LetterN(10))
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
-	if _, err := store.NewSubscriptions(db).UpsertActive(ctx, domain.Subscription{
+	_, err := store.NewSubscriptions(db).UpsertActive(ctx, domain.Subscription{
 		TGID:          tgID,
 		Platform:      domain.PlatformBoosty,
 		StartedAt:     now.Add(-24 * time.Hour),
 		LastEventAt:   &lastEventAt,
 		LastCheckedAt: &lastCheckedAt,
 		LastSignal:    "event",
-	}); err != nil {
-		t.Fatalf("upsert active subscription: %v", err)
-	}
+	})
+	require.NoError(t, err, "upsert active subscription")
 
 	handler := newTestHandler(db, domain.InviteSharedJoinRequest,
 		WithClock(func() time.Time { return now }))
-	if err := handler.HandleAccessRequest(ctx, AccessRequest{
+	require.NoError(t, handler.HandleAccessRequest(ctx, AccessRequest{
 		User:     domain.User{TGID: tgID},
 		Snapshot: unknownSnapshot(tgID),
-	}); err != nil {
-		t.Fatalf("HandleAccessRequest: %v", err)
-	}
+	}), "HandleAccessRequest")
 
-	if got := countRows(t, db, `
+	assert.Equal(t, 2, countRows(t, db, `
 		SELECT count(*)
 		FROM access_grants
-		WHERE tg_id = ? AND state = 'pending'`, tgID); got != 2 {
-		t.Fatalf("pending grants = %d, want fallback from fresh event", got)
-	}
+		WHERE tg_id = ? AND state = 'pending'`, tgID), "pending grants from fresh event")
 }
 
 func TestAccessRequestBannedSkipsGrantsAndReturnsBanned(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(5004)
+	tgID := random.TGID()
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{
 		TGID:   tgID,
 		Banned: true,
-	}); err != nil {
-		t.Fatalf("upsert banned user: %v", err)
-	}
+	}), "upsert banned user")
 
 	handler := newTestHandler(db, domain.InviteSharedJoinRequest)
-	if err := handler.HandleAccessRequest(ctx, AccessRequest{
+	require.NoError(t, handler.HandleAccessRequest(ctx, AccessRequest{
 		User:     domain.User{TGID: tgID},
 		Snapshot: activeSnapshot(tgID),
-	}); err != nil {
-		t.Fatalf("HandleAccessRequest: %v", err)
-	}
+	}), "HandleAccessRequest")
 
-	if got := countRows(t, db,
-		`SELECT count(*) FROM access_grants WHERE tg_id = ?`, tgID); got != 0 {
-		t.Fatalf("grants = %d, want none", got)
-	}
+	assert.Equal(t, 0, countRows(t, db,
+		`SELECT count(*) FROM access_grants WHERE tg_id = ?`, tgID), "grants")
 
 	payload := firstDMPayload(t, db)
-	if payload.Text != messages.Banned() {
-		t.Fatalf("dm text = %q, want banned", payload.Text)
-	}
+	assert.Equal(t, messages.Banned(), payload.Text, "dm text")
 }
 
 func TestAccessRequestAlreadyInReturnsAlreadyIn(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(5005)
+	tgID := random.TGID()
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
 	grants := store.NewGrants(db)
-	if err := grants.MarkJoined(ctx, tgID, domain.ResourceChat, "bot"); err != nil {
-		t.Fatalf("mark chat joined: %v", err)
-	}
-
-	if err := grants.MarkJoined(ctx, tgID, domain.ResourceChannel, "bot"); err != nil {
-		t.Fatalf("mark channel joined: %v", err)
-	}
+	require.NoError(t, grants.MarkJoined(ctx, tgID, domain.ResourceChat, "bot"),
+		"mark chat joined")
+	require.NoError(t, grants.MarkJoined(ctx, tgID, domain.ResourceChannel, "bot"),
+		"mark channel joined")
 
 	handler := newTestHandler(db, domain.InviteSharedJoinRequest)
-	if err := handler.HandleAccessRequest(ctx, AccessRequest{
+	require.NoError(t, handler.HandleAccessRequest(ctx, AccessRequest{
 		User:     domain.User{TGID: tgID},
 		Snapshot: activeSnapshot(tgID),
-	}); err != nil {
-		t.Fatalf("HandleAccessRequest: %v", err)
-	}
+	}), "HandleAccessRequest")
 
 	payload := firstDMPayload(t, db)
-	if payload.Text != messages.AlreadyIn() {
-		t.Fatalf("dm text = %q, want already-in", payload.Text)
-	}
+	assert.Equal(t, messages.AlreadyIn(), payload.Text, "dm text")
 
-	if got := countActions(t, db, domain.ActionSendInvite); got != 0 {
-		t.Fatalf("send_invite actions = %d, want 0", got)
-	}
+	assert.Equal(t, 0, countActions(t, db, domain.ActionSendInvite),
+		"send_invite actions")
 }
 
 func TestAccessRequestDirectEnqueuesSendInvites(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(5006)
+	tgID := random.TGID()
 
 	handler := newTestHandler(db, domain.InviteDirect)
-	if err := handler.HandleAccessRequest(ctx, AccessRequest{
+	require.NoError(t, handler.HandleAccessRequest(ctx, AccessRequest{
 		User:     domain.User{TGID: tgID},
 		Snapshot: activeSnapshot(tgID),
-	}); err != nil {
-		t.Fatalf("HandleAccessRequest: %v", err)
-	}
+	}), "HandleAccessRequest")
 
-	if got := countActions(t, db, domain.ActionSendInvite); got != 2 {
-		t.Fatalf("send_invite actions = %d, want 2", got)
-	}
+	assert.Equal(t, 2, countActions(t, db, domain.ActionSendInvite),
+		"send_invite actions")
 
-	if got := countRows(t, db, `
+	assert.Equal(t, 2, countRows(t, db, `
 		SELECT count(*)
 		FROM access_grants
-		WHERE tg_id = ? AND state = 'pending'`, tgID); got != 2 {
-		t.Fatalf("pending grants = %d, want 2", got)
-	}
+		WHERE tg_id = ? AND state = 'pending'`, tgID), "pending grants")
 
 	payload := firstDMPayload(t, db)
-	if payload.Text != messages.ActiveDirect() {
-		t.Fatalf("dm text = %q, want direct active", payload.Text)
-	}
+	assert.Equal(t, messages.ActiveDirect(), payload.Text, "dm text")
 }
 
 func TestAccessRequestPersonalLeftGrantCreatesNewSendInviteCycle(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(5008)
+	tgID := random.TGID()
 
 	handler := newTestHandler(db, domain.InvitePersonalJoinRequest)
-	if err := handler.HandleAccessRequest(ctx, AccessRequest{
+	require.NoError(t, handler.HandleAccessRequest(ctx, AccessRequest{
 		User:     domain.User{TGID: tgID},
 		Snapshot: activeSnapshot(tgID),
-	}); err != nil {
-		t.Fatalf("HandleAccessRequest first: %v", err)
-	}
+	}), "HandleAccessRequest first")
 
-	if err := handler.HandleAccessRequest(ctx, AccessRequest{
+	require.NoError(t, handler.HandleAccessRequest(ctx, AccessRequest{
 		User:     domain.User{TGID: tgID},
 		Snapshot: activeSnapshot(tgID),
-	}); err != nil {
-		t.Fatalf("HandleAccessRequest repeated pending: %v", err)
-	}
+	}), "HandleAccessRequest repeated pending")
 
-	if got := countActions(t, db, domain.ActionSendInvite); got != 2 {
-		t.Fatalf("send_invite actions after repeat = %d, want 2", got)
-	}
+	assert.Equal(t, 2, countActions(t, db, domain.ActionSendInvite),
+		"send_invite actions after repeat")
 
 	grants := store.NewGrants(db)
-	if err := grants.MarkJoined(ctx, tgID, domain.ResourceChat, "bot"); err != nil {
-		t.Fatalf("mark joined: %v", err)
-	}
+	require.NoError(t, grants.MarkJoined(ctx, tgID, domain.ResourceChat, "bot"),
+		"mark joined")
 
-	if _, err := grants.MarkLeftUnlessRevoked(ctx, tgID, domain.ResourceChat); err != nil {
-		t.Fatalf("mark left: %v", err)
-	}
+	_, err := grants.MarkLeftUnlessRevoked(ctx, tgID, domain.ResourceChat)
+	require.NoError(t, err, "mark left")
 
-	if err := handler.HandleAccessRequest(ctx, AccessRequest{
+	require.NoError(t, handler.HandleAccessRequest(ctx, AccessRequest{
 		User:     domain.User{TGID: tgID},
 		Snapshot: activeSnapshot(tgID),
-	}); err != nil {
-		t.Fatalf("HandleAccessRequest after left: %v", err)
-	}
+	}), "HandleAccessRequest after left")
 
-	if got := countActions(t, db, domain.ActionSendInvite); got != 3 {
-		t.Fatalf("send_invite actions after left = %d, want 3", got)
-	}
+	assert.Equal(t, 3, countActions(t, db, domain.ActionSendInvite),
+		"send_invite actions after left")
 }
 
 func TestAccessRequestMissingSharedInviteCommitsAlertAndDM(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(5007)
+	tgID := random.TGID()
 
 	handler := newTestHandler(db, domain.InviteSharedJoinRequest)
-	if err := handler.HandleAccessRequest(ctx, AccessRequest{
+	require.NoError(t, handler.HandleAccessRequest(ctx, AccessRequest{
 		User:     domain.User{TGID: tgID},
 		Snapshot: activeSnapshot(tgID),
-	}); err != nil {
-		t.Fatalf("HandleAccessRequest: %v", err)
-	}
+	}), "HandleAccessRequest")
 
-	if got := countRows(t, db,
-		`SELECT count(*) FROM admin_alerts WHERE kind = 'invite_link_missing'`); got != 1 {
-		t.Fatalf("invite_link_missing alerts = %d, want 1", got)
-	}
+	assert.Equal(t, 1, countRows(t, db,
+		`SELECT count(*) FROM admin_alerts WHERE kind = 'invite_link_missing'`),
+		"invite_link_missing alerts")
 
-	if got := countRows(t, db,
-		`SELECT count(*) FROM access_grants WHERE tg_id = ?`, tgID); got != 0 {
-		t.Fatalf("grants = %d, want none", got)
-	}
+	assert.Equal(t, 0, countRows(t, db,
+		`SELECT count(*) FROM access_grants WHERE tg_id = ?`, tgID), "grants")
 
 	payload := firstDMPayload(t, db)
-	if payload.Text != messages.TryLater() || !payload.RetryButton {
-		t.Fatalf("dm payload = %+v, want retry-later with button", payload)
-	}
+	assert.Equal(t, messages.TryLater(), payload.Text, "dm text")
+	assert.True(t, payload.RetryButton, "retry-later dm must carry a button")
 }
 
-func TestAccessRequestRateLimitedBannedReturnsBanned(t *testing.T) {
-	db := newTestDB(t)
+func TestAccessRequestBannedReturnsBanned(t *testing.T) {
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(5009)
+	tgID := random.TGID()
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{
 		TGID:   tgID,
 		Banned: true,
-	}); err != nil {
-		t.Fatalf("upsert banned user: %v", err)
-	}
+	}), "upsert banned user")
 
 	handler := newTestHandler(db, domain.InviteSharedJoinRequest)
-	if err := handler.HandleAccessRequest(ctx, AccessRequest{
-		User:        domain.User{TGID: tgID},
-		Snapshot:    activeSnapshot(tgID),
-		RateLimited: true,
-	}); err != nil {
-		t.Fatalf("HandleAccessRequest: %v", err)
-	}
+	require.NoError(t, handler.HandleAccessRequest(ctx, AccessRequest{
+		User:     domain.User{TGID: tgID},
+		Snapshot: activeSnapshot(tgID),
+	}), "HandleAccessRequest")
 
 	payload := firstDMPayload(t, db)
-	if payload.Text != messages.Banned() {
-		t.Fatalf("dm text = %q, want banned", payload.Text)
-	}
+	assert.Equal(t, messages.Banned(), payload.Text, "dm text")
 }
 
 func TestJoinRequestActiveApproveKeyUsesRequestDate(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(6001)
-	rawLink := "https://t.me/+join-active"
+	tgID := random.TGID()
+	userChatID := random.TGID()
+	rawLink := "https://t.me/+" + gofakeit.LetterN(10)
 
 	seedSharedInvite(t, db, domain.ResourceChat, rawLink)
 
@@ -383,344 +309,273 @@ func TestJoinRequestActiveApproveKeyUsesRequestDate(t *testing.T) {
 		time.Unix(1_700_000_000, 0),
 		time.Unix(1_700_000_100, 0),
 	} {
-		if err := handler.HandleJoinRequest(ctx, JoinRequest{
-			User:        domain.User{TGID: tgID, FirstName: "Join"},
-			UserChatID:  9001,
+		require.NoError(t, handler.HandleJoinRequest(ctx, JoinRequest{
+			User:        domain.User{TGID: tgID, FirstName: gofakeit.FirstName()},
+			UserChatID:  userChatID,
 			Resource:    domain.ResourceChat,
 			InviteLink:  rawLink,
 			RequestDate: date,
 			Snapshot:    activeSnapshot(tgID),
-		}); err != nil {
-			t.Fatalf("HandleJoinRequest %v: %v", date, err)
-		}
+		}), "HandleJoinRequest %v", date)
 	}
 
-	if got := countActions(t, db, domain.ActionApproveJoin); got != 2 {
-		t.Fatalf("approve_join actions = %d, want one per request date", got)
-	}
+	assert.Equal(t, 2, countActions(t, db, domain.ActionApproveJoin),
+		"approve_join actions, one per request date")
 
 	grant, err := store.NewGrants(db).Get(ctx, tgID, domain.ResourceChat)
-	if err != nil {
-		t.Fatalf("get grant: %v", err)
-	}
-
-	if grant.State != domain.GrantJoined || grant.AdmittedBy != "bot" {
-		t.Fatalf("grant = %+v, want joined by bot", grant)
-	}
+	require.NoError(t, err, "get grant")
+	assert.Equal(t, domain.GrantJoined, grant.State)
+	assert.Equal(t, "bot", grant.AdmittedBy)
 
 	payload := firstDMPayload(t, db)
-	if payload.ChatID != 9001 || payload.Text != messages.Granted() {
-		t.Fatalf("dm payload = %+v, want user_chat_id and granted", payload)
-	}
+	assert.Equal(t, userChatID, payload.ChatID, "dm must target user_chat_id")
+	assert.Equal(t, messages.Granted(), payload.Text, "dm text")
 }
 
 func TestJoinRequestMissingInviteLinkSharedFallbackApproves(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(6004)
+	tgID := random.TGID()
 
-	seedSharedInvite(t, db, domain.ResourceChat, "https://t.me/+missing-link")
+	seedSharedInvite(t, db, domain.ResourceChat, "https://t.me/+"+gofakeit.LetterN(10))
 
 	handler := newTestHandler(db, domain.InviteSharedJoinRequest)
-	if err := handler.HandleJoinRequest(ctx, JoinRequest{
+	require.NoError(t, handler.HandleJoinRequest(ctx, JoinRequest{
 		User:        domain.User{TGID: tgID},
-		UserChatID:  9004,
+		UserChatID:  random.TGID(),
 		Resource:    domain.ResourceChat,
 		RequestDate: time.Unix(1_700_000_000, 0),
 		Snapshot:    activeSnapshot(tgID),
-	}); err != nil {
-		t.Fatalf("HandleJoinRequest: %v", err)
-	}
+	}), "HandleJoinRequest")
 
-	if got := countActions(t, db, domain.ActionApproveJoin); got != 1 {
-		t.Fatalf("approve_join actions = %d, want 1", got)
-	}
+	assert.Equal(t, 1, countActions(t, db, domain.ActionApproveJoin),
+		"approve_join actions")
 
 	grant, err := store.NewGrants(db).Get(ctx, tgID, domain.ResourceChat)
-	if err != nil {
-		t.Fatalf("get grant: %v", err)
-	}
-
-	if grant.State != domain.GrantJoined {
-		t.Fatalf("grant state = %s, want joined", grant.State)
-	}
+	require.NoError(t, err, "get grant")
+	assert.Equal(t, domain.GrantJoined, grant.State)
 }
 
 func TestJoinRequestPersonalMisuseDeclinesAndMarksInvite(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	ownerID := int64(6002)
-	requesterID := int64(6003)
-	rawLink := "https://t.me/+personal-misuse"
+	ownerID := random.TGID()
+	requesterID := random.TGID()
+	rawLink := "https://t.me/+" + gofakeit.LetterN(10)
 
 	for _, tgID := range []int64{ownerID, requesterID} {
-		if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-			t.Fatalf("upsert user %d: %v", tgID, err)
-		}
+		require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}),
+			"upsert user %d", tgID)
 	}
 
 	link := seedPersonalInvite(t, db, ownerID, domain.ResourceChat,
 		domain.InvitePersonalJoinRequest, rawLink)
 
 	handler := newTestHandler(db, domain.InvitePersonalJoinRequest)
-	if err := handler.HandleJoinRequest(ctx, JoinRequest{
+	require.NoError(t, handler.HandleJoinRequest(ctx, JoinRequest{
 		User:        domain.User{TGID: requesterID},
-		UserChatID:  9003,
+		UserChatID:  random.TGID(),
 		Resource:    domain.ResourceChat,
 		InviteLink:  rawLink,
 		RequestDate: time.Unix(1_700_000_000, 0),
 		Snapshot:    activeSnapshot(requesterID),
-	}); err != nil {
-		t.Fatalf("HandleJoinRequest: %v", err)
-	}
+	}), "HandleJoinRequest")
 
-	if got := countActions(t, db, domain.ActionDeclineJoin); got != 1 {
-		t.Fatalf("decline_join actions = %d, want 1", got)
-	}
+	assert.Equal(t, 1, countActions(t, db, domain.ActionDeclineJoin),
+		"decline_join actions")
 
 	got, err := store.NewInvites(db).GetByID(ctx, link.ID)
-	if err != nil {
-		t.Fatalf("get invite: %v", err)
-	}
-
-	if got.Status != domain.InviteUsedByOther ||
-		got.AttemptedBy == nil ||
-		*got.AttemptedBy != requesterID {
-		t.Fatalf("invite = %+v, want used_by_other attempted_by requester", got)
-	}
+	require.NoError(t, err, "get invite")
+	assert.Equal(t, domain.InviteUsedByOther, got.Status)
+	require.NotNil(t, got.AttemptedBy, "misuse must record the attempting user")
+	assert.Equal(t, requesterID, *got.AttemptedBy)
 }
 
 func TestJoinRequestBannedDoesNotBurnPersonalInvite(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	ownerID := int64(6005)
-	requesterID := int64(6006)
-	rawLink := "https://t.me/+banned-personal-misuse"
+	ownerID := random.TGID()
+	requesterID := random.TGID()
+	rawLink := "https://t.me/+" + gofakeit.LetterN(10)
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: ownerID}); err != nil {
-		t.Fatalf("upsert owner: %v", err)
-	}
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{TGID: ownerID}),
+		"upsert owner")
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{
 		TGID:   requesterID,
 		Banned: true,
-	}); err != nil {
-		t.Fatalf("upsert banned requester: %v", err)
-	}
+	}), "upsert banned requester")
 
 	link := seedPersonalInvite(t, db, ownerID, domain.ResourceChat,
 		domain.InvitePersonalJoinRequest, rawLink)
 
 	handler := newTestHandler(db, domain.InvitePersonalJoinRequest)
-	if err := handler.HandleJoinRequest(ctx, JoinRequest{
+	require.NoError(t, handler.HandleJoinRequest(ctx, JoinRequest{
 		User:        domain.User{TGID: requesterID},
-		UserChatID:  9006,
+		UserChatID:  random.TGID(),
 		Resource:    domain.ResourceChat,
 		InviteLink:  rawLink,
 		RequestDate: time.Unix(1_700_000_000, 0),
 		Snapshot:    activeSnapshot(requesterID),
-	}); err != nil {
-		t.Fatalf("HandleJoinRequest: %v", err)
-	}
+	}), "HandleJoinRequest")
 
 	got, err := store.NewInvites(db).GetByID(ctx, link.ID)
-	if err != nil {
-		t.Fatalf("get invite: %v", err)
-	}
-
-	if got.Status == domain.InviteUsedByOther || got.AttemptedBy != nil {
-		t.Fatalf("invite = %+v, want not burned by banned requester", got)
-	}
+	require.NoError(t, err, "get invite")
+	assert.NotEqual(t, domain.InviteUsedByOther, got.Status,
+		"banned requester must not burn the invite")
+	assert.Nil(t, got.AttemptedBy, "banned requester must not be recorded")
 
 	payload := firstDMPayload(t, db)
-	if payload.Text != messages.Banned() {
-		t.Fatalf("dm text = %q, want banned", payload.Text)
-	}
+	assert.Equal(t, messages.Banned(), payload.Text, "dm text")
 }
 
 func TestJoinRequestInactiveAndUnknownDecline(t *testing.T) {
 	tests := []struct {
 		name     string
-		snapshot *engine.Snapshot
+		snapshot func(tgID int64) *engine.Snapshot
 		wantText string
 	}{
 		{
 			name:     "inactive",
-			snapshot: inactiveSnapshot(6101),
-			wantText: messages.MsgNoSub,
+			snapshot: inactiveSnapshot,
+			wantText: messages.NoSub(),
 		},
 		{
 			name:     "unknown",
-			snapshot: unknownSnapshot(6101),
+			snapshot: unknownSnapshot,
 			wantText: messages.TryLater(),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			db := newTestDB(t)
+			db := testutil.NewDB(t)
 			ctx := context.Background()
-			tgID := int64(6101)
-			rawLink := "https://t.me/+join-decline-" + tt.name
+			tgID := random.TGID()
+			rawLink := "https://t.me/+" + gofakeit.LetterN(10)
 
 			seedSharedInvite(t, db, domain.ResourceChat, rawLink)
 
 			handler := newTestHandler(db, domain.InviteSharedJoinRequest)
-			if err := handler.HandleJoinRequest(ctx, JoinRequest{
+			require.NoError(t, handler.HandleJoinRequest(ctx, JoinRequest{
 				User:        domain.User{TGID: tgID},
-				UserChatID:  9101,
+				UserChatID:  random.TGID(),
 				Resource:    domain.ResourceChat,
 				InviteLink:  rawLink,
 				RequestDate: time.Unix(1_700_000_000, 0),
-				Snapshot:    tt.snapshot,
-			}); err != nil {
-				t.Fatalf("HandleJoinRequest: %v", err)
-			}
+				Snapshot:    tt.snapshot(tgID),
+			}), "HandleJoinRequest")
 
-			if got := countActions(t, db, domain.ActionDeclineJoin); got != 1 {
-				t.Fatalf("decline_join actions = %d, want 1", got)
-			}
+			assert.Equal(t, 1, countActions(t, db, domain.ActionDeclineJoin),
+				"decline_join actions")
 
 			payload := firstDMPayload(t, db)
-			if payload.Text != tt.wantText {
-				t.Fatalf("dm text = %q, want %q", payload.Text, tt.wantText)
-			}
+			assert.Equal(t, tt.wantText, payload.Text, "dm text")
 		})
 	}
 }
 
 func TestMembershipExternalJoinAlertsWithoutKick(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(7001)
+	tgID := random.TGID()
 
 	handler := newTestHandler(db, domain.InviteSharedJoinRequest)
-	if err := handler.HandleMembershipUpdate(ctx, MembershipUpdate{
+	require.NoError(t, handler.HandleMembershipUpdate(ctx, MembershipUpdate{
 		User:     domain.User{TGID: tgID},
 		Resource: domain.ResourceChat,
 		Joined:   true,
-	}); err != nil {
-		t.Fatalf("HandleMembershipUpdate: %v", err)
-	}
+	}), "HandleMembershipUpdate")
 
 	grant, err := store.NewGrants(db).Get(ctx, tgID, domain.ResourceChat)
-	if err != nil {
-		t.Fatalf("get grant: %v", err)
-	}
+	require.NoError(t, err, "get grant")
+	assert.Equal(t, domain.GrantJoined, grant.State)
+	assert.Equal(t, "external", grant.AdmittedBy)
 
-	if grant.State != domain.GrantJoined || grant.AdmittedBy != "external" {
-		t.Fatalf("grant = %+v, want external joined", grant)
-	}
+	assert.Equal(t, 0, countActions(t, db, domain.ActionSoftKick), "soft_kick actions")
 
-	if got := countActions(t, db, domain.ActionSoftKick); got != 0 {
-		t.Fatalf("soft_kick actions = %d, want none", got)
-	}
-
-	if got := countRows(t, db,
-		`SELECT count(*) FROM admin_alerts WHERE kind = 'external_join'`); got != 1 {
-		t.Fatalf("external_join alerts = %d, want 1", got)
-	}
+	assert.Equal(t, 1, countRows(t, db,
+		`SELECT count(*) FROM admin_alerts WHERE kind = 'external_join'`),
+		"external_join alerts")
 }
 
 func TestMembershipBannedExternalJoinHardBansWithoutGrant(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(7007)
+	tgID := random.TGID()
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{
 		TGID:   tgID,
 		Banned: true,
-	}); err != nil {
-		t.Fatalf("upsert banned user: %v", err)
-	}
+	}), "upsert banned user")
 
 	handler := newTestHandler(db, domain.InviteSharedJoinRequest)
-	if err := handler.HandleMembershipUpdate(ctx, MembershipUpdate{
+	require.NoError(t, handler.HandleMembershipUpdate(ctx, MembershipUpdate{
 		User:      domain.User{TGID: tgID},
 		Resource:  domain.ResourceChat,
 		Joined:    true,
 		EventDate: time.Unix(1_700_000_000, 0),
-	}); err != nil {
-		t.Fatalf("HandleMembershipUpdate: %v", err)
-	}
+	}), "HandleMembershipUpdate")
 
-	if _, err := store.NewGrants(db).Get(ctx, tgID, domain.ResourceChat); err == nil {
-		t.Fatal("grant exists for banned external join, want none")
-	} else if !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("get grant: %v", err)
-	}
+	_, err := store.NewGrants(db).Get(ctx, tgID, domain.ResourceChat)
+	require.ErrorIs(t, err, store.ErrNotFound,
+		"banned external join must not create a grant")
 
-	if got := countActions(t, db, domain.ActionHardBan); got != 1 {
-		t.Fatalf("hard_ban actions = %d, want one", got)
-	}
+	assert.Equal(t, 1, countActions(t, db, domain.ActionHardBan), "hard_ban actions")
 }
 
 func TestMembershipDirectInactiveSoftKicks(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(7002)
-	rawLink := "https://t.me/+direct-inactive"
+	tgID := random.TGID()
+	rawLink := "https://t.me/+" + gofakeit.LetterN(10)
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
 	seedPersonalInvite(t, db, tgID, domain.ResourceChat, domain.InviteDirect, rawLink)
 
 	handler := newTestHandler(db, domain.InviteDirect)
-	if err := handler.HandleMembershipUpdate(ctx, MembershipUpdate{
+	require.NoError(t, handler.HandleMembershipUpdate(ctx, MembershipUpdate{
 		User:       domain.User{TGID: tgID},
 		Resource:   domain.ResourceChat,
 		Joined:     true,
 		InviteLink: rawLink,
 		Snapshot:   inactiveSnapshot(tgID),
-	}); err != nil {
-		t.Fatalf("HandleMembershipUpdate: %v", err)
-	}
+	}), "HandleMembershipUpdate")
 
-	if got := countActions(t, db, domain.ActionSoftKick); got != 1 {
-		t.Fatalf("soft_kick actions = %d, want 1", got)
-	}
+	assert.Equal(t, 1, countActions(t, db, domain.ActionSoftKick), "soft_kick actions")
 }
 
 func TestMembershipDirectPendingGrantInactiveSoftKicks(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(7004)
+	tgID := random.TGID()
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
-	if _, err := store.NewGrants(db).MarkPending(
-		ctx, tgID, domain.ResourceChat,
-	); err != nil {
-		t.Fatalf("mark pending grant: %v", err)
-	}
+	_, err := store.NewGrants(db).MarkPending(ctx, tgID, domain.ResourceChat)
+	require.NoError(t, err, "mark pending grant")
 
 	handler := newTestHandler(db, domain.InviteDirect)
-	if err := handler.HandleMembershipUpdate(ctx, MembershipUpdate{
+	require.NoError(t, handler.HandleMembershipUpdate(ctx, MembershipUpdate{
 		User:     domain.User{TGID: tgID},
 		Resource: domain.ResourceChat,
 		Joined:   true,
 		Snapshot: inactiveSnapshot(tgID),
-	}); err != nil {
-		t.Fatalf("HandleMembershipUpdate: %v", err)
-	}
+	}), "HandleMembershipUpdate")
 
-	if got := countActions(t, db, domain.ActionSoftKick); got != 1 {
-		t.Fatalf("soft_kick actions = %d, want 1", got)
-	}
+	assert.Equal(t, 1, countActions(t, db, domain.ActionSoftKick), "soft_kick actions")
 }
 
 func TestMembershipDirectInactiveSoftKickUsesEventCycle(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(7006)
+	tgID := random.TGID()
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
 	handler := newTestHandler(db, domain.InviteDirect)
 	for _, eventDate := range []time.Time{
@@ -728,106 +583,79 @@ func TestMembershipDirectInactiveSoftKickUsesEventCycle(t *testing.T) {
 		time.Unix(1_700_000_000, 0),
 		time.Unix(1_700_000_060, 0),
 	} {
-		if _, err := store.NewGrants(db).MarkPending(
-			ctx, tgID, domain.ResourceChat,
-		); err != nil {
-			t.Fatalf("mark pending grant: %v", err)
-		}
+		_, err := store.NewGrants(db).MarkPending(ctx, tgID, domain.ResourceChat)
+		require.NoError(t, err, "mark pending grant")
 
-		if err := handler.HandleMembershipUpdate(ctx, MembershipUpdate{
+		require.NoError(t, handler.HandleMembershipUpdate(ctx, MembershipUpdate{
 			User:      domain.User{TGID: tgID},
 			Resource:  domain.ResourceChat,
 			Joined:    true,
 			EventDate: eventDate,
 			Snapshot:  inactiveSnapshot(tgID),
-		}); err != nil {
-			t.Fatalf("HandleMembershipUpdate %v: %v", eventDate, err)
-		}
+		}), "HandleMembershipUpdate %v", eventDate)
 	}
 
-	if got := countActions(t, db, domain.ActionSoftKick); got != 2 {
-		t.Fatalf("soft_kick actions = %d, want 2", got)
-	}
+	assert.Equal(t, 2, countActions(t, db, domain.ActionSoftKick), "soft_kick actions")
 }
 
 func TestMembershipLeftPreservesRevokedGrant(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(7003)
+	tgID := random.TGID()
 	now := time.Unix(1_700_000_000, 0)
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
-	if err := store.NewGrants(db).Upsert(ctx, domain.AccessGrant{
+	require.NoError(t, store.NewGrants(db).Upsert(ctx, domain.AccessGrant{
 		TGID:      tgID,
 		Resource:  domain.ResourceChat,
 		State:     domain.GrantRevoked,
 		RevokedAt: &now,
-	}); err != nil {
-		t.Fatalf("upsert revoked grant: %v", err)
-	}
+	}), "upsert revoked grant")
 
 	handler := newTestHandler(db, domain.InviteSharedJoinRequest)
-	if err := handler.HandleMembershipUpdate(ctx, MembershipUpdate{
+	require.NoError(t, handler.HandleMembershipUpdate(ctx, MembershipUpdate{
 		User:     domain.User{TGID: tgID},
 		Resource: domain.ResourceChat,
 		Joined:   false,
-	}); err != nil {
-		t.Fatalf("HandleMembershipUpdate: %v", err)
-	}
+	}), "HandleMembershipUpdate")
 
 	grant, err := store.NewGrants(db).Get(ctx, tgID, domain.ResourceChat)
-	if err != nil {
-		t.Fatalf("get grant: %v", err)
-	}
-
-	if grant.State != domain.GrantRevoked {
-		t.Fatalf("grant state = %s, want revoked", grant.State)
-	}
+	require.NoError(t, err, "get grant")
+	assert.Equal(t, domain.GrantRevoked, grant.State)
 }
 
 func TestMembershipJoinPreservesRevokedGrant(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(7005)
+	tgID := random.TGID()
 	now := time.Unix(1_700_000_000, 0)
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
-	if err := store.NewGrants(db).Upsert(ctx, domain.AccessGrant{
+	require.NoError(t, store.NewGrants(db).Upsert(ctx, domain.AccessGrant{
 		TGID:          tgID,
 		Resource:      domain.ResourceChat,
 		State:         domain.GrantRevoked,
 		AdmittedBy:    "bot",
 		RevokedAt:     &now,
 		RevokedReason: "manual",
-	}); err != nil {
-		t.Fatalf("upsert revoked grant: %v", err)
-	}
+	}), "upsert revoked grant")
 
 	handler := newTestHandler(db, domain.InviteSharedJoinRequest)
-	if err := handler.HandleMembershipUpdate(ctx, MembershipUpdate{
+	require.NoError(t, handler.HandleMembershipUpdate(ctx, MembershipUpdate{
 		User:     domain.User{TGID: tgID},
 		Resource: domain.ResourceChat,
 		Joined:   true,
-	}); err != nil {
-		t.Fatalf("HandleMembershipUpdate: %v", err)
-	}
+	}), "HandleMembershipUpdate")
 
 	grant, err := store.NewGrants(db).Get(ctx, tgID, domain.ResourceChat)
-	if err != nil {
-		t.Fatalf("get grant: %v", err)
-	}
-
-	if grant.State != domain.GrantRevoked ||
-		grant.RevokedAt == nil ||
-		grant.RevokedReason != "manual" {
-		t.Fatalf("grant = %+v, want revoked preserved", grant)
-	}
+	require.NoError(t, err, "get grant")
+	assert.Equal(t, domain.GrantRevoked, grant.State)
+	require.NotNil(t, grant.RevokedAt, "revoked_at must be preserved")
+	assert.Equal(t, "manual", grant.RevokedReason)
 }
 
 func newTestHandler(
@@ -871,12 +699,10 @@ func seedSharedInvite(
 			Mode:               domain.InviteSharedJoinRequest,
 			InviteLink:         rawLink,
 			InviteLinkHash:     invitepkg.HashInviteLink(rawLink),
-			TelegramName:       "gk-shared",
+			TelegramName:       gofakeit.Username(),
 			CreatesJoinRequest: true,
 		})
-	if err != nil {
-		t.Fatalf("save shared invite: %v", err)
-	}
+	require.NoError(t, err, "save shared invite")
 
 	return link
 }
@@ -898,12 +724,10 @@ func seedPersonalInvite(
 			Mode:               mode,
 			InviteLink:         rawLink,
 			InviteLinkHash:     invitepkg.HashInviteLink(rawLink),
-			TelegramName:       "gk-personal",
+			TelegramName:       gofakeit.Username(),
 			CreatesJoinRequest: mode != domain.InviteDirect,
 		})
-	if err != nil {
-		t.Fatalf("save personal invite: %v", err)
-	}
+	require.NoError(t, err, "save personal invite")
 
 	return link
 }
@@ -956,9 +780,9 @@ func countRows(t *testing.T, db *sql.DB, query string, args ...any) int {
 	t.Helper()
 
 	var n int
-	if err := db.QueryRowContext(context.Background(), query, args...).Scan(&n); err != nil {
-		t.Fatalf("count rows: %v", err)
-	}
+	require.NoError(t,
+		db.QueryRowContext(context.Background(), query, args...).Scan(&n),
+		"count rows")
 
 	return n
 }
@@ -967,53 +791,15 @@ func firstDMPayload(t *testing.T, db *sql.DB) sendDMPayload {
 	t.Helper()
 
 	var raw string
-	if err := db.QueryRowContext(context.Background(), `
+	require.NoError(t, db.QueryRowContext(context.Background(), `
 		SELECT payload_json
 		FROM access_actions
 		WHERE action_type = ?
 		ORDER BY id
-		LIMIT 1`, string(domain.ActionSendDM)).Scan(&raw); err != nil {
-		t.Fatalf("read action payload: %v", err)
-	}
+		LIMIT 1`, string(domain.ActionSendDM)).Scan(&raw), "read action payload")
 
 	var payload sendDMPayload
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		t.Fatalf("decode action payload: %v", err)
-	}
+	require.NoError(t, json.Unmarshal([]byte(raw), &payload), "decode action payload")
 
 	return payload
-}
-
-func newTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-
-	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("open database: %v", err)
-	}
-
-	t.Cleanup(func() { _ = db.Close() })
-
-	provider, err := goose.NewProvider(
-		goose.DialectSQLite3, db, os.DirFS(migrationsDir(t)))
-	if err != nil {
-		t.Fatalf("new goose provider: %v", err)
-	}
-
-	if _, err := provider.Up(context.Background()); err != nil {
-		t.Fatalf("apply migrations: %v", err)
-	}
-
-	return db
-}
-
-func migrationsDir(t *testing.T) string {
-	t.Helper()
-
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-
-	return filepath.Join(filepath.Dir(file), "..", "..", "migrations")
 }

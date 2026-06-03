@@ -3,21 +3,20 @@ package invite
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
-	"runtime"
-	"strings"
 	"testing"
 	"time"
 
+	"github.com/brianvoe/gofakeit/v7"
 	"github.com/go-telegram/bot/models"
-	"github.com/pressly/goose/v3"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/justskiv/gatekeeper/internal/domain"
+	"github.com/justskiv/gatekeeper/internal/lib/random"
 	"github.com/justskiv/gatekeeper/internal/store"
+	"github.com/justskiv/gatekeeper/internal/testutil"
 )
 
 type fakeLinkManager struct {
@@ -48,7 +47,7 @@ func (m *fakeLinkManager) RevokeChatInviteLink(
 }
 
 func TestSharedInviteIsReused(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	manager := &fakeLinkManager{}
 	service := New(manager, store.NewInvites(db), Config{
@@ -57,30 +56,19 @@ func TestSharedInviteIsReused(t *testing.T) {
 	})
 
 	first, err := service.Ensure(ctx, EnsureRequest{Resource: domain.ResourceChat})
-	if err != nil {
-		t.Fatalf("ensure first: %v", err)
-	}
+	require.NoError(t, err, "ensure first")
 
 	second, err := service.Ensure(ctx, EnsureRequest{Resource: domain.ResourceChat})
-	if err != nil {
-		t.Fatalf("ensure second: %v", err)
-	}
+	require.NoError(t, err, "ensure second")
 
-	if first.ID != second.ID {
-		t.Fatalf("ids = %d/%d, want shared reuse", first.ID, second.ID)
-	}
-
-	if manager.calls != 1 {
-		t.Fatalf("create calls = %d, want 1", manager.calls)
-	}
-
-	if !manager.params[0].CreatesJoinRequest {
-		t.Fatal("shared link was not created as join-request link")
-	}
+	assert.Equal(t, first.ID, second.ID, "shared reuse")
+	assert.Equal(t, 1, manager.calls, "create calls")
+	assert.True(t, manager.params[0].CreatesJoinRequest,
+		"shared link must be a join-request link")
 }
 
 func TestSharedModeCreatesChatAndChannelActiveLinks(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	manager := &fakeLinkManager{}
 	service := New(manager, store.NewInvites(db), Config{
@@ -93,31 +81,23 @@ func TestSharedModeCreatesChatAndChannelActiveLinks(t *testing.T) {
 		domain.ResourceChat,
 		domain.ResourceChannel,
 	} {
-		if _, err := service.Ensure(ctx, EnsureRequest{
-			Resource: resource,
-		}); err != nil {
-			t.Fatalf("ensure %s: %v", resource, err)
-		}
+		_, err := service.Ensure(ctx, EnsureRequest{Resource: resource})
+		require.NoError(t, err, "ensure %s", resource)
 	}
 
 	var links int
-	if err := db.QueryRowContext(ctx, `
+	require.NoError(t, db.QueryRowContext(ctx, `
 		SELECT count(*)
 		FROM invite_links
 		WHERE status = 'created'
 		  AND creates_join_request = 1
 		  AND mode = 'shared_join_request'`,
-	).Scan(&links); err != nil {
-		t.Fatalf("count shared links: %v", err)
-	}
-
-	if links != 2 {
-		t.Fatalf("shared links = %d, want chat and channel", links)
-	}
+	).Scan(&links), "count shared links")
+	assert.Equal(t, 2, links, "chat and channel links")
 }
 
 func TestTelegramInviteNamesFitBotAPILimit(t *testing.T) {
-	nonce := "0123456789abcdef"
+	nonce := gofakeit.LetterN(16)
 
 	for _, mode := range []domain.InviteMode{
 		domain.InviteSharedJoinRequest,
@@ -129,23 +109,20 @@ func TestTelegramInviteNamesFitBotAPILimit(t *testing.T) {
 			domain.ResourceChannel,
 		} {
 			name := telegramName(mode, resource, nonce)
-			if len(name) > maxTelegramInviteNameLen {
-				t.Fatalf("telegram name %q length = %d, want <= %d",
-					name, len(name), maxTelegramInviteNameLen)
-			}
+			assert.LessOrEqualf(t, len(name), maxTelegramInviteNameLen,
+				"telegram name %q length", name)
 		}
 	}
 }
 
 func TestPersonalInviteIsReusedUntilTTL(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(3001)
+	tgID := random.TGID()
 	now := time.Unix(1_700_000_000, 0)
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
 	manager := &fakeLinkManager{}
 	service := New(manager, store.NewInvites(db), Config{
@@ -153,43 +130,36 @@ func TestPersonalInviteIsReusedUntilTTL(t *testing.T) {
 		TTL:        time.Hour,
 		ClubChatID: -1001,
 	}, WithClock(func() time.Time { return now }), WithNonce(func() (string, error) {
-		return "nonce", nil
+		return gofakeit.LetterN(8), nil
 	}))
 
 	first, err := service.Ensure(ctx, EnsureRequest{
 		TGID:     &tgID,
 		Resource: domain.ResourceChat,
 	})
-	if err != nil {
-		t.Fatalf("ensure first: %v", err)
-	}
+	require.NoError(t, err, "ensure first")
 
 	second, err := service.Ensure(ctx, EnsureRequest{
 		TGID:     &tgID,
 		Resource: domain.ResourceChat,
 	})
-	if err != nil {
-		t.Fatalf("ensure second: %v", err)
-	}
+	require.NoError(t, err, "ensure second")
 
-	if first.ID != second.ID || manager.calls != 1 {
-		t.Fatalf("reuse = ids %d/%d calls %d, want same id and one call",
-			first.ID, second.ID, manager.calls)
-	}
+	assert.Equal(t, first.ID, second.ID, "personal reuse keeps one id")
+	assert.Equal(t, 1, manager.calls, "create calls")
 
-	if second.ExpiresAt == nil || !second.ExpiresAt.Equal(now.Add(time.Hour)) {
-		t.Fatalf("expires_at = %v, want %v", second.ExpiresAt, now.Add(time.Hour))
-	}
+	require.NotNil(t, second.ExpiresAt)
+	assert.True(t, second.ExpiresAt.Equal(now.Add(time.Hour)),
+		"expires_at tracks ttl")
 }
 
 func TestDirectInviteTTLGuardAndParams(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(3002)
+	tgID := random.TGID()
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
 	manager := &fakeLinkManager{}
 	guarded := New(manager, store.NewInvites(db), Config{
@@ -198,12 +168,11 @@ func TestDirectInviteTTLGuardAndParams(t *testing.T) {
 		ClubChatID: -1001,
 	})
 
-	if _, err := guarded.Ensure(ctx, EnsureRequest{
+	_, err := guarded.Ensure(ctx, EnsureRequest{
 		TGID:     &tgID,
 		Resource: domain.ResourceChat,
-	}); err == nil {
-		t.Fatal("direct invite with ttl > 1h succeeded, want error")
-	}
+	})
+	require.Error(t, err, "direct invite with ttl > 1h must fail")
 
 	allowed := New(manager, store.NewInvites(db), Config{
 		Mode:       domain.InviteDirect,
@@ -211,21 +180,19 @@ func TestDirectInviteTTLGuardAndParams(t *testing.T) {
 		ClubChatID: -1001,
 	})
 
-	if _, err := allowed.Ensure(ctx, EnsureRequest{
+	_, err = allowed.Ensure(ctx, EnsureRequest{
 		TGID:     &tgID,
 		Resource: domain.ResourceChat,
-	}); err != nil {
-		t.Fatalf("direct ensure: %v", err)
-	}
+	})
+	require.NoError(t, err, "direct ensure")
 
 	got := manager.params[len(manager.params)-1]
-	if got.CreatesJoinRequest || got.MemberLimit != 1 {
-		t.Fatalf("direct params = %+v, want no join request and member limit 1", got)
-	}
+	assert.False(t, got.CreatesJoinRequest, "direct link must not join-request")
+	assert.Equal(t, 1, got.MemberLimit, "direct link member limit")
 }
 
 func TestInviteServiceLogsHashWithoutFullURL(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 
 	var buf bytes.Buffer
@@ -239,72 +206,62 @@ func TestInviteServiceLogsHashWithoutFullURL(t *testing.T) {
 		Mode:       domain.InviteSharedJoinRequest,
 		ClubChatID: -1001,
 	}, WithLogger(logger), WithNonce(func() (string, error) {
-		return "nonce", nil
+		return gofakeit.LetterN(8), nil
 	}))
 
 	link, err := service.Ensure(ctx, EnsureRequest{Resource: domain.ResourceChat})
-	if err != nil {
-		t.Fatalf("ensure: %v", err)
-	}
+	require.NoError(t, err, "ensure")
 
 	logLine := buf.String()
-	if strings.Contains(logLine, link.InviteLink) ||
-		strings.Contains(logLine, "https://t.me/") {
-		t.Fatalf("log leaks invite URL: %s", logLine)
-	}
-
-	if !strings.Contains(logLine, link.InviteLinkHash) {
-		t.Fatalf("log = %s, want invite_link_hash %s", logLine, link.InviteLinkHash)
-	}
+	assert.NotContains(t, logLine, link.InviteLink, "log must not leak invite URL")
+	assert.NotContains(t, logLine, "https://t.me/", "log must not leak invite URL")
+	assert.Contains(t, logLine, link.InviteLinkHash, "log must record invite_link_hash")
 }
 
 func TestResolveJoinRequestSharedMissingLinkFallback(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	service := New(nil, store.NewInvites(db), Config{
 		Mode:       domain.InviteSharedJoinRequest,
 		ClubChatID: -1001,
 	})
 
-	if _, err := store.NewInvites(db).SaveCreated(ctx, store.InviteLinkInput{
+	rawLink := "https://t.me/+" + gofakeit.LetterN(12)
+
+	_, err := store.NewInvites(db).SaveCreated(ctx, store.InviteLinkInput{
 		Resource:           domain.ResourceChat,
 		Mode:               domain.InviteSharedJoinRequest,
-		InviteLink:         "https://t.me/+shared-resolve",
-		InviteLinkHash:     HashInviteLink("https://t.me/+shared-resolve"),
-		TelegramName:       "gk-shared",
+		InviteLink:         rawLink,
+		InviteLinkHash:     HashInviteLink(rawLink),
+		TelegramName:       gofakeit.Username(),
 		CreatesJoinRequest: true,
-	}); err != nil {
-		t.Fatalf("save shared invite: %v", err)
-	}
+	})
+	require.NoError(t, err, "save shared invite")
 
 	result, err := service.ResolveJoinRequest(ctx, ResolveRequest{
-		TGID:     4001,
+		TGID:     random.TGID(),
 		Resource: domain.ResourceChat,
 		Mode:     domain.InviteSharedJoinRequest,
 	})
-	if err != nil {
-		t.Fatalf("ResolveJoinRequest: %v", err)
-	}
+	require.NoError(t, err, "ResolveJoinRequest")
 
-	if !result.Accepted() || result.Status != ResolveSafeFallback {
-		t.Fatalf("resolution = %+v, want accepted safe fallback", result)
-	}
+	require.True(t, result.Accepted(), "missing-link shared request must be accepted")
+	assert.Equal(t, ResolveSafeFallback, result.Status)
 }
 
 func TestResolveJoinRequestPersonalMisuseMarksAttemptedBy(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	ownerID := int64(4002)
-	requesterID := int64(4003)
+	ownerID := random.TGID()
+	requesterID := random.TGID()
 
 	users := store.NewUsers(db)
 	for _, tgID := range []int64{ownerID, requesterID} {
-		if err := users.Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-			t.Fatalf("upsert user %d: %v", tgID, err)
-		}
+		require.NoError(t, users.Upsert(ctx, domain.User{TGID: tgID}),
+			"upsert user %d", tgID)
 	}
 
-	rawLink := "https://t.me/+personal-resolve"
+	rawLink := "https://t.me/+" + gofakeit.LetterN(12)
 
 	link, err := store.NewInvites(db).SaveCreated(ctx, store.InviteLinkInput{
 		TGID:               &ownerID,
@@ -312,12 +269,10 @@ func TestResolveJoinRequestPersonalMisuseMarksAttemptedBy(t *testing.T) {
 		Mode:               domain.InvitePersonalJoinRequest,
 		InviteLink:         rawLink,
 		InviteLinkHash:     HashInviteLink(rawLink),
-		TelegramName:       "gk-personal",
+		TelegramName:       gofakeit.Username(),
 		CreatesJoinRequest: true,
 	})
-	if err != nil {
-		t.Fatalf("save personal invite: %v", err)
-	}
+	require.NoError(t, err, "save personal invite")
 
 	service := New(nil, store.NewInvites(db), Config{
 		Mode:       domain.InvitePersonalJoinRequest,
@@ -330,56 +285,14 @@ func TestResolveJoinRequestPersonalMisuseMarksAttemptedBy(t *testing.T) {
 		Mode:       domain.InvitePersonalJoinRequest,
 		InviteLink: rawLink,
 	})
-	if err != nil {
-		t.Fatalf("ResolveJoinRequest: %v", err)
-	}
+	require.NoError(t, err, "ResolveJoinRequest")
 
-	if result.Status != ResolveUsedByOther || result.Accepted() {
-		t.Fatalf("resolution = %+v, want used_by_other", result)
-	}
+	assert.Equal(t, ResolveUsedByOther, result.Status)
+	assert.False(t, result.Accepted(), "personal misuse must not be accepted")
 
 	got, err := store.NewInvites(db).GetByID(ctx, link.ID)
-	if err != nil {
-		t.Fatalf("get invite: %v", err)
-	}
-
-	if got.Status != domain.InviteUsedByOther ||
-		got.AttemptedBy == nil ||
-		*got.AttemptedBy != requesterID {
-		t.Fatalf("invite = %+v, want attempted_by requester", got)
-	}
-}
-
-func newTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-
-	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("open database: %v", err)
-	}
-
-	t.Cleanup(func() { _ = db.Close() })
-
-	provider, err := goose.NewProvider(
-		goose.DialectSQLite3, db, os.DirFS(migrationsDir(t)))
-	if err != nil {
-		t.Fatalf("new goose provider: %v", err)
-	}
-
-	if _, err := provider.Up(context.Background()); err != nil {
-		t.Fatalf("apply migrations: %v", err)
-	}
-
-	return db
-}
-
-func migrationsDir(t *testing.T) string {
-	t.Helper()
-
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-
-	return filepath.Join(filepath.Dir(file), "..", "..", "migrations")
+	require.NoError(t, err, "get invite")
+	assert.Equal(t, domain.InviteUsedByOther, got.Status)
+	require.NotNil(t, got.AttemptedBy, "misuse must record the attempting user")
+	assert.Equal(t, requesterID, *got.AttemptedBy)
 }

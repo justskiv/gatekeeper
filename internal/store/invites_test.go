@@ -5,7 +5,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/brianvoe/gofakeit/v7"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/justskiv/gatekeeper/internal/domain"
+	"github.com/justskiv/gatekeeper/internal/lib/random"
 )
 
 func TestInvitesActiveSharedLookupReturnsOneLink(t *testing.T) {
@@ -13,110 +18,76 @@ func TestInvitesActiveSharedLookupReturnsOneLink(t *testing.T) {
 	ctx := context.Background()
 	invites := NewInvites(db)
 
+	hash := "hash-" + gofakeit.UUID()
+
 	saved, err := invites.SaveCreated(ctx, InviteLinkInput{
 		Resource:           domain.ResourceChat,
 		Mode:               domain.InviteSharedJoinRequest,
-		InviteLink:         "https://t.me/+shared",
-		InviteLinkHash:     "hash-shared",
-		TelegramName:       "gk-shared-chat",
+		InviteLink:         "https://t.me/+" + gofakeit.LetterN(10),
+		InviteLinkHash:     hash,
+		TelegramName:       gofakeit.Username(),
 		CreatesJoinRequest: true,
 	})
-	if err != nil {
-		t.Fatalf("save shared invite: %v", err)
-	}
+	require.NoError(t, err, "save shared invite")
 
 	got, ok, err := invites.FindActiveShared(
 		ctx, domain.ResourceChat, domain.InviteSharedJoinRequest)
-	if err != nil {
-		t.Fatalf("FindActiveShared: %v", err)
-	}
+	require.NoError(t, err, "FindActiveShared")
+	require.True(t, ok, "an active shared link must be found")
+	assert.Equal(t, saved.ID, got.ID)
+	assert.True(t, got.CreatesJoinRequest)
 
-	if !ok || got.ID != saved.ID || !got.CreatesJoinRequest {
-		t.Fatalf("shared link = (%+v, %v), want saved active link", got, ok)
-	}
-
-	byHash, ok, err := invites.FindActiveByHash(
-		ctx, domain.ResourceChat, "hash-shared")
-	if err != nil {
-		t.Fatalf("FindActiveByHash: %v", err)
-	}
-
-	if !ok || byHash.ID != saved.ID {
-		t.Fatalf("hash lookup = (%+v, %v), want saved link", byHash, ok)
-	}
+	byHash, ok, err := invites.FindActiveByHash(ctx, domain.ResourceChat, hash)
+	require.NoError(t, err, "FindActiveByHash")
+	require.True(t, ok, "an active link must be found by hash")
+	assert.Equal(t, saved.ID, byHash.ID)
 }
 
 func TestInvitesExpiredPersonalLinkFreesActiveSlot(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
-	tgID := int64(2001)
+	tgID := random.TGID()
 	expiresAt := time.Now().Add(time.Hour)
 
-	if err := NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
 	invites := NewInvites(db)
 
-	first, err := invites.SaveCreated(ctx, InviteLinkInput{
-		TGID:               &tgID,
-		Resource:           domain.ResourceChat,
-		Mode:               domain.InvitePersonalJoinRequest,
-		InviteLink:         "https://t.me/+personal-1",
-		InviteLinkHash:     "hash-personal-1",
-		TelegramName:       "gk-personal-1",
-		Nonce:              "one",
-		CreatesJoinRequest: true,
-		ExpiresAt:          &expiresAt,
-	})
-	if err != nil {
-		t.Fatalf("save first invite: %v", err)
+	personal := func(suffix string) InviteLinkInput {
+		return InviteLinkInput{
+			TGID:               &tgID,
+			Resource:           domain.ResourceChat,
+			Mode:               domain.InvitePersonalJoinRequest,
+			InviteLink:         "https://t.me/+" + suffix,
+			InviteLinkHash:     "hash-" + suffix,
+			TelegramName:       "gk-" + suffix,
+			Nonce:              suffix,
+			CreatesJoinRequest: true,
+			ExpiresAt:          &expiresAt,
+		}
 	}
 
-	if _, err := invites.SaveCreated(ctx, InviteLinkInput{
-		TGID:               &tgID,
-		Resource:           domain.ResourceChat,
-		Mode:               domain.InvitePersonalJoinRequest,
-		InviteLink:         "https://t.me/+personal-2",
-		InviteLinkHash:     "hash-personal-2",
-		TelegramName:       "gk-personal-2",
-		Nonce:              "two",
-		CreatesJoinRequest: true,
-		ExpiresAt:          &expiresAt,
-	}); err == nil {
-		t.Fatal("second active personal invite succeeded, want unique-index error")
-	}
+	first, err := invites.SaveCreated(ctx, personal(gofakeit.LetterN(8)))
+	require.NoError(t, err, "save first invite")
 
-	if err := invites.MarkStatus(
-		ctx, first.ID, domain.InviteExpired, nil, "",
-	); err != nil {
-		t.Fatalf("expire first invite: %v", err)
-	}
+	// A second active personal link for the same slot is rejected by
+	// the partial unique index.
+	_, err = invites.SaveCreated(ctx, personal(gofakeit.LetterN(8)))
+	require.Error(t, err, "second active personal invite must violate the unique index")
 
-	second, err := invites.SaveCreated(ctx, InviteLinkInput{
-		TGID:               &tgID,
-		Resource:           domain.ResourceChat,
-		Mode:               domain.InvitePersonalJoinRequest,
-		InviteLink:         "https://t.me/+personal-2",
-		InviteLinkHash:     "hash-personal-2",
-		TelegramName:       "gk-personal-2",
-		Nonce:              "two",
-		CreatesJoinRequest: true,
-		ExpiresAt:          &expiresAt,
-	})
-	if err != nil {
-		t.Fatalf("save second invite after expiration: %v", err)
-	}
+	require.NoError(t,
+		invites.MarkStatus(ctx, first.ID, domain.InviteExpired, nil, ""),
+		"expire first invite")
+
+	second, err := invites.SaveCreated(ctx, personal(gofakeit.LetterN(8)))
+	require.NoError(t, err, "save second invite after expiration")
 
 	active, ok, err := invites.FindActivePersonal(
 		ctx, tgID, domain.ResourceChat, domain.InvitePersonalJoinRequest)
-	if err != nil {
-		t.Fatalf("FindActivePersonal: %v", err)
-	}
-
-	if !ok || active.ID != second.ID {
-		t.Fatalf("active personal = (%+v, %v), want second link", active, ok)
-	}
+	require.NoError(t, err, "FindActivePersonal")
+	require.True(t, ok, "the freed slot must hold the second link")
+	assert.Equal(t, second.ID, active.ID)
 }
 
 func TestInvitesMarkFailedStoresLastError(t *testing.T) {
@@ -127,42 +98,33 @@ func TestInvitesMarkFailedStoresLastError(t *testing.T) {
 	link, err := invites.SaveCreated(ctx, InviteLinkInput{
 		Resource:           domain.ResourceChannel,
 		Mode:               domain.InviteSharedJoinRequest,
-		InviteLink:         "https://t.me/+failed",
-		InviteLinkHash:     "hash-failed",
-		TelegramName:       "gk-shared-channel",
+		InviteLink:         "https://t.me/+" + gofakeit.LetterN(10),
+		InviteLinkHash:     "hash-" + gofakeit.UUID(),
+		TelegramName:       gofakeit.Username(),
 		CreatesJoinRequest: true,
 	})
-	if err != nil {
-		t.Fatalf("save invite: %v", err)
-	}
+	require.NoError(t, err, "save invite")
 
-	if err := invites.MarkStatus(
-		ctx, link.ID, domain.InviteFailed, nil, "not enough rights",
-	); err != nil {
-		t.Fatalf("mark failed: %v", err)
-	}
+	require.NoError(t,
+		invites.MarkStatus(ctx, link.ID, domain.InviteFailed, nil, "not enough rights"),
+		"mark failed")
 
 	got, err := invites.GetByID(ctx, link.ID)
-	if err != nil {
-		t.Fatalf("get invite: %v", err)
-	}
-
-	if got.Status != domain.InviteFailed || got.LastError != "not enough rights" {
-		t.Fatalf("failed invite = %+v, want status failed with last_error", got)
-	}
+	require.NoError(t, err, "get invite")
+	assert.Equal(t, domain.InviteFailed, got.Status)
+	assert.Equal(t, "not enough rights", got.LastError)
 }
 
 func TestInvitesMarkUsedByOtherStoresAttemptedBy(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
-	ownerID := int64(3001)
-	attemptedBy := int64(3002)
+	ownerID := random.TGID()
+	attemptedBy := random.TGID()
 
 	users := NewUsers(db)
 	for _, tgID := range []int64{ownerID, attemptedBy} {
-		if err := users.Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-			t.Fatalf("upsert user %d: %v", tgID, err)
-		}
+		require.NoError(t, users.Upsert(ctx, domain.User{TGID: tgID}),
+			"upsert user %d", tgID)
 	}
 
 	invites := NewInvites(db)
@@ -171,29 +133,20 @@ func TestInvitesMarkUsedByOtherStoresAttemptedBy(t *testing.T) {
 		TGID:               &ownerID,
 		Resource:           domain.ResourceChat,
 		Mode:               domain.InvitePersonalJoinRequest,
-		InviteLink:         "https://t.me/+personal-misuse",
-		InviteLinkHash:     "hash-personal-misuse",
-		TelegramName:       "gk-personal",
+		InviteLink:         "https://t.me/+" + gofakeit.LetterN(10),
+		InviteLinkHash:     "hash-" + gofakeit.UUID(),
+		TelegramName:       gofakeit.Username(),
 		CreatesJoinRequest: true,
 	})
-	if err != nil {
-		t.Fatalf("save invite: %v", err)
-	}
+	require.NoError(t, err, "save invite")
 
-	if err := invites.MarkStatus(
-		ctx, link.ID, domain.InviteUsedByOther, &attemptedBy, "",
-	); err != nil {
-		t.Fatalf("mark used_by_other: %v", err)
-	}
+	require.NoError(t,
+		invites.MarkStatus(ctx, link.ID, domain.InviteUsedByOther, &attemptedBy, ""),
+		"mark used_by_other")
 
 	got, err := invites.GetByID(ctx, link.ID)
-	if err != nil {
-		t.Fatalf("get invite: %v", err)
-	}
-
-	if got.Status != domain.InviteUsedByOther ||
-		got.AttemptedBy == nil ||
-		*got.AttemptedBy != attemptedBy {
-		t.Fatalf("invite = %+v, want used_by_other attempted_by", got)
-	}
+	require.NoError(t, err, "get invite")
+	assert.Equal(t, domain.InviteUsedByOther, got.Status)
+	require.NotNil(t, got.AttemptedBy, "used_by_other must record the attempting user")
+	assert.Equal(t, attemptedBy, *got.AttemptedBy)
 }

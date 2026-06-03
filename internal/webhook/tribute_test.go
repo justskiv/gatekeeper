@@ -1,4 +1,3 @@
-//nolint:wsl_v5 // Integration-style tests keep each scenario in one block.
 package webhook
 
 import (
@@ -9,24 +8,23 @@ import (
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
-	"github.com/pressly/goose/v3"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/justskiv/gatekeeper/internal/admission"
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/store"
+	"github.com/justskiv/gatekeeper/internal/testutil"
 )
 
 const tributeTestKey = "tribute-api-key"
 
 func TestTributeWebhookValidSignatureUsesRawBodyAndRedactsPayload(t *testing.T) {
-	db := newWebhookTestDB(t)
+	db := testutil.NewDB(t)
 	handler := &TributeHandler{
 		DB:     db,
 		APIKey: tributeTestKey,
@@ -50,39 +48,30 @@ func TestTributeWebhookValidSignatureUsesRawBodyAndRedactsPayload(t *testing.T) 
 	}`)
 
 	resp := postTribute(t, handler, raw, signTribute(raw))
-	if resp.Code != http.StatusOK {
-		t.Fatalf("status = %d body=%s, want 200", resp.Code, resp.Body.String())
-	}
+	require.Equalf(t, http.StatusOK, resp.Code, "body=%s", resp.Body.String())
 
 	sub, ok, err := store.NewSubscriptions(db).GetActive(
 		context.Background(), 123, domain.PlatformTribute)
-	if err != nil || !ok {
-		t.Fatalf("active subscription = (%+v, %v, %v), want active", sub, ok, err)
-	}
+	require.NoError(t, err, "GetActive")
+	require.True(t, ok, "subscription must be active")
 
-	if sub.ExternalID != "1644" ||
-		sub.PeriodID != "1547" ||
-		sub.Tier != "Gold" ||
-		sub.LastSignal != "webhook" ||
-		sub.ExpiresAt == nil {
-		t.Fatalf("subscription = %+v, want Tribute webhook fields", sub)
-	}
+	assert.Equal(t, "1644", sub.ExternalID)
+	assert.Equal(t, "1547", sub.PeriodID)
+	assert.Equal(t, "Gold", sub.Tier)
+	assert.Equal(t, "webhook", sub.LastSignal)
+	assert.NotNil(t, sub.ExpiresAt)
 
 	var payload string
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT payload_json FROM tribute_events`).Scan(&payload); err != nil {
-		t.Fatalf("read payload: %v", err)
-	}
+	require.NoError(t, db.QueryRowContext(context.Background(),
+		`SELECT payload_json FROM tribute_events`).Scan(&payload), "read payload")
 
 	for _, forbidden := range []string{"durov@example.com", "startapp=secret"} {
-		if strings.Contains(payload, forbidden) {
-			t.Fatalf("payload contains %q: %s", forbidden, payload)
-		}
+		assert.NotContainsf(t, payload, forbidden, "payload must redact %q", forbidden)
 	}
 }
 
 func TestTributeWebhookInvalidSignatureIsAuditedWithoutDomainChanges(t *testing.T) {
-	db := newWebhookTestDB(t)
+	db := testutil.NewDB(t)
 	handler := &TributeHandler{
 		DB:     db,
 		APIKey: tributeTestKey,
@@ -92,45 +81,33 @@ func TestTributeWebhookInvalidSignatureIsAuditedWithoutDomainChanges(t *testing.
 	raw := tributeSubscriptionPayload("new_subscription",
 		"2026-06-02T10:00:00Z", "2026-07-02T10:00:00Z")
 	resp := postTribute(t, handler, raw, "bad")
-	if resp.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", resp.Code)
-	}
+	require.Equal(t, http.StatusUnauthorized, resp.Code, "invalid signature status")
 
 	var eventCount, invalidSignatures, rejectedAudit int
-	if err := db.QueryRowContext(context.Background(), `
+	require.NoError(t, db.QueryRowContext(context.Background(), `
 		SELECT count(*), sum(CASE WHEN signature_valid = 0 THEN 1 ELSE 0 END)
 		FROM tribute_events
 		WHERE status = 'failed'`,
-	).Scan(&eventCount, &invalidSignatures); err != nil {
-		t.Fatalf("count failed tribute events: %v", err)
-	}
+	).Scan(&eventCount, &invalidSignatures), "count failed tribute events")
 
-	if eventCount != 1 || invalidSignatures != 1 {
-		t.Fatalf("failed events=%d invalid=%d, want one invalid failed event",
-			eventCount, invalidSignatures)
-	}
+	assert.Equal(t, 1, eventCount, "one failed event")
+	assert.Equal(t, 1, invalidSignatures, "one invalid signature")
 
-	if err := db.QueryRowContext(context.Background(), `
+	require.NoError(t, db.QueryRowContext(context.Background(), `
 		SELECT count(*)
 		FROM audit_log
 		WHERE kind = 'webhook_rejected'`,
-	).Scan(&rejectedAudit); err != nil {
-		t.Fatalf("count rejected audit: %v", err)
-	}
+	).Scan(&rejectedAudit), "count rejected audit")
+	assert.Equal(t, 1, rejectedAudit, "one webhook_rejected audit entry")
 
-	if rejectedAudit != 1 {
-		t.Fatalf("webhook_rejected audit = %d, want 1", rejectedAudit)
-	}
-
-	if _, ok, err := store.NewSubscriptions(db).GetActive(
-		context.Background(), 123, domain.PlatformTribute,
-	); err != nil || ok {
-		t.Fatalf("active subscription = (_, %v, %v), want absent", ok, err)
-	}
+	_, ok, err := store.NewSubscriptions(db).GetActive(
+		context.Background(), 123, domain.PlatformTribute)
+	require.NoError(t, err, "GetActive")
+	assert.False(t, ok, "no active subscription must be created")
 }
 
 func TestTributeWebhookInvalidSignatureDoesNotOverwriteExistingEvent(t *testing.T) {
-	db := newWebhookTestDB(t)
+	db := testutil.NewDB(t)
 	handler := &TributeHandler{
 		DB:     db,
 		APIKey: tributeTestKey,
@@ -149,45 +126,30 @@ func TestTributeWebhookInvalidSignatureDoesNotOverwriteExistingEvent(t *testing.
 		}
 	}`)
 	resp := postTribute(t, handler, raw, signTribute(raw))
-	if resp.Code != http.StatusOK {
-		t.Fatalf("valid status = %d body=%s, want 200",
-			resp.Code, resp.Body.String())
-	}
+	require.Equalf(t, http.StatusOK, resp.Code, "valid body=%s", resp.Body.String())
 
 	resp = postTribute(t, handler, raw, "bad")
-	if resp.Code != http.StatusUnauthorized {
-		t.Fatalf("invalid retry status = %d, want 401", resp.Code)
-	}
+	require.Equal(t, http.StatusUnauthorized, resp.Code, "invalid retry status")
 
 	var status string
-	if err := db.QueryRowContext(context.Background(), `
+	require.NoError(t, db.QueryRowContext(context.Background(), `
 		SELECT status
 		FROM tribute_events
 		WHERE dedup_key = ?`,
-		rawDedupKey(raw)).Scan(&status); err != nil {
-		t.Fatalf("read tribute event status: %v", err)
-	}
-
-	if status != string(store.TributeEventProcessed) {
-		t.Fatalf("status = %s, want processed", status)
-	}
+		rawDedupKey(raw)).Scan(&status), "read tribute event status")
+	assert.Equal(t, string(store.TributeEventProcessed), status)
 
 	var rejectedAudit int
-	if err := db.QueryRowContext(context.Background(), `
+	require.NoError(t, db.QueryRowContext(context.Background(), `
 		SELECT count(*)
 		FROM audit_log
 		WHERE kind = 'webhook_rejected'`,
-	).Scan(&rejectedAudit); err != nil {
-		t.Fatalf("count rejected audit: %v", err)
-	}
-
-	if rejectedAudit != 0 {
-		t.Fatalf("webhook_rejected audit = %d, want 0", rejectedAudit)
-	}
+	).Scan(&rejectedAudit), "count rejected audit")
+	assert.Equal(t, 0, rejectedAudit, "duplicate must not add a rejected audit entry")
 }
 
 func TestTributeWebhookDedupIgnoredFailedAndOrdering(t *testing.T) {
-	db := newWebhookTestDB(t)
+	db := testutil.NewDB(t)
 	handler := &TributeHandler{
 		DB:     db,
 		APIKey: tributeTestKey,
@@ -198,28 +160,21 @@ func TestTributeWebhookDedupIgnoredFailedAndOrdering(t *testing.T) {
 		"2026-06-02T10:00:00Z", "2026-07-02T10:00:00Z")
 	for range 2 {
 		resp := postTribute(t, handler, initial, signTribute(initial))
-		if resp.Code != http.StatusOK {
-			t.Fatalf("initial status = %d, want 200", resp.Code)
-		}
+		require.Equal(t, http.StatusOK, resp.Code, "initial status")
 	}
 
 	var events, activated int
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT count(*) FROM tribute_events`).Scan(&events); err != nil {
-		t.Fatalf("count events: %v", err)
-	}
+	require.NoError(t, db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM tribute_events`).Scan(&events), "count events")
 
-	if err := db.QueryRowContext(context.Background(), `
+	require.NoError(t, db.QueryRowContext(context.Background(), `
 		SELECT count(*)
 		FROM audit_log
 		WHERE kind = 'subscription_activated'`,
-	).Scan(&activated); err != nil {
-		t.Fatalf("count activations: %v", err)
-	}
+	).Scan(&activated), "count activations")
 
-	if events != 1 || activated != 1 {
-		t.Fatalf("events=%d activations=%d, want dedup no-op", events, activated)
-	}
+	assert.Equal(t, 1, events, "duplicate webhook must dedupe to one event")
+	assert.Equal(t, 1, activated, "duplicate webhook must activate once")
 
 	ignored := []byte(`{
 		"name":"physical_order_created",
@@ -228,22 +183,15 @@ func TestTributeWebhookDedupIgnoredFailedAndOrdering(t *testing.T) {
 		"payload":{"order_id":1}
 	}`)
 	resp := postTribute(t, handler, ignored, signTribute(ignored))
-	if resp.Code != http.StatusOK {
-		t.Fatalf("ignored status = %d, want 200", resp.Code)
-	}
+	require.Equal(t, http.StatusOK, resp.Code, "ignored status")
 
 	var ignoredRows int
-	if err := db.QueryRowContext(context.Background(), `
+	require.NoError(t, db.QueryRowContext(context.Background(), `
 		SELECT count(*)
 		FROM tribute_events
 		WHERE status = 'ignored'`,
-	).Scan(&ignoredRows); err != nil {
-		t.Fatalf("count ignored: %v", err)
-	}
-
-	if ignoredRows != 1 {
-		t.Fatalf("ignored rows = %d, want 1", ignoredRows)
-	}
+	).Scan(&ignoredRows), "count ignored")
+	assert.Equal(t, 1, ignoredRows, "one ignored event")
 
 	malformed := []byte(`{
 		"name":"new_subscription",
@@ -252,37 +200,29 @@ func TestTributeWebhookDedupIgnoredFailedAndOrdering(t *testing.T) {
 		"payload":{"subscription_id":1644,"period_id":2000}
 	}`)
 	resp = postTribute(t, handler, malformed, signTribute(malformed))
-	if resp.Code != http.StatusBadRequest {
-		t.Fatalf("malformed status = %d, want 400", resp.Code)
-	}
+	require.Equal(t, http.StatusBadRequest, resp.Code, "malformed status")
 
 	renewed := tributeSubscriptionPayload("renewed_subscription",
 		"2026-06-03T10:00:00Z", "2026-08-02T10:00:00Z")
 	resp = postTribute(t, handler, renewed, signTribute(renewed))
-	if resp.Code != http.StatusOK {
-		t.Fatalf("renewed status = %d, want 200", resp.Code)
-	}
+	require.Equal(t, http.StatusOK, resp.Code, "renewed status")
 
 	stale := tributeSubscriptionPayload("new_subscription",
 		"2026-06-01T10:00:00Z", "2026-06-15T10:00:00Z")
 	resp = postTribute(t, handler, stale, signTribute(stale))
-	if resp.Code != http.StatusOK {
-		t.Fatalf("stale status = %d, want 200", resp.Code)
-	}
+	require.Equal(t, http.StatusOK, resp.Code, "stale status")
 
 	sub, ok, err := store.NewSubscriptions(db).GetActive(
 		context.Background(), 123, domain.PlatformTribute)
-	if err != nil || !ok || sub.ExpiresAt == nil {
-		t.Fatalf("active subscription = (%+v, %v, %v), want active", sub, ok, err)
-	}
-
-	if got := sub.ExpiresAt.Format("2006-01-02"); got != "2026-08-02" {
-		t.Fatalf("expires_at = %s, want renewed date", got)
-	}
+	require.NoError(t, err, "GetActive")
+	require.True(t, ok, "subscription must be active")
+	require.NotNil(t, sub.ExpiresAt)
+	assert.Equal(t, "2026-08-02", sub.ExpiresAt.Format("2006-01-02"),
+		"expires_at must track the renewed date")
 }
 
 func TestTributeWebhookSubsecondOrderingKeepsNewestEvent(t *testing.T) {
-	db := newWebhookTestDB(t)
+	db := testutil.NewDB(t)
 	handler := &TributeHandler{
 		DB:     db,
 		APIKey: tributeTestKey,
@@ -293,27 +233,23 @@ func TestTributeWebhookSubsecondOrderingKeepsNewestEvent(t *testing.T) {
 		"2026-06-02T10:00:00.900Z", "2026-08-02T10:00:00Z")
 	older := tributeSubscriptionPayload("renewed_subscription",
 		"2026-06-02T10:00:00.100Z", "2026-07-02T10:00:00Z")
+
 	for _, raw := range [][]byte{newer, older} {
 		resp := postTribute(t, handler, raw, signTribute(raw))
-		if resp.Code != http.StatusOK {
-			t.Fatalf("webhook status = %d body=%s, want 200",
-				resp.Code, resp.Body.String())
-		}
+		require.Equalf(t, http.StatusOK, resp.Code, "body=%s", resp.Body.String())
 	}
 
 	sub, ok, err := store.NewSubscriptions(db).GetActive(
 		context.Background(), 123, domain.PlatformTribute)
-	if err != nil || !ok || sub.ExpiresAt == nil || sub.LastEventAt == nil {
-		t.Fatalf("active subscription = (%+v, %v, %v), want active", sub, ok, err)
-	}
+	require.NoError(t, err, "GetActive")
+	require.True(t, ok, "subscription must be active")
+	require.NotNil(t, sub.ExpiresAt)
+	require.NotNil(t, sub.LastEventAt)
 
-	if got := sub.ExpiresAt.Format("2006-01-02"); got != "2026-08-02" {
-		t.Fatalf("expires_at = %s, want newest event expiry", got)
-	}
-
-	if got := sub.LastEventAt.Nanosecond(); got != 900_000_000 {
-		t.Fatalf("last_event_at nanos = %d, want 900000000", got)
-	}
+	assert.Equal(t, "2026-08-02", sub.ExpiresAt.Format("2006-01-02"),
+		"expires_at must track the newest event expiry")
+	assert.Equal(t, 900_000_000, sub.LastEventAt.Nanosecond(),
+		"last_event_at must keep the subsecond precision of the newest event")
 }
 
 func TestTributePayloadInt64RejectsTrailingText(t *testing.T) {
@@ -321,13 +257,12 @@ func TestTributePayloadInt64RejectsTrailingText(t *testing.T) {
 		Payload: map[string]any{"telegram_user_id": "123abc"},
 	}
 
-	if got, ok := envelope.payloadInt64("telegram_user_id"); ok {
-		t.Fatalf("payloadInt64 = (%d, true), want false", got)
-	}
+	_, ok := envelope.payloadInt64("telegram_user_id")
+	assert.False(t, ok, "payloadInt64 must reject trailing text")
 }
 
 func TestTributeWebhookCancelDefaultAndImmediateOverride(t *testing.T) {
-	defaultDB := newWebhookTestDB(t)
+	defaultDB := testutil.NewDB(t)
 	defaultHandler := &TributeHandler{
 		DB:     defaultDB,
 		APIKey: tributeTestKey,
@@ -338,42 +273,38 @@ func TestTributeWebhookCancelDefaultAndImmediateOverride(t *testing.T) {
 		"2026-06-02T10:00:00Z", "2026-07-02T10:00:00Z")
 	cancel := tributeSubscriptionPayload("cancelled_subscription",
 		"2026-06-03T10:00:00Z", "2026-07-02T10:00:00Z")
+
 	for _, raw := range [][]byte{create, cancel} {
 		resp := postTribute(t, defaultHandler, raw, signTribute(raw))
-		if resp.Code != http.StatusOK {
-			t.Fatalf("default cancel status = %d, want 200", resp.Code)
-		}
+		require.Equal(t, http.StatusOK, resp.Code, "default cancel status")
 	}
 
-	if _, ok, err := store.NewSubscriptions(defaultDB).GetActive(
-		context.Background(), 123, domain.PlatformTribute,
-	); err != nil || !ok {
-		t.Fatalf("default cancel active = %v err=%v, want active kept", ok, err)
-	}
+	_, ok, err := store.NewSubscriptions(defaultDB).GetActive(
+		context.Background(), 123, domain.PlatformTribute)
+	require.NoError(t, err, "GetActive default")
+	assert.True(t, ok, "default cancel must keep access active")
 
-	immediateDB := newWebhookTestDB(t)
+	immediateDB := testutil.NewDB(t)
 	immediateHandler := &TributeHandler{
 		DB:              immediateDB,
 		APIKey:          tributeTestKey,
 		Engine:          engine.New(nil),
 		CancelImmediate: true,
 	}
+
 	for _, raw := range [][]byte{create, cancel} {
 		resp := postTribute(t, immediateHandler, raw, signTribute(raw))
-		if resp.Code != http.StatusOK {
-			t.Fatalf("immediate cancel status = %d, want 200", resp.Code)
-		}
+		require.Equal(t, http.StatusOK, resp.Code, "immediate cancel status")
 	}
 
-	if _, ok, err := store.NewSubscriptions(immediateDB).GetActive(
-		context.Background(), 123, domain.PlatformTribute,
-	); err != nil || ok {
-		t.Fatalf("immediate cancel active = %v err=%v, want expired", ok, err)
-	}
+	_, ok, err = store.NewSubscriptions(immediateDB).GetActive(
+		context.Background(), 123, domain.PlatformTribute)
+	require.NoError(t, err, "GetActive immediate")
+	assert.False(t, ok, "immediate cancel must expire access")
 }
 
 func TestTributeWebhookLedgerAllowsStartGrantAccess(t *testing.T) {
-	db := newWebhookTestDB(t)
+	db := testutil.NewDB(t)
 	handler := &TributeHandler{
 		DB:     db,
 		APIKey: tributeTestKey,
@@ -383,9 +314,7 @@ func TestTributeWebhookLedgerAllowsStartGrantAccess(t *testing.T) {
 	raw := tributeSubscriptionPayload("new_subscription",
 		"2026-06-02T10:00:00Z", "2026-07-02T10:00:00Z")
 	resp := postTribute(t, handler, raw, signTribute(raw))
-	if resp.Code != http.StatusOK {
-		t.Fatalf("webhook status = %d, want 200", resp.Code)
-	}
+	require.Equal(t, http.StatusOK, resp.Code, "webhook status")
 
 	seedSharedInvite(t, db, domain.ResourceChat, "https://t.me/+chat")
 	seedSharedInvite(t, db, domain.ResourceChannel, "https://t.me/+channel")
@@ -396,9 +325,7 @@ func TestTributeWebhookLedgerAllowsStartGrantAccess(t *testing.T) {
 		Subscriptions: store.NewSubscriptions(db),
 		Whitelist:     store.NewWhitelist(db),
 	}, 123)
-	if err != nil {
-		t.Fatalf("PersistedDecision: %v", err)
-	}
+	require.NoError(t, err, "PersistedDecision")
 
 	admissionHandler := admission.New(admission.Deps{
 		Users:         store.NewUsers(db),
@@ -419,7 +346,7 @@ func TestTributeWebhookLedgerAllowsStartGrantAccess(t *testing.T) {
 		},
 	})
 
-	if err := admissionHandler.HandleAccessRequest(context.Background(),
+	require.NoError(t, admissionHandler.HandleAccessRequest(context.Background(),
 		admission.AccessRequest{
 			User: domain.User{TGID: 123, FirstName: "Subscriber"},
 			Snapshot: &engine.Snapshot{
@@ -427,31 +354,23 @@ func TestTributeWebhookLedgerAllowsStartGrantAccess(t *testing.T) {
 				Decision: decision,
 			},
 			Trigger: "start",
-		}); err != nil {
-		t.Fatalf("HandleAccessRequest: %v", err)
-	}
+		}), "HandleAccessRequest")
 
 	var pendingGrants, dmActions int
-	if err := db.QueryRowContext(context.Background(), `
+	require.NoError(t, db.QueryRowContext(context.Background(), `
 		SELECT count(*)
 		FROM access_grants
 		WHERE tg_id = 123 AND state = 'pending'`,
-	).Scan(&pendingGrants); err != nil {
-		t.Fatalf("count pending grants: %v", err)
-	}
+	).Scan(&pendingGrants), "count pending grants")
 
-	if err := db.QueryRowContext(context.Background(), `
+	require.NoError(t, db.QueryRowContext(context.Background(), `
 		SELECT count(*)
 		FROM access_actions
 		WHERE action_type = 'send_dm'`,
-	).Scan(&dmActions); err != nil {
-		t.Fatalf("count dm actions: %v", err)
-	}
+	).Scan(&dmActions), "count dm actions")
 
-	if pendingGrants != 2 || dmActions != 1 {
-		t.Fatalf("pending grants=%d dm actions=%d, want start grant links",
-			pendingGrants, dmActions)
-	}
+	assert.Equal(t, 2, pendingGrants, "start must grant pending chat and channel")
+	assert.Equal(t, 1, dmActions, "start must enqueue one DM with links")
 }
 
 func postTribute(
@@ -466,6 +385,7 @@ func postTribute(
 		http.MethodPost, "/webhooks/tribute",
 		strings.NewReader(string(raw)))
 	req.Header.Set(tributeSignatureHeader, signature)
+
 	resp := httptest.NewRecorder()
 	handler.ServeHTTP(resp, req)
 
@@ -503,48 +423,13 @@ func seedSharedInvite(
 ) {
 	t.Helper()
 
-	if _, err := store.NewInvites(db).SaveCreated(context.Background(),
+	_, err := store.NewInvites(db).SaveCreated(context.Background(),
 		store.InviteLinkInput{
 			Resource:           resource,
 			Mode:               domain.InviteSharedJoinRequest,
 			InviteLink:         url,
 			InviteLinkHash:     "hash:" + string(resource),
 			CreatesJoinRequest: true,
-		}); err != nil {
-		t.Fatalf("seed shared invite: %v", err)
-	}
-}
-
-func newWebhookTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-
-	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("open database: %v", err)
-	}
-
-	t.Cleanup(func() { _ = db.Close() })
-
-	provider, err := goose.NewProvider(
-		goose.DialectSQLite3, db, os.DirFS(webhookMigrationsDir(t)))
-	if err != nil {
-		t.Fatalf("new goose provider: %v", err)
-	}
-
-	if _, err := provider.Up(context.Background()); err != nil {
-		t.Fatalf("apply migrations: %v", err)
-	}
-
-	return db
-}
-
-func webhookMigrationsDir(t *testing.T) string {
-	t.Helper()
-
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-
-	return filepath.Join(filepath.Dir(file), "..", "..", "migrations")
+		})
+	require.NoError(t, err, "seed shared invite")
 }

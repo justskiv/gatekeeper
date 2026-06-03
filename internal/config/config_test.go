@@ -2,9 +2,11 @@ package config
 
 import (
 	"maps"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // baseEnv is a complete, valid environment. Every variable the loader
@@ -139,66 +141,32 @@ func TestLoad(t *testing.T) {
 
 			cfg, err := LoadFromLookup(lookup(env))
 			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil (cfg=%+v)", cfg)
-				}
+				require.Error(t, err, "expected error, got cfg=%+v", cfg)
 
 				return
 			}
 
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-
-			if cfg.BotToken == "" {
-				t.Fatal("expected a populated config, got the zero value")
-			}
+			require.NoError(t, err)
+			assert.NotEmpty(t, cfg.BotToken, "expected a populated config")
 		})
 	}
 }
 
 func TestLoadParsesValues(t *testing.T) {
 	cfg, err := LoadFromLookup(lookup(baseEnv()))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.NoError(t, err)
 
-	if cfg.BotToken != "123456:ABC-DEF" {
-		t.Errorf("BotToken = %q", cfg.BotToken)
-	}
+	assert.Equal(t, "123456:ABC-DEF", cfg.BotToken)
+	assert.Equal(t, []int64{11111111, 22222222}, cfg.OwnerTGIDs)
+	assert.Equal(t, int64(-1003333333333), cfg.ClubChatID)
+	assert.Nil(t, cfg.AdminLogChatID, "AdminLogChatID must be nil when unset")
+	assert.Equal(t, 72*time.Hour, cfg.GracePeriod)
+	assert.Equal(t, time.Hour, cfg.AdmissionFallbackMaxAge)
+	assert.Equal(t, 2, cfg.AdmissionJoinRequestRetries)
+	assert.False(t, cfg.TributeCancelIsImmediate, "default must be false")
 
-	if len(cfg.OwnerTGIDs) != 2 || cfg.OwnerTGIDs[0] != 11111111 {
-		t.Errorf("OwnerTGIDs = %v", cfg.OwnerTGIDs)
-	}
-
-	if cfg.ClubChatID != -1003333333333 {
-		t.Errorf("ClubChatID = %d", cfg.ClubChatID)
-	}
-
-	if cfg.AdminLogChatID != nil {
-		t.Errorf("AdminLogChatID = %v, want nil when unset", cfg.AdminLogChatID)
-	}
-
-	if cfg.GracePeriod.Hours() != 72 {
-		t.Errorf("GracePeriod = %v", cfg.GracePeriod)
-	}
-
-	if cfg.AdmissionFallbackMaxAge != time.Hour {
-		t.Errorf("AdmissionFallbackMaxAge = %v, want 1h", cfg.AdmissionFallbackMaxAge)
-	}
-
-	if cfg.AdmissionJoinRequestRetries != 2 {
-		t.Errorf("AdmissionJoinRequestRetries = %d, want 2",
-			cfg.AdmissionJoinRequestRetries)
-	}
-
-	if cfg.TributeCancelIsImmediate {
-		t.Error("TributeCancelIsImmediate = true, want default false")
-	}
-
-	if cfg.Location == nil || cfg.Location.String() != "UTC" {
-		t.Errorf("Location = %v", cfg.Location)
-	}
+	require.NotNil(t, cfg.Location)
+	assert.Equal(t, "UTC", cfg.Location.String())
 }
 
 func TestLoadParsesTributeCancelOverride(t *testing.T) {
@@ -206,13 +174,8 @@ func TestLoadParsesTributeCancelOverride(t *testing.T) {
 	env["TRIBUTE_CANCEL_IS_IMMEDIATE"] = "true"
 
 	cfg, err := LoadFromLookup(lookup(env))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !cfg.TributeCancelIsImmediate {
-		t.Fatal("TributeCancelIsImmediate = false, want true")
-	}
+	require.NoError(t, err)
+	assert.True(t, cfg.TributeCancelIsImmediate)
 }
 
 func TestLoadRejectsInvalidTributeCancelOverride(t *testing.T) {
@@ -220,13 +183,8 @@ func TestLoadRejectsInvalidTributeCancelOverride(t *testing.T) {
 	env["TRIBUTE_CANCEL_IS_IMMEDIATE"] = "soon"
 
 	_, err := LoadFromLookup(lookup(env))
-	if err == nil {
-		t.Fatal("expected invalid boolean error")
-	}
-
-	if !strings.Contains(err.Error(), "TRIBUTE_CANCEL_IS_IMMEDIATE") {
-		t.Fatalf("error = %q, want TRIBUTE_CANCEL_IS_IMMEDIATE", err)
-	}
+	require.Error(t, err, "expected invalid boolean error")
+	assert.Contains(t, err.Error(), "TRIBUTE_CANCEL_IS_IMMEDIATE")
 }
 
 func TestLoadReportsSourceClubChatConflictKeys(t *testing.T) {
@@ -234,16 +192,12 @@ func TestLoadReportsSourceClubChatConflictKeys(t *testing.T) {
 	env["CLUB_CHAT_ID"] = env["BOOSTY_GROUP_ID"]
 
 	_, err := LoadFromLookup(lookup(env))
-	if err == nil {
-		t.Fatal("expected source/club conflict error")
-	}
+	require.Error(t, err, "expected source/club conflict error")
 
 	msg := err.Error()
-	if !strings.Contains(msg, "BOOSTY_GROUP_ID") ||
-		!strings.Contains(msg, "CLUB_CHAT_ID") ||
-		!strings.Contains(msg, env["BOOSTY_GROUP_ID"]) {
-		t.Fatalf("error = %q, want both keys and shared value", msg)
-	}
+	assert.Contains(t, msg, "BOOSTY_GROUP_ID")
+	assert.Contains(t, msg, "CLUB_CHAT_ID")
+	assert.Contains(t, msg, env["BOOSTY_GROUP_ID"], "error must cite the shared value")
 }
 
 func TestLoadParsesOptionalAdminLogChatID(t *testing.T) {
@@ -251,13 +205,10 @@ func TestLoadParsesOptionalAdminLogChatID(t *testing.T) {
 	env["ADMIN_LOG_CHAT_ID"] = "-1005555555555"
 
 	cfg, err := LoadFromLookup(lookup(env))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.NoError(t, err)
 
-	if cfg.AdminLogChatID == nil || *cfg.AdminLogChatID != -1005555555555 {
-		t.Errorf("AdminLogChatID = %v, want -1005555555555", cfg.AdminLogChatID)
-	}
+	require.NotNil(t, cfg.AdminLogChatID)
+	assert.Equal(t, int64(-1005555555555), *cfg.AdminLogChatID)
 }
 
 // TestLoadTrimsWhitespace verifies that whitespace padding around env
@@ -272,26 +223,12 @@ func TestLoadTrimsWhitespace(t *testing.T) {
 	env["GRACE_PERIOD"] = "  72h  "
 
 	cfg, err := LoadFromLookup(lookup(env))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.NoError(t, err)
 
-	if cfg.BotToken != "123456:ABC-DEF" {
-		t.Errorf("BotToken = %q", cfg.BotToken)
-	}
-
-	if cfg.BoostySubscribeURL != "https://boosty.to/author" {
-		t.Errorf("BoostySubscribeURL = %q", cfg.BoostySubscribeURL)
-	}
-
-	if len(cfg.OwnerTGIDs) != 2 ||
-		cfg.OwnerTGIDs[0] != 11111111 || cfg.OwnerTGIDs[1] != 22222222 {
-		t.Errorf("OwnerTGIDs = %v", cfg.OwnerTGIDs)
-	}
-
-	if cfg.GracePeriod.Hours() != 72 {
-		t.Errorf("GracePeriod = %v", cfg.GracePeriod)
-	}
+	assert.Equal(t, "123456:ABC-DEF", cfg.BotToken)
+	assert.Equal(t, "https://boosty.to/author", cfg.BoostySubscribeURL)
+	assert.Equal(t, []int64{11111111, 22222222}, cfg.OwnerTGIDs)
+	assert.Equal(t, 72*time.Hour, cfg.GracePeriod)
 }
 
 // TestLoadRejectsLongDirectInviteTTL verifies that an INVITE_TTL above
@@ -303,7 +240,6 @@ func TestLoadRejectsLongDirectInviteTTL(t *testing.T) {
 	env["ALLOW_DIRECT_INVITES"] = "true"
 	env["INVITE_TTL"] = "24h"
 
-	if _, err := LoadFromLookup(lookup(env)); err == nil {
-		t.Fatal("expected an error for INVITE_TTL=24h when INVITE_MODE=direct")
-	}
+	_, err := LoadFromLookup(lookup(env))
+	require.Error(t, err, "INVITE_TTL=24h must be rejected in direct mode")
 }

@@ -5,17 +5,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/justskiv/gatekeeper/internal/domain"
+	"github.com/justskiv/gatekeeper/internal/lib/random"
 )
 
 func TestOutboxEnqueueIsIdempotent(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
-	tgID := int64(1001)
+	tgID := random.TGID()
 
-	if err := NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
 	key := domain.AccessActionKey(domain.ActionSendDM, &tgID, nil, "update:1")
 	outbox := NewOutbox(db)
@@ -26,13 +29,8 @@ func TestOutboxEnqueueIsIdempotent(t *testing.T) {
 		IdempotencyKey: key,
 		PayloadJSON:    []byte(`{"text":"hello"}`),
 	})
-	if err != nil {
-		t.Fatalf("first enqueue: %v", err)
-	}
-
-	if !inserted {
-		t.Fatal("first enqueue inserted=false, want true")
-	}
+	require.NoError(t, err, "first enqueue")
+	require.True(t, inserted, "first enqueue must insert")
 
 	second, inserted, err := outbox.Enqueue(ctx, AccessActionInput{
 		Type:           domain.ActionSendDM,
@@ -40,39 +38,25 @@ func TestOutboxEnqueueIsIdempotent(t *testing.T) {
 		IdempotencyKey: key,
 		PayloadJSON:    []byte(`{"text":"changed"}`),
 	})
-	if err != nil {
-		t.Fatalf("second enqueue: %v", err)
-	}
-
-	if inserted {
-		t.Fatal("second enqueue inserted=true, want idempotent reuse")
-	}
-
-	if first.ID != second.ID {
-		t.Fatalf("ids = %d/%d, want same row", first.ID, second.ID)
-	}
+	require.NoError(t, err, "second enqueue")
+	assert.False(t, inserted, "second enqueue must reuse the row")
+	assert.Equal(t, first.ID, second.ID, "idempotent enqueue keeps one row")
 
 	var rows int
-	if err := db.QueryRowContext(ctx, `
+	require.NoError(t, db.QueryRowContext(ctx, `
 		SELECT count(*) FROM access_actions WHERE idempotency_key = ?`,
-		key).Scan(&rows); err != nil {
-		t.Fatalf("count actions: %v", err)
-	}
-
-	if rows != 1 {
-		t.Fatalf("rows = %d, want 1", rows)
-	}
+		key).Scan(&rows), "count actions")
+	assert.Equal(t, 1, rows)
 }
 
 func TestOutboxLeaseReclaimsExpiredRunningAction(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
-	tgID := int64(1002)
+	tgID := random.TGID()
 	now := time.Now()
 
-	if err := NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
 	outbox := NewOutbox(db)
 
@@ -83,41 +67,31 @@ func TestOutboxLeaseReclaimsExpiredRunningAction(t *testing.T) {
 		RunAfter:       now.Add(-time.Minute),
 		PayloadJSON:    []byte(`{"text":"hello"}`),
 	})
-	if err != nil {
-		t.Fatalf("enqueue: %v", err)
-	}
+	require.NoError(t, err, "enqueue")
 
 	leased, ok, err := outbox.LeaseReady(ctx, now, time.Minute)
-	if err != nil {
-		t.Fatalf("lease first: %v", err)
-	}
+	require.NoError(t, err, "lease first")
+	require.True(t, ok, "a ready action must be leased")
+	assert.Equal(t, queued.ID, leased.ID)
+	assert.Equal(t, domain.ActionRunning, leased.Status)
 
-	if !ok || leased.ID != queued.ID || leased.Status != domain.ActionRunning {
-		t.Fatalf("first lease = (%+v, %v), want queued row running", leased, ok)
-	}
-
-	if _, ok, err = outbox.LeaseReady(ctx, now, time.Minute); err != nil || ok {
-		t.Fatalf("second lease = (_, %v, %v), want no row", ok, err)
-	}
+	_, ok, err = outbox.LeaseReady(ctx, now, time.Minute)
+	require.NoError(t, err, "second lease")
+	assert.False(t, ok, "a leased action must not be handed out again")
 
 	reclaimed, ok, err := outbox.LeaseReady(ctx, now.Add(2*time.Minute), time.Minute)
-	if err != nil {
-		t.Fatalf("lease expired running: %v", err)
-	}
-
-	if !ok || reclaimed.ID != queued.ID {
-		t.Fatalf("reclaimed = (%+v, %v), want same row", reclaimed, ok)
-	}
+	require.NoError(t, err, "lease expired running")
+	require.True(t, ok, "an expired lease must be reclaimable")
+	assert.Equal(t, queued.ID, reclaimed.ID)
 }
 
 func TestOutboxRetryRecordsMetadata(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
-	tgID := int64(1003)
+	tgID := random.TGID()
 
-	if err := NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
 	outbox := NewOutbox(db)
 
@@ -127,24 +101,15 @@ func TestOutboxRetryRecordsMetadata(t *testing.T) {
 		IdempotencyKey: domain.AccessActionKey(domain.ActionSendDM, &tgID, nil, "retry"),
 		PayloadJSON:    []byte(`{"text":"hello"}`),
 	})
-	if err != nil {
-		t.Fatalf("enqueue: %v", err)
-	}
+	require.NoError(t, err, "enqueue")
 
 	nextRun := time.Now().Add(17 * time.Second)
 
 	retried, err := outbox.Retry(ctx, action.ID, nextRun, "telegram 429")
-	if err != nil {
-		t.Fatalf("retry: %v", err)
-	}
-
-	if retried.Status != domain.ActionQueued ||
-		retried.Attempts != 1 ||
-		retried.LastError != "telegram 429" {
-		t.Fatalf("retried action = %+v, want queued attempts=1 last_error", retried)
-	}
-
-	if retried.RunAfter.Before(nextRun.Add(-time.Second)) {
-		t.Fatalf("run_after = %v, want near %v", retried.RunAfter, nextRun)
-	}
+	require.NoError(t, err, "retry")
+	assert.Equal(t, domain.ActionQueued, retried.Status)
+	assert.Equal(t, 1, retried.Attempts)
+	assert.Equal(t, "telegram 429", retried.LastError)
+	assert.False(t, retried.RunAfter.Before(nextRun.Add(-time.Second)),
+		"run_after must track the requested next run")
 }

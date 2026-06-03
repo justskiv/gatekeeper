@@ -1,324 +1,273 @@
-//nolint:wsl_v5 // Domain tests keep arrange/act/assert blocks compact.
 package engine
 
 import (
 	"context"
 	"database/sql"
 	"errors"
-	"os"
-	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
+	"github.com/brianvoe/gofakeit/v7"
 	"github.com/go-telegram/bot/models"
-	"github.com/pressly/goose/v3"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/justskiv/gatekeeper/internal/domain"
+	"github.com/justskiv/gatekeeper/internal/lib/random"
 	"github.com/justskiv/gatekeeper/internal/store"
+	"github.com/justskiv/gatekeeper/internal/testutil"
 )
 
 func TestHandleEventActivatedIsIdempotentAndCancelsRevocation(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 5, 31, 10, 0, 0, 0, time.UTC)
 	e := New(nil, WithClock(func() time.Time { return now }))
 	repos := engineStore(db)
+	tgID := random.TGID()
 
-	if err := repos.Users.Upsert(ctx, domain.User{TGID: 42}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, repos.Users.Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
-	if err := store.NewRevocations(db).Upsert(ctx, domain.PendingRevocation{
-		TGID:        42,
+	require.NoError(t, store.NewRevocations(db).Upsert(ctx, domain.PendingRevocation{
+		TGID:        tgID,
 		Reason:      "expired",
 		ScheduledAt: now.Add(time.Hour),
-	}); err != nil {
-		t.Fatalf("upsert revocation: %v", err)
-	}
+	}), "upsert revocation")
 
 	event := domain.SubscriptionEvent{
 		Platform:   domain.PlatformBoosty,
 		Kind:       domain.EventActivated,
-		TGUserID:   42,
-		TGUsername: "alice",
+		TGUserID:   tgID,
+		TGUsername: gofakeit.Username(),
 		OccurredAt: now,
 	}
 	for i := range 2 {
 		effects, err := e.HandleEvent(ctx, repos, event)
-		if err != nil {
-			t.Fatalf("HandleEvent #%d: %v", i+1, err)
+		require.NoErrorf(t, err, "HandleEvent #%d", i+1)
+
+		if i == 0 {
+			assert.Len(t, effects, 1, "first activation must keep access via dm")
 		}
 
-		if i == 0 && len(effects) != 1 {
-			t.Fatalf("effects on first activation = %+v, want access-kept dm", effects)
-		}
-
-		if i == 1 && len(effects) != 0 {
-			t.Fatalf("effects on repeated activation = %+v, want none", effects)
+		if i == 1 {
+			assert.Empty(t, effects, "repeated activation must produce no effects")
 		}
 	}
 
-	subs, err := repos.Subscriptions.ListActiveByUser(ctx, 42)
-	if err != nil {
-		t.Fatalf("list active subscriptions: %v", err)
-	}
+	subs, err := repos.Subscriptions.ListActiveByUser(ctx, tgID)
+	require.NoError(t, err, "list active subscriptions")
+	require.Len(t, subs, 1, "want one active row")
+	assert.Equal(t, domain.PlatformBoosty, subs[0].Platform)
 
-	if len(subs) != 1 || subs[0].Platform != domain.PlatformBoosty {
-		t.Fatalf("active subscriptions = %+v, want one boosty row", subs)
-	}
-
-	if _, ok, err := repos.Revocations.Get(ctx, 42); err != nil || ok {
-		t.Fatalf("revocation = (_, %v, %v), want absent", ok, err)
-	}
+	_, ok, err := repos.Revocations.Get(ctx, tgID)
+	require.NoError(t, err)
+	assert.False(t, ok, "revocation must be cancelled")
 }
 
 func TestHandleEventDeactivatedAndCancelledAreIdempotent(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 5, 31, 10, 0, 0, 0, time.UTC)
 	e := New(nil, WithClock(func() time.Time { return now }))
 	repos := engineStore(db)
+	tgID := random.TGID()
 
 	activated := domain.SubscriptionEvent{
 		Platform:   domain.PlatformTribute,
 		Kind:       domain.EventActivated,
-		TGUserID:   77,
+		TGUserID:   tgID,
 		OccurredAt: now,
 	}
-	if _, err := e.HandleEvent(ctx, repos, activated); err != nil {
-		t.Fatalf("activate: %v", err)
-	}
+	_, err := e.HandleEvent(ctx, repos, activated)
+	require.NoError(t, err, "activate")
 
 	deactivated := activated
 	deactivated.Kind = domain.EventDeactivated
 
 	deactivated.OccurredAt = now.Add(time.Hour)
 	for i := range 2 {
-		if _, err := e.HandleEvent(ctx, repos, deactivated); err != nil {
-			t.Fatalf("deactivate #%d: %v", i+1, err)
-		}
+		_, err := e.HandleEvent(ctx, repos, deactivated)
+		require.NoErrorf(t, err, "deactivate #%d", i+1)
 	}
 
-	active, err := repos.Subscriptions.ListActiveByUser(ctx, 77)
-	if err != nil {
-		t.Fatalf("list active: %v", err)
-	}
+	active, err := repos.Subscriptions.ListActiveByUser(ctx, tgID)
+	require.NoError(t, err, "list active")
+	assert.Empty(t, active, "deactivated user must have no active subscriptions")
 
-	if len(active) != 0 {
-		t.Fatalf("active subscriptions = %+v, want none", active)
-	}
-
-	history, err := store.NewSubscriptions(db).ListByUser(ctx, 77)
-	if err != nil {
-		t.Fatalf("list history: %v", err)
-	}
-
-	if len(history) != 1 || history[0].Status != domain.SubExpired {
-		t.Fatalf("history = %+v, want one expired row", history)
-	}
+	history, err := store.NewSubscriptions(db).ListByUser(ctx, tgID)
+	require.NoError(t, err, "list history")
+	require.Len(t, history, 1, "want one history row")
+	assert.Equal(t, domain.SubExpired, history[0].Status)
 
 	cancelled := activated
 
 	cancelled.Kind = domain.EventCancelledSubscription
-	if _, err := e.HandleEvent(ctx, repos, cancelled); err != nil {
-		t.Fatalf("cancelled: %v", err)
-	}
+	_, err = e.HandleEvent(ctx, repos, cancelled)
+	require.NoError(t, err, "cancelled")
 
-	if active, err = repos.Subscriptions.ListActiveByUser(ctx, 77); err != nil {
-		t.Fatalf("list active after cancelled: %v", err)
-	}
-
-	if len(active) != 0 {
-		t.Fatalf("cancelled recreated active subscription: %+v", active)
-	}
+	active, err = repos.Subscriptions.ListActiveByUser(ctx, tgID)
+	require.NoError(t, err, "list active after cancelled")
+	assert.Empty(t, active, "cancelled must not recreate an active subscription")
 }
 
 func TestTributeCancelledSubscriptionDoesNotRevokeByDefault(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 5, 31, 10, 0, 0, 0, time.UTC)
 	e := New(nil, WithClock(func() time.Time { return now }))
 	repos := engineStore(db)
+	tgID := random.TGID()
 
 	activated := domain.SubscriptionEvent{
 		Platform:      domain.PlatformTribute,
 		Kind:          domain.EventActivated,
-		TGUserID:      77,
+		TGUserID:      tgID,
 		EventAt:       now,
 		ProviderEvent: "new_subscription",
 		OccurredAt:    now,
 	}
-	if _, err := e.HandleEvent(ctx, repos, activated); err != nil {
-		t.Fatalf("activate: %v", err)
-	}
+	_, err := e.HandleEvent(ctx, repos, activated)
+	require.NoError(t, err, "activate")
 
-	if err := store.NewGrants(db).Upsert(ctx, domain.AccessGrant{
-		TGID:       77,
+	require.NoError(t, store.NewGrants(db).Upsert(ctx, domain.AccessGrant{
+		TGID:       tgID,
 		Resource:   domain.ResourceChat,
 		State:      domain.GrantJoined,
 		AdmittedBy: "bot",
-	}); err != nil {
-		t.Fatalf("upsert grant: %v", err)
-	}
+	}), "upsert grant")
 
 	cancelled := activated
 	cancelled.Kind = domain.EventCancelledSubscription
 	cancelled.EventAt = now.Add(time.Hour)
 	cancelled.ProviderEvent = "cancelled_subscription"
 	cancelled.OccurredAt = cancelled.EventAt
-	if effects, err := e.HandleEvent(ctx, repos, cancelled); err != nil {
-		t.Fatalf("cancelled: %v", err)
-	} else if len(effects) != 0 {
-		t.Fatalf("cancel effects = %+v, want none", effects)
-	}
 
-	if _, ok, err := repos.Subscriptions.GetActive(
-		ctx, 77, domain.PlatformTribute,
-	); err != nil || !ok {
-		t.Fatalf("active subscription = %v err=%v, want kept", ok, err)
-	}
+	effects, err := e.HandleEvent(ctx, repos, cancelled)
+	require.NoError(t, err, "cancelled")
+	assert.Empty(t, effects, "cancel must produce no effects by default")
 
-	if _, ok, err := repos.Revocations.Get(ctx, 77); err != nil || ok {
-		t.Fatalf("revocation = %v err=%v, want absent", ok, err)
-	}
+	_, ok, err := repos.Subscriptions.GetActive(ctx, tgID, domain.PlatformTribute)
+	require.NoError(t, err)
+	assert.True(t, ok, "active subscription must be kept")
+
+	_, ok, err = repos.Revocations.Get(ctx, tgID)
+	require.NoError(t, err)
+	assert.False(t, ok, "no revocation must be scheduled")
 }
 
 func TestTributeStaleCancelledSubscriptionWritesAudit(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 5, 31, 10, 0, 0, 0, time.UTC)
 	e := New(nil, WithClock(func() time.Time { return now }))
 	repos := engineStore(db)
+	tgID := random.TGID()
 
 	activatedAt := now.Add(time.Hour)
 	activated := domain.SubscriptionEvent{
 		Platform:      domain.PlatformTribute,
 		Kind:          domain.EventActivated,
-		TGUserID:      77,
+		TGUserID:      tgID,
 		EventAt:       activatedAt,
 		ProviderEvent: "new_subscription",
 		OccurredAt:    activatedAt,
 	}
-	if _, err := e.HandleEvent(ctx, repos, activated); err != nil {
-		t.Fatalf("activate: %v", err)
-	}
+	_, err := e.HandleEvent(ctx, repos, activated)
+	require.NoError(t, err, "activate")
 
 	cancelled := activated
 	cancelled.Kind = domain.EventCancelledSubscription
 	cancelled.EventAt = now
 	cancelled.ProviderEvent = "cancelled_subscription"
 	cancelled.OccurredAt = cancelled.EventAt
-	if effects, err := e.HandleEvent(ctx, repos, cancelled); err != nil {
-		t.Fatalf("cancelled: %v", err)
-	} else if len(effects) != 0 {
-		t.Fatalf("cancel effects = %+v, want none", effects)
-	}
 
-	sub, ok, err := repos.Subscriptions.GetActive(
-		ctx, 77, domain.PlatformTribute)
-	if err != nil || !ok || sub.LastEventAt == nil {
-		t.Fatalf("active subscription = (%+v, %v, %v), want active", sub, ok, err)
-	}
+	effects, err := e.HandleEvent(ctx, repos, cancelled)
+	require.NoError(t, err, "cancelled")
+	assert.Empty(t, effects, "stale cancel must produce no effects")
 
-	if !sub.LastEventAt.Equal(activatedAt) {
-		t.Fatalf("last_event_at = %v, want %v", sub.LastEventAt, activatedAt)
-	}
+	sub, ok, err := repos.Subscriptions.GetActive(ctx, tgID, domain.PlatformTribute)
+	require.NoError(t, err)
+	require.True(t, ok, "active subscription must be kept")
+	require.NotNil(t, sub.LastEventAt)
+	assert.True(t, sub.LastEventAt.Equal(activatedAt),
+		"stale cancel must not overwrite last_event_at")
 
 	var cancelledAudit int
-	if err := db.QueryRowContext(ctx, `
+	require.NoError(t, db.QueryRowContext(ctx, `
 		SELECT count(*)
 		FROM audit_log
 		WHERE kind = ?`,
-		auditSubscriptionCancelled).Scan(&cancelledAudit); err != nil {
-		t.Fatalf("count cancel audit: %v", err)
-	}
-
-	if cancelledAudit != 1 {
-		t.Fatalf("cancel audit = %d, want 1", cancelledAudit)
-	}
+		auditSubscriptionCancelled).Scan(&cancelledAudit), "count cancel audit")
+	assert.Equal(t, 1, cancelledAudit, "stale cancel must write one audit row")
 }
 
 func TestApplyObservationsKeepsActiveOnUnknownAndNoSignal(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 5, 31, 10, 0, 0, 0, time.UTC)
 	e := New(nil, WithClock(func() time.Time { return now }))
 	repos := engineStore(db)
+	tgID := random.TGID()
 
-	if err := repos.Users.Upsert(ctx, domain.User{TGID: 88}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, repos.Users.Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
-	if _, err := repos.Subscriptions.UpsertActive(ctx, domain.Subscription{
-		TGID:       88,
+	_, err := repos.Subscriptions.UpsertActive(ctx, domain.Subscription{
+		TGID:       tgID,
 		Platform:   domain.PlatformBoosty,
 		StartedAt:  now.Add(-time.Hour),
 		LastSignal: "event",
-	}); err != nil {
-		t.Fatalf("seed active subscription: %v", err)
-	}
+	})
+	require.NoError(t, err, "seed active subscription")
 
-	err := e.ApplyObservations(ctx, repos, 88, []domain.SourceVerdict{
+	err = e.ApplyObservations(ctx, repos, tgID, []domain.SourceVerdict{
 		{Source: domain.PlatformBoosty, Verdict: domain.VerdictUnknown},
 		{Source: domain.PlatformTribute, Verdict: domain.VerdictNoSignal},
 	})
-	if err != nil {
-		t.Fatalf("ApplyObservations: %v", err)
-	}
+	require.NoError(t, err, "ApplyObservations")
 
 	sub, ok, err := store.NewSubscriptions(db).GetActive(
-		ctx, 88, domain.PlatformBoosty)
-	if err != nil {
-		t.Fatalf("GetActive: %v", err)
-	}
-
-	if !ok || sub.Status != domain.SubActive {
-		t.Fatalf("subscription = (%+v, %v), want active preserved", sub, ok)
-	}
+		ctx, tgID, domain.PlatformBoosty)
+	require.NoError(t, err, "GetActive")
+	require.True(t, ok, "subscription must be preserved")
+	assert.Equal(t, domain.SubActive, sub.Status, "active status must be preserved")
 }
 
 func TestPersistedDecisionIgnoresExpiredActiveRows(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 5, 31, 10, 0, 0, 0, time.UTC)
 	e := New(nil, WithClock(func() time.Time { return now }))
 	repos := engineStore(db)
+	tgID := random.TGID()
 
 	expires := now.Add(-time.Hour)
 
-	if err := repos.Users.Upsert(ctx, domain.User{TGID: 90}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, repos.Users.Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
-	if _, err := repos.Subscriptions.UpsertActive(ctx, domain.Subscription{
-		TGID:       90,
+	_, err := repos.Subscriptions.UpsertActive(ctx, domain.Subscription{
+		TGID:       tgID,
 		Platform:   domain.PlatformBoosty,
 		StartedAt:  expires.Add(-time.Hour),
 		ExpiresAt:  &expires,
 		LastSignal: "event",
-	}); err != nil {
-		t.Fatalf("seed expired active subscription: %v", err)
-	}
+	})
+	require.NoError(t, err, "seed expired active subscription")
 
-	decision, err := e.PersistedDecision(ctx, repos, 90)
-	if err != nil {
-		t.Fatalf("PersistedDecision: %v", err)
-	}
-
-	if decision.Status != domain.StatusInactive || decision.Allowed {
-		t.Fatalf("decision = %+v, want inactive denied", decision)
-	}
-
-	if len(decision.Reasons) != 1 ||
-		decision.Reasons[0].Verdict != domain.VerdictInactive {
-		t.Fatalf("reasons = %+v, want inactive expired reason", decision.Reasons)
-	}
+	decision, err := e.PersistedDecision(ctx, repos, tgID)
+	require.NoError(t, err, "PersistedDecision")
+	assert.Equal(t, domain.StatusInactive, decision.Status)
+	assert.False(t, decision.Allowed, "expired subscription must be denied")
+	require.Len(t, decision.Reasons, 1, "want one inactive reason")
+	assert.Equal(t, domain.VerdictInactive, decision.Reasons[0].Verdict)
 }
 
 func TestKeyedMutexSerializesSameUser(t *testing.T) {
 	locks := NewKeyedMutex()
-	unlock := locks.Lock(1)
+	key := random.TGID()
+	unlock := locks.Lock(key)
 
 	entered := make(chan struct{})
 	done := make(chan struct{})
@@ -326,7 +275,7 @@ func TestKeyedMutexSerializesSameUser(t *testing.T) {
 	go func() {
 		defer close(done)
 
-		unlockSecond := locks.Lock(1)
+		unlockSecond := locks.Lock(key)
 		defer unlockSecond()
 
 		close(entered)
@@ -351,13 +300,11 @@ func TestKeyedMutexSerializesSameUser(t *testing.T) {
 	locks.mu.Lock()
 	defer locks.mu.Unlock()
 
-	if len(locks.locks) != 0 {
-		t.Fatalf("locks map len = %d, want cleanup after unlock", len(locks.locks))
-	}
+	assert.Empty(t, locks.locks, "locks map must be cleaned up after unlock")
 }
 
 func TestRecomputeAccessGraceSchedulesSingleRevocation(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
 	e := New(nil,
@@ -368,39 +315,33 @@ func TestRecomputeAccessGraceSchedulesSingleRevocation(t *testing.T) {
 		}),
 	)
 	repos := revocationEngineStore(db)
+	tgID := random.TGID()
 
-	if err := repos.Users.Upsert(ctx, domain.User{TGID: 501}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, repos.Users.Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
 	grants := concreteGrants(t, repos)
-	if err := grants.Upsert(ctx, domain.AccessGrant{
-		TGID:       501,
+	require.NoError(t, grants.Upsert(ctx, domain.AccessGrant{
+		TGID:       tgID,
 		Resource:   domain.ResourceChat,
 		State:      domain.GrantJoined,
 		AdmittedBy: "bot",
-	}); err != nil {
-		t.Fatalf("upsert grant: %v", err)
-	}
+	}), "upsert grant")
 
 	for i := range 2 {
-		if _, err := e.RecomputeAccess(ctx, repos, 501); err != nil {
-			t.Fatalf("RecomputeAccess #%d: %v", i+1, err)
-		}
+		_, err := e.RecomputeAccess(ctx, repos, tgID)
+		require.NoErrorf(t, err, "RecomputeAccess #%d", i+1)
 	}
 
-	pending, ok, err := repos.Revocations.Get(ctx, 501)
-	if err != nil || !ok {
-		t.Fatalf("pending = (%+v, %v, %v), want present", pending, ok, err)
-	}
+	pending, ok, err := repos.Revocations.Get(ctx, tgID)
+	require.NoError(t, err)
+	require.True(t, ok, "pending revocation must be present")
+	assert.True(t, pending.ScheduledAt.Equal(now.Add(time.Hour)),
+		"revocation must be scheduled at grace end")
+	assert.True(t, pending.Notified, "user must have been notified")
 
-	if !pending.ScheduledAt.Equal(now.Add(time.Hour)) || !pending.Notified {
-		t.Fatalf("pending = %+v, want scheduled notified", pending)
-	}
-
-	if got := countActions(t, ctx, db, domain.ActionSendDM); got != 1 {
-		t.Fatalf("warning actions = %d, want one", got)
-	}
+	assert.Equal(t, 1, countActions(t, ctx, db, domain.ActionSendDM),
+		"grace must enqueue a single warning")
 }
 
 func TestRecomputeAccessImmediateAndNotifyOnlyModes(t *testing.T) {
@@ -408,57 +349,48 @@ func TestRecomputeAccessImmediateAndNotifyOnlyModes(t *testing.T) {
 
 	t.Run("immediate revokes bot grants", func(t *testing.T) {
 		ctx := context.Background()
-		db := newTestDB(t)
+		db := testutil.NewDB(t)
 		e := New(nil,
 			WithClock(func() time.Time { return now }),
 			WithRevocationConfig(RevocationConfig{ExpiryMode: "immediate"}),
 		)
 		repos := revocationEngineStore(db)
+		tgID := random.TGID()
 
-		seedRevocableGrant(t, ctx, repos, 502)
+		seedRevocableGrant(t, ctx, repos, tgID)
 
-		if _, err := e.RecomputeAccess(ctx, repos, 502); err != nil {
-			t.Fatalf("RecomputeAccess: %v", err)
-		}
-
-		if got := countActions(t, ctx, db, domain.ActionSoftKick); got != 1 {
-			t.Fatalf("soft_kick actions = %d, want one", got)
-		}
+		_, err := e.RecomputeAccess(ctx, repos, tgID)
+		require.NoError(t, err, "RecomputeAccess")
+		assert.Equal(t, 1, countActions(t, ctx, db, domain.ActionSoftKick),
+			"immediate mode must enqueue a soft kick")
 
 		grants := concreteGrants(t, repos)
 
-		grant, err := grants.Get(ctx, 502, domain.ResourceChat)
-		if err != nil {
-			t.Fatalf("get grant: %v", err)
-		}
-
-		if grant.State != domain.GrantRevoked {
-			t.Fatalf("grant state = %s, want revoked", grant.State)
-		}
+		grant, err := grants.Get(ctx, tgID, domain.ResourceChat)
+		require.NoError(t, err, "get grant")
+		assert.Equal(t, domain.GrantRevoked, grant.State)
 	})
 
 	t.Run("notify_only does not revoke", func(t *testing.T) {
 		ctx := context.Background()
-		db := newTestDB(t)
+		db := testutil.NewDB(t)
 		e := New(nil,
 			WithClock(func() time.Time { return now }),
 			WithRevocationConfig(RevocationConfig{ExpiryMode: "notify_only"}),
 		)
 		repos := revocationEngineStore(db)
+		tgID := random.TGID()
 
-		seedRevocableGrant(t, ctx, repos, 503)
+		seedRevocableGrant(t, ctx, repos, tgID)
 
-		if _, err := e.RecomputeAccess(ctx, repos, 503); err != nil {
-			t.Fatalf("RecomputeAccess: %v", err)
-		}
+		_, err := e.RecomputeAccess(ctx, repos, tgID)
+		require.NoError(t, err, "RecomputeAccess")
+		assert.Zero(t, countActions(t, ctx, db, domain.ActionSoftKick),
+			"notify_only must not enqueue a soft kick")
 
-		if got := countActions(t, ctx, db, domain.ActionSoftKick); got != 0 {
-			t.Fatalf("soft_kick actions = %d, want zero", got)
-		}
-
-		if _, ok, err := repos.Revocations.Get(ctx, 503); err != nil || ok {
-			t.Fatalf("pending = (_, %v, %v), want absent", ok, err)
-		}
+		_, ok, err := repos.Revocations.Get(ctx, tgID)
+		require.NoError(t, err)
+		assert.False(t, ok, "notify_only must not schedule a revocation")
 	})
 }
 
@@ -467,7 +399,7 @@ func TestRevokeNowUsesLiveFinalDecision(t *testing.T) {
 
 	t.Run("active source cancels pending revoke", func(t *testing.T) {
 		ctx := context.Background()
-		db := newTestDB(t)
+		db := testutil.NewDB(t)
 		e := New([]SubscriptionSource{fakeSource{
 			platform: domain.PlatformBoosty,
 			verdict: domain.SourceVerdict{
@@ -476,152 +408,124 @@ func TestRevokeNowUsesLiveFinalDecision(t *testing.T) {
 			},
 		}}, WithClock(func() time.Time { return now }))
 		repos := revocationEngineStore(db)
+		tgID := random.TGID()
 
-		seedRevocableGrant(t, ctx, repos, 604)
+		seedRevocableGrant(t, ctx, repos, tgID)
 
-		if err := store.NewRevocations(db).Upsert(ctx, domain.PendingRevocation{
-			TGID:        604,
-			Reason:      "expired",
-			ScheduledAt: now,
-		}); err != nil {
-			t.Fatalf("upsert pending: %v", err)
-		}
+		require.NoError(t, store.NewRevocations(db).Upsert(ctx,
+			domain.PendingRevocation{
+				TGID:        tgID,
+				Reason:      "expired",
+				ScheduledAt: now,
+			}), "upsert pending")
 
-		if _, err := e.RevokeNow(ctx, repos, 604, "expired"); err != nil {
-			t.Fatalf("RevokeNow: %v", err)
-		}
+		_, err := e.RevokeNow(ctx, repos, tgID, "expired")
+		require.NoError(t, err, "RevokeNow")
+		assert.Zero(t, countActions(t, ctx, db, domain.ActionSoftKick),
+			"active source must not enqueue a soft kick")
 
-		if got := countActions(t, ctx, db, domain.ActionSoftKick); got != 0 {
-			t.Fatalf("soft_kick actions = %d, want zero", got)
-		}
-
-		if _, ok, err := repos.Revocations.Get(ctx, 604); err != nil || ok {
-			t.Fatalf("pending = (_, %v, %v), want deleted", ok, err)
-		}
+		_, ok, err := repos.Revocations.Get(ctx, tgID)
+		require.NoError(t, err)
+		assert.False(t, ok, "active source must clear the pending revocation")
 	})
 
 	t.Run("unknown source blocks revoke", func(t *testing.T) {
 		ctx := context.Background()
-		db := newTestDB(t)
+		db := testutil.NewDB(t)
 		e := New([]SubscriptionSource{fakeSource{
 			platform: domain.PlatformBoosty,
 			err:      errors.New("source unavailable"),
 		}}, WithClock(func() time.Time { return now }))
 		repos := revocationEngineStore(db)
+		tgID := random.TGID()
 
-		seedRevocableGrant(t, ctx, repos, 605)
+		seedRevocableGrant(t, ctx, repos, tgID)
 
-		if _, err := e.RevokeNow(ctx, repos, 605, "expired"); err != nil {
-			t.Fatalf("RevokeNow: %v", err)
-		}
-
-		if got := countActions(t, ctx, db, domain.ActionSoftKick); got != 0 {
-			t.Fatalf("soft_kick actions = %d, want zero", got)
-		}
+		_, err := e.RevokeNow(ctx, repos, tgID, "expired")
+		require.NoError(t, err, "RevokeNow")
+		assert.Zero(t, countActions(t, ctx, db, domain.ActionSoftKick),
+			"unknown source must not enqueue a soft kick")
 
 		var alerts int
-		if err := db.QueryRowContext(ctx, `
+		require.NoError(t, db.QueryRowContext(ctx, `
 			SELECT count(*) FROM admin_alerts
-			WHERE kind = 'revocation_unsafe'`).Scan(&alerts); err != nil {
-			t.Fatalf("count alerts: %v", err)
-		}
-
-		if alerts != 1 {
-			t.Fatalf("unsafe alerts = %d, want one", alerts)
-		}
+			WHERE kind = 'revocation_unsafe'`).Scan(&alerts), "count alerts")
+		assert.Equal(t, 1, alerts, "unknown source must raise one unsafe alert")
 	})
 }
 
 func TestRevokeNowSafetyAndGrantFilters(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
 	e := New(nil, WithClock(func() time.Time { return now }))
 	repos := revocationEngineStore(db)
+	activeID := random.TGID()
+	externalID := random.TGID()
+	protectedID := random.TGID()
 
-	for _, tgID := range []int64{601, 602, 603} {
-		if err := repos.Users.Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-			t.Fatalf("upsert user %d: %v", tgID, err)
-		}
+	for _, tgID := range []int64{activeID, externalID, protectedID} {
+		require.NoErrorf(t, repos.Users.Upsert(ctx, domain.User{TGID: tgID}),
+			"upsert user %d", tgID)
 	}
 
-	if _, err := repos.Subscriptions.UpsertActive(ctx, domain.Subscription{
-		TGID:      601,
+	_, err := repos.Subscriptions.UpsertActive(ctx, domain.Subscription{
+		TGID:      activeID,
 		Platform:  domain.PlatformBoosty,
 		StartedAt: now,
-	}); err != nil {
-		t.Fatalf("active sub: %v", err)
-	}
+	})
+	require.NoError(t, err, "active sub")
 
-	if err := store.NewRevocations(db).Upsert(ctx, domain.PendingRevocation{
-		TGID:        601,
+	require.NoError(t, store.NewRevocations(db).Upsert(ctx, domain.PendingRevocation{
+		TGID:        activeID,
 		Reason:      "expired",
 		ScheduledAt: now,
-	}); err != nil {
-		t.Fatalf("pending active user: %v", err)
-	}
+	}), "pending active user")
 
-	if _, err := e.RevokeNow(ctx, repos, 601, "expired"); err != nil {
-		t.Fatalf("RevokeNow active: %v", err)
-	}
+	_, err = e.RevokeNow(ctx, repos, activeID, "expired")
+	require.NoError(t, err, "RevokeNow active")
 
-	if _, ok, err := repos.Revocations.Get(ctx, 601); err != nil || ok {
-		t.Fatalf("active pending = (_, %v, %v), want deleted", ok, err)
-	}
-
-	if got := countActions(t, ctx, db, domain.ActionSoftKick); got != 0 {
-		t.Fatalf("soft_kick actions for active = %d, want zero", got)
-	}
+	_, ok, err := repos.Revocations.Get(ctx, activeID)
+	require.NoError(t, err)
+	assert.False(t, ok, "active user pending must be deleted")
+	assert.Zero(t, countActions(t, ctx, db, domain.ActionSoftKick),
+		"active user must not be soft kicked")
 
 	grants := concreteGrants(t, repos)
-	if err := grants.Upsert(ctx, domain.AccessGrant{
-		TGID:       602,
+	require.NoError(t, grants.Upsert(ctx, domain.AccessGrant{
+		TGID:       externalID,
 		Resource:   domain.ResourceChat,
 		State:      domain.GrantJoined,
 		AdmittedBy: "external",
-	}); err != nil {
-		t.Fatalf("external grant: %v", err)
-	}
+	}), "external grant")
 
-	if _, err := e.RevokeNow(ctx, repos, 602, "expired"); err != nil {
-		t.Fatalf("RevokeNow external: %v", err)
-	}
-
-	if got := countActions(t, ctx, db, domain.ActionSoftKick); got != 0 {
-		t.Fatalf("soft_kick actions for external = %d, want zero", got)
-	}
+	_, err = e.RevokeNow(ctx, repos, externalID, "expired")
+	require.NoError(t, err, "RevokeNow external")
+	assert.Zero(t, countActions(t, ctx, db, domain.ActionSoftKick),
+		"external grant must not be soft kicked")
 
 	repos.Members = fakeMemberChecker{member: &models.ChatMember{
 		Type: models.ChatMemberTypeAdministrator,
 	}}
 
-	if err := grants.Upsert(ctx, domain.AccessGrant{
-		TGID:       603,
+	require.NoError(t, grants.Upsert(ctx, domain.AccessGrant{
+		TGID:       protectedID,
 		Resource:   domain.ResourceChat,
 		State:      domain.GrantJoined,
 		AdmittedBy: "bot",
-	}); err != nil {
-		t.Fatalf("protected grant: %v", err)
-	}
+	}), "protected grant")
 
-	if _, err := e.RevokeNow(ctx, repos, 603, "expired"); err != nil {
-		t.Fatalf("RevokeNow protected: %v", err)
-	}
-
-	if got := countActions(t, ctx, db, domain.ActionSoftKick); got != 0 {
-		t.Fatalf("soft_kick actions for protected = %d, want zero", got)
-	}
+	_, err = e.RevokeNow(ctx, repos, protectedID, "expired")
+	require.NoError(t, err, "RevokeNow protected")
+	assert.Zero(t, countActions(t, ctx, db, domain.ActionSoftKick),
+		"protected admin must not be soft kicked")
 
 	var alerts int
-	if err := db.QueryRowContext(ctx, `
+	require.NoError(t, db.QueryRowContext(ctx, `
 		SELECT count(*) FROM admin_alerts
-		WHERE kind = 'protected_admin_lost_subscription'`).Scan(&alerts); err != nil {
-		t.Fatalf("count alerts: %v", err)
-	}
-
-	if alerts != 1 {
-		t.Fatalf("protected alerts = %d, want one", alerts)
-	}
+		WHERE kind = 'protected_admin_lost_subscription'`).Scan(&alerts),
+		"count alerts")
+	assert.Equal(t, 1, alerts, "protected admin must raise one alert")
 }
 
 func seedRevocableGrant(
@@ -632,28 +536,23 @@ func seedRevocableGrant(
 ) {
 	t.Helper()
 
-	if err := repos.Users.Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, repos.Users.Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
 	grants := concreteGrants(t, repos)
-	if err := grants.Upsert(ctx, domain.AccessGrant{
+	require.NoError(t, grants.Upsert(ctx, domain.AccessGrant{
 		TGID:       tgID,
 		Resource:   domain.ResourceChat,
 		State:      domain.GrantJoined,
 		AdmittedBy: "bot",
-	}); err != nil {
-		t.Fatalf("upsert grant: %v", err)
-	}
+	}), "upsert grant")
 }
 
 func concreteGrants(t *testing.T, repos Store) *store.Grants {
 	t.Helper()
 
 	grants, ok := repos.Grants.(*store.Grants)
-	if !ok {
-		t.Fatalf("grants repo type = %T, want *store.Grants", repos.Grants)
-	}
+	require.Truef(t, ok, "grants repo type = %T, want *store.Grants", repos.Grants)
 
 	return grants
 }
@@ -728,45 +627,9 @@ func countActions(
 	t.Helper()
 
 	var got int
-	if err := db.QueryRowContext(ctx, `
+	require.NoError(t, db.QueryRowContext(ctx, `
 		SELECT count(*) FROM access_actions
-		WHERE action_type = ?`, string(actionType)).Scan(&got); err != nil {
-		t.Fatalf("count actions: %v", err)
-	}
+		WHERE action_type = ?`, string(actionType)).Scan(&got), "count actions")
 
 	return got
-}
-
-func newTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-
-	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("open database: %v", err)
-	}
-
-	t.Cleanup(func() { _ = db.Close() })
-
-	provider, err := goose.NewProvider(
-		goose.DialectSQLite3, db, os.DirFS(migrationsDir(t)))
-	if err != nil {
-		t.Fatalf("new goose provider: %v", err)
-	}
-
-	if _, err := provider.Up(context.Background()); err != nil {
-		t.Fatalf("apply migrations: %v", err)
-	}
-
-	return db
-}
-
-func migrationsDir(t *testing.T) string {
-	t.Helper()
-
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-
-	return filepath.Join(filepath.Dir(file), "..", "..", "migrations")
 }

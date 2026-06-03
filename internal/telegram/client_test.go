@@ -1,10 +1,8 @@
-//nolint:wsl_v5 // Client serialization tests keep captured vars together.
 package telegram
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -13,6 +11,8 @@ import (
 
 	botapi "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/justskiv/gatekeeper/internal/messages"
 )
@@ -24,50 +24,36 @@ func TestNormalizeErrorCategories(t *testing.T) {
 	})
 
 	var apiErr *APIError
-	if !errors.As(rateErr, &apiErr) ||
-		apiErr.Category != ErrorCategoryRateLimited ||
-		apiErr.RetryAfter != 12 {
-		t.Fatalf("rate error = %#v, want retry_after category", rateErr)
-	}
+	require.ErrorAs(t, rateErr, &apiErr)
+	assert.Equal(t, ErrorCategoryRateLimited, apiErr.Category)
+	assert.Equal(t, 12, apiErr.RetryAfter)
 
 	blockErr := NormalizeError("sendMessage",
 		fmt.Errorf("%w, bot was blocked by the user", botapi.ErrorForbidden))
-	if !IsDMBlocked(blockErr) {
-		t.Fatalf("sendMessage 403 = %v, want dm_blocked", blockErr)
-	}
+	assert.True(t, IsDMBlocked(blockErr), "403 send must classify as dm_blocked")
 
 	rightsErr := NormalizeError("getChatMember",
 		fmt.Errorf("%w, not enough rights", botapi.ErrorBadRequest))
-	if !IsPermanentRights(rightsErr) {
-		t.Fatalf("rights error = %v, want permanent_rights", rightsErr)
-	}
+	assert.True(t, IsPermanentRights(rightsErr),
+		"rights error must classify as permanent_rights")
 }
 
 func TestIsExpectedNoopClassification(t *testing.T) {
 	err := fmt.Errorf("%w, USER_NOT_PARTICIPANT", botapi.ErrorBadRequest)
-	if !IsExpectedNoop("ban_chat_member", err) {
-		t.Fatalf("IsExpectedNoop(%v) = false, want true", err)
-	}
+	assert.True(t, IsExpectedNoop("ban_chat_member", err))
 
 	alreadyMember := fmt.Errorf("%w, user is already a member", botapi.ErrorBadRequest)
-	if !IsExpectedNoop("approve_join", alreadyMember) {
-		t.Fatalf("IsExpectedNoop(%v) = false, want true", alreadyMember)
-	}
+	assert.True(t, IsExpectedNoop("approve_join", alreadyMember))
 
 	broadAlready := fmt.Errorf("%w, already failed internally", botapi.ErrorBadRequest)
-	if IsExpectedNoop("approve_join", broadAlready) {
-		t.Fatalf("IsExpectedNoop(%v) = true, want false", broadAlready)
-	}
+	assert.False(t, IsExpectedNoop("approve_join", broadAlready),
+		"broad 'already' must not be treated as a no-op")
 
 	chatErr := fmt.Errorf("%w, chat not found", botapi.ErrorBadRequest)
-	if IsExpectedNoop("soft_kick", chatErr) {
-		t.Fatal("IsExpectedNoop(chat not found) = true, want false")
-	}
+	assert.False(t, IsExpectedNoop("soft_kick", chatErr))
 
 	got := NormalizeError("getChatMember", err)
-	if got == nil {
-		t.Fatal("NormalizeError for health check returned nil, want real signal")
-	}
+	assert.Error(t, got, "NormalizeError for health check must return a real signal")
 }
 
 func TestSendMessageClassifiesForbiddenByTarget(t *testing.T) {
@@ -76,17 +62,13 @@ func TestSendMessageClassifiesForbiddenByTarget(t *testing.T) {
 	})
 
 	privateErr := client.SendMessage(context.Background(), 42, "hello")
-	if !IsDMBlocked(privateErr) {
-		t.Fatalf("private send error = %v, want dm_blocked", privateErr)
-	}
+	assert.True(t, IsDMBlocked(privateErr), "private 403 must classify as dm_blocked")
 
 	groupErr := client.SendMessage(context.Background(), -1001, "hello")
 
 	var apiErr *APIError
-	if !errors.As(groupErr, &apiErr) ||
-		apiErr.Category != ErrorCategoryForbidden {
-		t.Fatalf("group send error = %#v, want forbidden", groupErr)
-	}
+	require.ErrorAs(t, groupErr, &apiErr)
+	assert.Equal(t, ErrorCategoryForbidden, apiErr.Category)
 }
 
 func TestSendMessageSerializesParseModeOnlyForFormattedMessages(t *testing.T) {
@@ -102,35 +84,27 @@ func TestSendMessageSerializesParseModeOnlyForFormattedMessages(t *testing.T) {
 		writeTelegramResult(w, map[string]any{"message_id": 1})
 	})
 
-	if err := client.SendFormattedMessage(
+	require.NoError(t, client.SendFormattedMessage(
 		context.Background(), 42, "<b>hello</b>", messages.ParseModeHTML,
-	); err != nil {
-		t.Fatalf("SendFormattedMessage: %v", err)
-	}
+	), "SendFormattedMessage")
 
-	if err := client.SendMessage(context.Background(), 42, "<b>plain</b>"); err != nil {
-		t.Fatalf("SendMessage: %v", err)
-	}
+	require.NoError(t, client.SendMessage(context.Background(), 42, "<b>plain</b>"),
+		"SendMessage")
 
-	if err := client.SendFormattedMessageWithReplyMarkup(
+	require.NoError(t, client.SendFormattedMessageWithReplyMarkup(
 		context.Background(),
 		42,
 		"<b>retry</b>",
 		messages.ParseModeHTML,
 		models.InlineKeyboardMarkup{},
-	); err != nil {
-		t.Fatalf("SendFormattedMessageWithReplyMarkup: %v", err)
-	}
+	), "SendFormattedMessageWithReplyMarkup")
 
-	if captured[0]["parse_mode"] != messages.ParseModeHTML {
-		t.Fatalf("formatted body = %#v, want HTML parse mode", captured[0])
-	}
-	if captured[1]["parse_mode"] != "" {
-		t.Fatalf("plain body = %#v, want no parse_mode", captured[1])
-	}
-	if captured[2]["parse_mode"] != messages.ParseModeHTML {
-		t.Fatalf("reply markup body = %#v, want HTML parse mode", captured[2])
-	}
+	require.Len(t, captured, 3)
+	assert.Equal(t, messages.ParseModeHTML, captured[0]["parse_mode"],
+		"formatted body must carry HTML parse mode")
+	assert.Empty(t, captured[1]["parse_mode"], "plain body must carry no parse_mode")
+	assert.Equal(t, messages.ParseModeHTML, captured[2]["parse_mode"],
+		"reply markup body must carry HTML parse mode")
 }
 
 func TestCreateChatInviteLinkSerializesParams(t *testing.T) {
@@ -143,8 +117,9 @@ func TestCreateChatInviteLinkSerializesParams(t *testing.T) {
 			t.Fatalf("unexpected method %s", methodName(r.URL.Path))
 		}
 
-		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
-			t.Fatalf("decode request: %v", err)
+		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&captured),
+			"decode request") {
+			return
 		}
 
 		writeTelegramResult(w, map[string]any{
@@ -163,21 +138,15 @@ func TestCreateChatInviteLinkSerializesParams(t *testing.T) {
 		MemberLimit:        1,
 		CreatesJoinRequest: true,
 	})
-	if err != nil {
-		t.Fatalf("CreateChatInviteLink: %v", err)
-	}
+	require.NoError(t, err, "CreateChatInviteLink")
 
-	if link.InviteLink != "https://t.me/+abc" {
-		t.Fatalf("invite link = %q", link.InviteLink)
-	}
+	assert.Equal(t, "https://t.me/+abc", link.InviteLink)
 
-	if captured["chat_id"] != float64(-1001) ||
-		captured["name"] != "gk-shared-chat" ||
-		captured["expire_date"] != float64(1_700_000_000) ||
-		captured["member_limit"] != float64(1) ||
-		captured["creates_join_request"] != true {
-		t.Fatalf("captured request = %#v", captured)
-	}
+	assert.InDelta(t, float64(-1001), captured["chat_id"], 0)
+	assert.Equal(t, "gk-shared-chat", captured["name"])
+	assert.InDelta(t, float64(1_700_000_000), captured["expire_date"], 0)
+	assert.InDelta(t, float64(1), captured["member_limit"], 0)
+	assert.Equal(t, true, captured["creates_join_request"])
 }
 
 func TestUnbanChatMemberSerializesOnlyIfBanned(t *testing.T) {
@@ -188,22 +157,20 @@ func TestUnbanChatMemberSerializesOnlyIfBanned(t *testing.T) {
 			t.Fatalf("unexpected method %s", methodName(r.URL.Path))
 		}
 
-		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
-			t.Fatalf("decode request: %v", err)
+		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&captured),
+			"decode request") {
+			return
 		}
 
 		writeTelegramResult(w, true)
 	})
 
-	if err := client.UnbanChatMember(context.Background(), -1001, 42, true); err != nil {
-		t.Fatalf("UnbanChatMember: %v", err)
-	}
+	require.NoError(t, client.UnbanChatMember(context.Background(), -1001, 42, true),
+		"UnbanChatMember")
 
-	if captured["chat_id"] != float64(-1001) ||
-		captured["user_id"] != float64(42) ||
-		captured["only_if_banned"] != true {
-		t.Fatalf("captured request = %#v", captured)
-	}
+	assert.InDelta(t, float64(-1001), captured["chat_id"], 0)
+	assert.InDelta(t, float64(42), captured["user_id"], 0)
+	assert.Equal(t, true, captured["only_if_banned"])
 }
 
 type commandsRequest struct {
@@ -227,19 +194,14 @@ func TestSetMyCommandsIncludesOwnerAdminCommands(t *testing.T) {
 		writeTelegramResult(w, true)
 	})
 
-	if err := client.SetMyCommands(context.Background(), []int64{100}); err != nil {
-		t.Fatalf("SetMyCommands: %v", err)
-	}
+	require.NoError(t, client.SetMyCommands(context.Background(), []int64{100}),
+		"SetMyCommands")
 
-	if len(captured) != 2 {
-		t.Fatalf("captured calls = %d, want default and owner scope", len(captured))
-	}
+	require.Len(t, captured, 2, "want default and owner scope")
 
 	defaultCommands := commandSet(captured[0].Commands)
-	if defaultCommands["grant"] || defaultCommands["ban"] {
-		t.Fatalf("default commands = %v, want no owner-only commands",
-			defaultCommands)
-	}
+	assert.False(t, defaultCommands["grant"], "default scope must omit owner commands")
+	assert.False(t, defaultCommands["ban"], "default scope must omit owner commands")
 
 	ownerCommands := commandSet(captured[1].Commands)
 	for _, command := range []string{
@@ -247,16 +209,16 @@ func TestSetMyCommandsIncludesOwnerAdminCommands(t *testing.T) {
 		"grant", "revoke", "ban", "unban", "sync",
 		"stats", "alerts", "export", "chats", "help_admin",
 	} {
-		if !ownerCommands[command] {
-			t.Fatalf("owner commands = %v, missing %q", ownerCommands, command)
-		}
+		assert.Truef(t, ownerCommands[command], "owner scope missing %q", command)
 	}
 }
 
 func TestSetAndDeleteWebhookSerializeBotAPIRequests(t *testing.T) {
-	var methods []string
-	var setWebhook map[string]any
-	var deleteWebhook map[string]any
+	var (
+		methods       []string
+		setWebhook    map[string]any
+		deleteWebhook map[string]any
+	)
 
 	client := newBotAPITestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		method := methodName(r.URL.Path)
@@ -264,12 +226,14 @@ func TestSetAndDeleteWebhookSerializeBotAPIRequests(t *testing.T) {
 
 		switch method {
 		case "setWebhook":
-			if err := json.NewDecoder(r.Body).Decode(&setWebhook); err != nil {
-				t.Fatalf("decode setWebhook: %v", err)
+			if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&setWebhook),
+				"decode setWebhook") {
+				return
 			}
 		case "deleteWebhook":
-			if err := json.NewDecoder(r.Body).Decode(&deleteWebhook); err != nil {
-				t.Fatalf("decode deleteWebhook: %v", err)
+			if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&deleteWebhook),
+				"decode deleteWebhook") {
+				return
 			}
 		default:
 			t.Fatalf("unexpected method %s", method)
@@ -278,37 +242,26 @@ func TestSetAndDeleteWebhookSerializeBotAPIRequests(t *testing.T) {
 		writeTelegramResult(w, true)
 	})
 
-	if err := client.SetWebhook(context.Background(),
+	require.NoError(t, client.SetWebhook(context.Background(),
 		"https://bot.example.com/webhooks/telegram",
 		"secret",
 		[]string{"message", "chat_member"},
-	); err != nil {
-		t.Fatalf("SetWebhook: %v", err)
-	}
+	), "SetWebhook")
 
-	if err := client.DeleteWebhook(context.Background()); err != nil {
-		t.Fatalf("DeleteWebhook: %v", err)
-	}
+	require.NoError(t, client.DeleteWebhook(context.Background()), "DeleteWebhook")
 
-	if strings.Join(methods, ",") != "setWebhook,deleteWebhook" {
-		t.Fatalf("methods = %v, want set/delete", methods)
-	}
+	assert.Equal(t, "setWebhook,deleteWebhook", strings.Join(methods, ","))
 
-	if setWebhook["url"] != "https://bot.example.com/webhooks/telegram" ||
-		setWebhook["secret_token"] != "secret" {
-		t.Fatalf("setWebhook = %#v, want url and secret", setWebhook)
-	}
+	assert.Equal(t, "https://bot.example.com/webhooks/telegram", setWebhook["url"])
+	assert.Equal(t, "secret", setWebhook["secret_token"])
 
 	allowed, ok := setWebhook["allowed_updates"].([]any)
-	if !ok || len(allowed) != 2 || allowed[0] != "message" {
-		t.Fatalf("allowed_updates = %#v, want explicit list",
-			setWebhook["allowed_updates"])
-	}
+	require.True(t, ok, "allowed_updates must be an explicit list")
+	require.Len(t, allowed, 2)
+	assert.Equal(t, "message", allowed[0])
 
-	if deleteWebhook["drop_pending_updates"] != false {
-		t.Fatalf("deleteWebhook = %#v, want drop_pending_updates=false",
-			deleteWebhook)
-	}
+	assert.Equal(t, false, deleteWebhook["drop_pending_updates"],
+		"deleteWebhook must keep pending updates")
 }
 
 func TestRawRequestNormalizesRetryAfter(t *testing.T) {
@@ -331,9 +284,8 @@ func TestRawRequestNormalizesRetryAfter(t *testing.T) {
 	err := client.ApproveChatJoinRequest(context.Background(), -1001, 42)
 
 	wait, ok := RetryAfter(err)
-	if !ok || wait != 17*time.Second {
-		t.Fatalf("RetryAfter(%v) = (%v, %v), want 17s true", err, wait, ok)
-	}
+	require.True(t, ok, "rate-limited error must expose retry_after")
+	assert.Equal(t, 17*time.Second, wait)
 }
 
 func commandSet(commands []struct {
@@ -353,19 +305,17 @@ func decodeSendMessageRequest(t *testing.T, r *http.Request) map[string]string {
 	contentType := r.Header.Get("Content-Type")
 	if strings.HasPrefix(contentType, "application/json") {
 		var req map[string]string
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode sendMessage: %v", err)
-		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req),
+			"decode sendMessage")
 
 		return req
 	}
 
 	if strings.HasPrefix(contentType, "multipart/form-data") {
-		if err := r.ParseMultipartForm(1 << 20); err != nil {
-			t.Fatalf("parse sendMessage multipart request: %v", err)
-		}
-	} else if err := r.ParseForm(); err != nil {
-		t.Fatalf("parse sendMessage form request: %v", err)
+		require.NoError(t, r.ParseMultipartForm(1<<20),
+			"parse sendMessage multipart request")
+	} else {
+		require.NoError(t, r.ParseForm(), "parse sendMessage form request")
 	}
 
 	return map[string]string{
@@ -381,29 +331,24 @@ func decodeSetMyCommandsRequest(t *testing.T, r *http.Request) commandsRequest {
 
 	contentType := r.Header.Get("Content-Type")
 	if strings.HasPrefix(contentType, "application/json") {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode request: %v", err)
-		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req), "decode request")
 
 		return req
 	}
 
 	if strings.HasPrefix(contentType, "multipart/form-data") {
-		if err := r.ParseMultipartForm(1 << 20); err != nil {
-			t.Fatalf("parse multipart request: %v", err)
-		}
-	} else if err := r.ParseForm(); err != nil {
-		t.Fatalf("parse form request: %v", err)
+		require.NoError(t, r.ParseMultipartForm(1<<20), "parse multipart request")
+	} else {
+		require.NoError(t, r.ParseForm(), "parse form request")
 	}
 
-	if err := json.Unmarshal([]byte(r.FormValue("commands")), &req.Commands); err != nil {
-		t.Fatalf("decode commands form field: %v", err)
-	}
+	require.NoError(t,
+		json.Unmarshal([]byte(r.FormValue("commands")), &req.Commands),
+		"decode commands form field")
 
 	if rawScope := r.FormValue("scope"); rawScope != "" {
-		if err := json.Unmarshal([]byte(rawScope), &req.Scope); err != nil {
-			t.Fatalf("decode scope form field: %v", err)
-		}
+		require.NoError(t, json.Unmarshal([]byte(rawScope), &req.Scope),
+			"decode scope form field")
 	}
 
 	return req

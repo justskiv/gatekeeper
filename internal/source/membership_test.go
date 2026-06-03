@@ -7,8 +7,11 @@ import (
 	"time"
 
 	"github.com/go-telegram/bot/models"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/justskiv/gatekeeper/internal/domain"
+	"github.com/justskiv/gatekeeper/internal/lib/random"
 )
 
 type fakeMemberChecker struct {
@@ -114,14 +117,9 @@ func TestMembershipVerdictMapsTelegramStatuses(t *testing.T) {
 			source := NewMembership(domain.PlatformBoosty, -1001,
 				fakeMemberChecker{member: tt.member})
 
-			got, err := source.Verdict(context.Background(), 42)
-			if err != nil {
-				t.Fatalf("Verdict: %v", err)
-			}
-
-			if got.Verdict != tt.want {
-				t.Fatalf("verdict = %s, want %s", got.Verdict, tt.want)
-			}
+			got, err := source.Verdict(context.Background(), random.TGID())
+			require.NoError(t, err, "Verdict")
+			assert.Equal(t, tt.want, got.Verdict)
 		})
 	}
 }
@@ -130,14 +128,9 @@ func TestMembershipVerdictReturnsUnknownOnCheckerError(t *testing.T) {
 	source := NewMembership(domain.PlatformBoosty, -1001,
 		fakeMemberChecker{err: errors.New("telegram unavailable")})
 
-	got, err := source.Verdict(context.Background(), 42)
-	if err != nil {
-		t.Fatalf("Verdict: %v", err)
-	}
-
-	if got.Verdict != domain.VerdictUnknown {
-		t.Fatalf("verdict = %s, want unknown", got.Verdict)
-	}
+	got, err := source.Verdict(context.Background(), random.TGID())
+	require.NoError(t, err, "Verdict")
+	assert.Equal(t, domain.VerdictUnknown, got.Verdict)
 }
 
 func TestTributeVerdictCombinesMembershipAndLedger(t *testing.T) {
@@ -211,18 +204,14 @@ func TestTributeVerdictCombinesMembershipAndLedger(t *testing.T) {
 				WithClock(func() time.Time { return now }),
 			)
 
-			got, err := source.Verdict(context.Background(), 42)
-			if err != nil {
-				t.Fatalf("Verdict: %v", err)
-			}
+			got, err := source.Verdict(context.Background(), random.TGID())
+			require.NoError(t, err, "Verdict")
+			assert.Equal(t, tt.want, got.Verdict)
 
-			if got.Verdict != tt.want {
-				t.Fatalf("verdict = %s, want %s", got.Verdict, tt.want)
-			}
-
-			if tt.wantUntil != nil &&
-				(got.Until == nil || !got.Until.Equal(*tt.wantUntil)) {
-				t.Fatalf("until = %v, want %v", got.Until, *tt.wantUntil)
+			if tt.wantUntil != nil {
+				require.NotNil(t, got.Until)
+				assert.True(t, got.Until.Equal(*tt.wantUntil),
+					"until must round-trip")
 			}
 		})
 	}

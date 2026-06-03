@@ -2,17 +2,21 @@ package store
 
 import (
 	"context"
-	"errors"
 	"testing"
 
+	"github.com/brianvoe/gofakeit/v7"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/justskiv/gatekeeper/internal/domain"
+	"github.com/justskiv/gatekeeper/internal/lib/random"
 )
 
 func TestTelegramUpdatesInsertBatchAdvancesOffsetAtomically(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
 	chatID := int64(-1001)
-	tgID := int64(42)
+	tgID := random.TGID()
 
 	err := NewTelegramUpdates(db).InsertBatch(ctx, []TelegramUpdate{
 		{
@@ -30,29 +34,18 @@ func TestTelegramUpdatesInsertBatchAdvancesOffsetAtomically(t *testing.T) {
 			PayloadJSON: []byte(`{"update_id":42}`),
 		},
 	}, 43)
-	if err != nil {
-		t.Fatalf("InsertBatch: %v", err)
-	}
+	require.NoError(t, err, "InsertBatch")
 
 	var rows int
-	if err := db.QueryRowContext(ctx,
+	require.NoError(t, db.QueryRowContext(ctx,
 		`SELECT count(*) FROM telegram_updates WHERE status = 'pending'`,
-	).Scan(&rows); err != nil {
-		t.Fatalf("count updates: %v", err)
-	}
-
-	if rows != 2 {
-		t.Fatalf("pending rows = %d, want 2", rows)
-	}
+	).Scan(&rows), "count updates")
+	assert.Equal(t, 2, rows)
 
 	offset, ok, err := NewMeta(db).GetUpdateOffset(ctx)
-	if err != nil {
-		t.Fatalf("GetUpdateOffset: %v", err)
-	}
-
-	if !ok || offset != 43 {
-		t.Fatalf("offset = (%d, %v), want (43, true)", offset, ok)
-	}
+	require.NoError(t, err, "GetUpdateOffset")
+	require.True(t, ok, "offset must be persisted with the batch")
+	assert.Equal(t, int64(43), offset)
 }
 
 func TestTelegramUpdatesInsertBatchParticipatesInCallerRollback(t *testing.T) {
@@ -60,89 +53,68 @@ func TestTelegramUpdatesInsertBatchParticipatesInCallerRollback(t *testing.T) {
 	ctx := context.Background()
 
 	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatalf("BeginTx: %v", err)
-	}
+	require.NoError(t, err, "BeginTx")
 
-	if err := NewTelegramUpdates(tx).InsertBatch(ctx, []TelegramUpdate{
+	err = NewTelegramUpdates(tx).InsertBatch(ctx, []TelegramUpdate{
 		{
 			UpdateID:    50,
 			UpdateType:  "message",
 			PayloadJSON: []byte(`{"update_id":50}`),
 		},
-	}, 51); err != nil {
-		t.Fatalf("InsertBatch in tx: %v", err)
-	}
+	}, 51)
+	require.NoError(t, err, "InsertBatch in tx")
 
-	if err := tx.Rollback(); err != nil {
-		t.Fatalf("Rollback: %v", err)
-	}
+	require.NoError(t, tx.Rollback(), "Rollback")
 
 	var rows int
-	if err := db.QueryRowContext(ctx,
+	require.NoError(t, db.QueryRowContext(ctx,
 		`SELECT count(*) FROM telegram_updates WHERE update_id = 50`,
-	).Scan(&rows); err != nil {
-		t.Fatalf("count updates: %v", err)
-	}
+	).Scan(&rows), "count updates")
+	assert.Zero(t, rows, "rolled-back batch must leave no rows")
 
-	if rows != 0 {
-		t.Fatalf("updates after rollback = %d, want 0", rows)
-	}
-
-	if _, ok, err := NewMeta(db).GetUpdateOffset(ctx); err != nil || ok {
-		t.Fatalf("offset after rollback = (_, %v, %v), want absent", ok, err)
-	}
+	_, ok, err := NewMeta(db).GetUpdateOffset(ctx)
+	require.NoError(t, err, "GetUpdateOffset")
+	assert.False(t, ok, "rolled-back offset must be absent")
 }
 
 func TestTelegramUpdateTerminalStatusSharesHandlerTransaction(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
 
-	if err := NewTelegramUpdates(db).InsertBatch(ctx, []TelegramUpdate{
+	err := NewTelegramUpdates(db).InsertBatch(ctx, []TelegramUpdate{
 		{
 			UpdateID:    100,
 			UpdateType:  "message",
 			PayloadJSON: []byte(`{"update_id":100}`),
 		},
-	}, 101); err != nil {
-		t.Fatalf("InsertBatch: %v", err)
-	}
+	}, 101)
+	require.NoError(t, err, "InsertBatch")
 
 	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatalf("BeginTx: %v", err)
-	}
+	require.NoError(t, err, "BeginTx")
 
-	if err := NewUsers(tx).Upsert(ctx, domain.User{
-		TGID:     777,
-		Username: "rollback",
+	tgID := random.TGID()
+
+	err = NewUsers(tx).Upsert(ctx, domain.User{
+		TGID:     tgID,
+		Username: gofakeit.Username(),
 		DMState:  domain.DMOpen,
-	}); err != nil {
-		t.Fatalf("Upsert in tx: %v", err)
-	}
+	})
+	require.NoError(t, err, "Upsert in tx")
 
-	if err := NewTelegramUpdates(tx).MarkTerminal(
-		ctx, 100, TelegramUpdateProcessed, "",
-	); err != nil {
-		t.Fatalf("MarkTerminal in tx: %v", err)
-	}
+	require.NoError(t,
+		NewTelegramUpdates(tx).MarkTerminal(ctx, 100, TelegramUpdateProcessed, ""),
+		"MarkTerminal in tx")
 
-	if err := tx.Rollback(); err != nil {
-		t.Fatalf("Rollback: %v", err)
-	}
+	require.NoError(t, tx.Rollback(), "Rollback")
 
-	if _, err := NewUsers(db).Get(ctx, 777); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("user after rollback err = %v, want ErrNotFound", err)
-	}
+	_, err = NewUsers(db).Get(ctx, tgID)
+	require.ErrorIs(t, err, ErrNotFound, "rolled-back user must be gone")
 
 	var status string
-	if err := db.QueryRowContext(ctx,
+	require.NoError(t, db.QueryRowContext(ctx,
 		`SELECT status FROM telegram_updates WHERE update_id = 100`,
-	).Scan(&status); err != nil {
-		t.Fatalf("read update status: %v", err)
-	}
-
-	if status != string(TelegramUpdatePending) {
-		t.Fatalf("status after rollback = %q, want pending", status)
-	}
+	).Scan(&status), "read update status")
+	assert.Equal(t, string(TelegramUpdatePending), status,
+		"rolled-back MarkTerminal must leave the update pending")
 }

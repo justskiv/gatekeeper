@@ -10,16 +10,19 @@ import (
 	"time"
 
 	"github.com/go-telegram/bot/models"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/justskiv/gatekeeper/internal/admission"
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/messages"
 	"github.com/justskiv/gatekeeper/internal/store"
+	"github.com/justskiv/gatekeeper/internal/testutil"
 )
 
 func TestRouterRoutesSourceChatMemberToEngine(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 
 	statusEngine := engine.New(nil)
@@ -39,43 +42,32 @@ func TestRouterRoutesSourceChatMemberToEngine(t *testing.T) {
 		}))
 
 	result, err := router.Route(ctx, sourceJoinUpdate(-1001, 42))
-	if err != nil {
-		t.Fatalf("Route: %v", err)
-	}
-
-	if result.Status != store.TelegramUpdateProcessed {
-		t.Fatalf("status = %s, want processed", result.Status)
-	}
+	require.NoError(t, err, "Route")
+	assert.Equal(t, store.TelegramUpdateProcessed, result.Status)
 
 	sub, ok, err := store.NewSubscriptions(db).GetActive(
 		ctx, 42, domain.PlatformBoosty)
-	if err != nil {
-		t.Fatalf("GetActive: %v", err)
-	}
-
-	if !ok || sub.Platform != domain.PlatformBoosty {
-		t.Fatalf("subscription = (%+v, %v), want active boosty", sub, ok)
-	}
+	require.NoError(t, err, "GetActive")
+	require.True(t, ok, "boosty subscription must be active")
+	assert.Equal(t, domain.PlatformBoosty, sub.Platform)
 }
 
 func TestRouterIgnoresTributeMembershipInWebhookMode(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	eventAt := time.Date(2026, 6, 2, 10, 0, 0, 0, time.UTC)
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: 42}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{TGID: 42}),
+		"upsert user")
 
-	if _, err := store.NewSubscriptions(db).UpsertActive(ctx, domain.Subscription{
+	_, err := store.NewSubscriptions(db).UpsertActive(ctx, domain.Subscription{
 		TGID:        42,
 		Platform:    domain.PlatformTribute,
 		StartedAt:   eventAt,
 		LastSignal:  "webhook",
 		LastEventAt: &eventAt,
-	}); err != nil {
-		t.Fatalf("seed tribute subscription: %v", err)
-	}
+	})
+	require.NoError(t, err, "seed tribute subscription")
 
 	router := NewRouter(RouterDeps{
 		Users:         store.NewUsers(db),
@@ -94,49 +86,39 @@ func TestRouterIgnoresTributeMembershipInWebhookMode(t *testing.T) {
 		}))
 
 	result, err := router.Route(ctx, sourceLeaveUpdate(-1002, 42))
-	if err != nil {
-		t.Fatalf("Route: %v", err)
-	}
+	require.NoError(t, err, "Route")
+	assert.Equal(t, store.TelegramUpdateIgnored, result.Status)
 
-	if result.Status != store.TelegramUpdateIgnored {
-		t.Fatalf("status = %s, want ignored", result.Status)
-	}
-
-	if _, ok, err := store.NewSubscriptions(db).GetActive(
-		ctx, 42, domain.PlatformTribute,
-	); err != nil || !ok {
-		t.Fatalf("active tribute subscription = %v err=%v, want kept", ok, err)
-	}
+	_, ok, err := store.NewSubscriptions(db).GetActive(
+		ctx, 42, domain.PlatformTribute)
+	require.NoError(t, err, "GetActive")
+	assert.True(t, ok, "tribute subscription must be kept")
 }
 
 func TestRouterSourceRevocationWiresProtectedMemberAlertDelivery(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	tgID := int64(43)
 	ownerID := int64(100)
 	outbox := store.NewOutbox(db)
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
-	if _, err := store.NewSubscriptions(db).UpsertActive(ctx, domain.Subscription{
+	_, err := store.NewSubscriptions(db).UpsertActive(ctx, domain.Subscription{
 		TGID:       tgID,
 		Platform:   domain.PlatformBoosty,
 		StartedAt:  time.Now().Add(-time.Hour),
 		LastSignal: "event",
-	}); err != nil {
-		t.Fatalf("upsert subscription: %v", err)
-	}
+	})
+	require.NoError(t, err, "upsert subscription")
 
-	if err := store.NewGrants(db).Upsert(ctx, domain.AccessGrant{
+	require.NoError(t, store.NewGrants(db).Upsert(ctx, domain.AccessGrant{
 		TGID:       tgID,
 		Resource:   domain.ResourceChat,
 		State:      domain.GrantJoined,
 		AdmittedBy: "bot",
-	}); err != nil {
-		t.Fatalf("upsert grant: %v", err)
-	}
+	}), "upsert grant")
 
 	statusEngine := engine.New(nil, engine.WithRevocationConfig(
 		engine.RevocationConfig{ExpiryMode: "immediate"}))
@@ -162,29 +144,19 @@ func TestRouterSourceRevocationWiresProtectedMemberAlertDelivery(t *testing.T) {
 		}}))
 
 	result, err := router.Route(ctx, sourceLeaveUpdate(-1001, tgID))
-	if err != nil {
-		t.Fatalf("Route: %v", err)
-	}
+	require.NoError(t, err, "Route")
+	assert.Equal(t, store.TelegramUpdateProcessed, result.Status)
 
-	if result.Status != store.TelegramUpdateProcessed {
-		t.Fatalf("status = %s, want processed", result.Status)
-	}
-
-	if got := countRouterActions(t, db, domain.ActionSoftKick); got != 0 {
-		t.Fatalf("soft_kick actions = %d, want none for protected admin", got)
-	}
-
-	if got := countRouterAlerts(t, db, "protected_admin_lost_subscription"); got != 1 {
-		t.Fatalf("protected alerts = %d, want one", got)
-	}
-
-	if got := countRouterActions(t, db, domain.ActionSendDM); got != 1 {
-		t.Fatalf("operator delivery actions = %d, want one", got)
-	}
+	assert.Zero(t, countRouterActions(t, db, domain.ActionSoftKick),
+		"soft_kick actions must be none for protected admin")
+	assert.Equal(t, 1, countRouterAlerts(t, db, "protected_admin_lost_subscription"),
+		"protected alerts")
+	assert.Equal(t, 1, countRouterActions(t, db, domain.ActionSendDM),
+		"operator delivery actions")
 }
 
 func TestRouterEnqueuesCommandDMInOutbox(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	updateID := int64(800)
 
@@ -202,30 +174,17 @@ func TestRouterEnqueuesCommandDMInOutbox(t *testing.T) {
 	}, nil, nil, nil)
 
 	result, err := router.Route(ctx, privateTextUpdate(updateID, 9001, "/start"))
-	if err != nil {
-		t.Fatalf("Route: %v", err)
-	}
-
-	if result.Status != store.TelegramUpdateProcessed {
-		t.Fatalf("status = %s, want processed", result.Status)
-	}
-
-	if len(result.Effects) != 0 {
-		t.Fatalf("effects = %+v, want no direct DM effects", result.Effects)
-	}
-
-	if got := countSendDMActions(t, db); got != 1 {
-		t.Fatalf("send_dm actions = %d, want 1", got)
-	}
+	require.NoError(t, err, "Route")
+	assert.Equal(t, store.TelegramUpdateProcessed, result.Status)
+	assert.Empty(t, result.Effects, "command DM must go through the outbox")
+	assert.Equal(t, 1, countSendDMActions(t, db), "send_dm actions")
 
 	payload := firstRouterDMPayload(t, db)
-	if payload.ParseMode != messages.ParseModeHTML {
-		t.Fatalf("parse_mode = %q, want HTML", payload.ParseMode)
-	}
+	assert.Equal(t, messages.ParseModeHTML, payload.ParseMode)
 }
 
 func TestRouterRoutesJoinRequestToAdmission(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	tgID := int64(9101)
 	rawLink := "https://t.me/+router-join"
@@ -244,36 +203,27 @@ func TestRouterRoutesJoinRequestToAdmission(t *testing.T) {
 			InviteLink: &models.ChatInviteLink{InviteLink: rawLink},
 		},
 	})
-	if err != nil {
-		t.Fatalf("Route: %v", err)
-	}
-
-	if result.Status != store.TelegramUpdateProcessed {
-		t.Fatalf("status = %s, want processed", result.Status)
-	}
-
-	if got := countRouterActions(t, db, domain.ActionApproveJoin); got != 1 {
-		t.Fatalf("approve_join actions = %d, want 1", got)
-	}
+	require.NoError(t, err, "Route")
+	assert.Equal(t, store.TelegramUpdateProcessed, result.Status)
+	assert.Equal(t, 1, countRouterActions(t, db, domain.ActionApproveJoin),
+		"approve_join actions")
 }
 
 func TestRouterJoinRequestPreservesKnownDMState(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	tgID := int64(9104)
 	rawLink := "https://t.me/+router-join-dm-state"
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{
 		TGID:    tgID,
 		DMState: domain.DMBlocked,
-	}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	}), "upsert user")
 
 	seedRouterSharedInvite(t, db, domain.ResourceChat, rawLink)
 
 	router := admissionRouter(t, db, activeSnapshotForRouter(tgID))
-	if _, err := router.Route(ctx, &models.Update{
+	_, err := router.Route(ctx, &models.Update{
 		ID: 904,
 		ChatJoinRequest: &models.ChatJoinRequest{
 			Chat:       models.Chat{ID: -1001, Type: models.ChatTypeSupergroup},
@@ -282,22 +232,16 @@ func TestRouterJoinRequestPreservesKnownDMState(t *testing.T) {
 			Date:       int(time.Unix(1_700_000_000, 0).Unix()),
 			InviteLink: &models.ChatInviteLink{InviteLink: rawLink},
 		},
-	}); err != nil {
-		t.Fatalf("Route: %v", err)
-	}
+	})
+	require.NoError(t, err, "Route")
 
 	user, err := store.NewUsers(db).Get(ctx, tgID)
-	if err != nil {
-		t.Fatalf("get user: %v", err)
-	}
-
-	if user.DMState != domain.DMBlocked {
-		t.Fatalf("dm_state = %s, want blocked preserved", user.DMState)
-	}
+	require.NoError(t, err, "get user")
+	assert.Equal(t, domain.DMBlocked, user.DMState, "dm_state must be preserved")
 }
 
 func TestRouterRoutesClubChatMemberToAdmission(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	tgID := int64(9102)
 
@@ -321,38 +265,26 @@ func TestRouterRoutesClubChatMemberToAdmission(t *testing.T) {
 			},
 		},
 	})
-	if err != nil {
-		t.Fatalf("Route: %v", err)
-	}
-
-	if result.Status != store.TelegramUpdateProcessed {
-		t.Fatalf("status = %s, want processed", result.Status)
-	}
+	require.NoError(t, err, "Route")
+	assert.Equal(t, store.TelegramUpdateProcessed, result.Status)
 
 	grant, err := store.NewGrants(db).Get(ctx, tgID, domain.ResourceChat)
-	if err != nil {
-		t.Fatalf("get grant: %v", err)
-	}
-
-	if grant.AdmittedBy != "external" {
-		t.Fatalf("grant = %+v, want external admission", grant)
-	}
+	require.NoError(t, err, "get grant")
+	assert.Equal(t, "external", grant.AdmittedBy)
 }
 
 func TestRouterClubMembershipPreservesKnownDMState(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	tgID := int64(9105)
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{
 		TGID:    tgID,
 		DMState: domain.DMOpen,
-	}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	}), "upsert user")
 
 	router := admissionRouter(t, db, activeSnapshotForRouter(tgID))
-	if _, err := router.Route(ctx, &models.Update{
+	_, err := router.Route(ctx, &models.Update{
 		ID: 905,
 		ChatMember: &models.ChatMemberUpdated{
 			Chat: models.Chat{ID: -1001, Type: models.ChatTypeSupergroup},
@@ -369,22 +301,16 @@ func TestRouterClubMembershipPreservesKnownDMState(t *testing.T) {
 				},
 			},
 		},
-	}); err != nil {
-		t.Fatalf("Route: %v", err)
-	}
+	})
+	require.NoError(t, err, "Route")
 
 	user, err := store.NewUsers(db).Get(ctx, tgID)
-	if err != nil {
-		t.Fatalf("get user: %v", err)
-	}
-
-	if user.DMState != domain.DMOpen {
-		t.Fatalf("dm_state = %s, want open preserved", user.DMState)
-	}
+	require.NoError(t, err, "get user")
+	assert.Equal(t, domain.DMOpen, user.DMState, "dm_state must be preserved")
 }
 
 func TestRouterRoutesRetryCallbackToAdmission(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	tgID := int64(9103)
 
@@ -397,36 +323,24 @@ func TestRouterRoutesRetryCallbackToAdmission(t *testing.T) {
 			Data: messages.RetryAccessCallbackData,
 		},
 	})
-	if err != nil {
-		t.Fatalf("Route: %v", err)
-	}
-
-	if result.Status != store.TelegramUpdateProcessed {
-		t.Fatalf("status = %s, want processed", result.Status)
-	}
-
-	if got := countSendDMActions(t, db); got != 1 {
-		t.Fatalf("send_dm actions = %d, want 1", got)
-	}
+	require.NoError(t, err, "Route")
+	assert.Equal(t, store.TelegramUpdateProcessed, result.Status)
+	assert.Equal(t, 1, countSendDMActions(t, db), "send_dm actions")
 }
 
 func TestRouterSourceEventSharesTerminalTransaction(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 
 	updateID := int64(700)
-	if err := store.NewTelegramUpdates(db).InsertBatch(ctx, []store.TelegramUpdate{{
+	require.NoError(t, store.NewTelegramUpdates(db).InsertBatch(ctx, []store.TelegramUpdate{{
 		UpdateID:    updateID,
 		UpdateType:  "chat_member",
 		PayloadJSON: []byte(`{"update_id":700}`),
-	}}, updateID+1); err != nil {
-		t.Fatalf("InsertBatch: %v", err)
-	}
+	}}, updateID+1), "InsertBatch")
 
 	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatalf("BeginTx: %v", err)
-	}
+	require.NoError(t, err, "BeginTx")
 
 	statusEngine := engine.New(nil)
 	router := NewRouter(RouterDeps{
@@ -445,40 +359,29 @@ func TestRouterSourceEventSharesTerminalTransaction(t *testing.T) {
 		}))
 
 	result, err := router.Route(ctx, sourceJoinUpdate(-1001, 42))
-	if err != nil {
-		t.Fatalf("Route: %v", err)
-	}
+	require.NoError(t, err, "Route")
 
-	if err := store.NewTelegramUpdates(tx).MarkTerminal(
+	require.NoError(t, store.NewTelegramUpdates(tx).MarkTerminal(
 		ctx, updateID, result.Status, "",
-	); err != nil {
-		t.Fatalf("MarkTerminal: %v", err)
-	}
+	), "MarkTerminal")
 
-	if err := tx.Rollback(); err != nil {
-		t.Fatalf("Rollback: %v", err)
-	}
+	require.NoError(t, tx.Rollback(), "Rollback")
 
-	if _, ok, err := store.NewSubscriptions(db).GetActive(
-		ctx, 42, domain.PlatformBoosty,
-	); err != nil || ok {
-		t.Fatalf("subscription after rollback = (_, %v, %v), want absent", ok, err)
-	}
+	_, ok, err := store.NewSubscriptions(db).GetActive(
+		ctx, 42, domain.PlatformBoosty)
+	require.NoError(t, err, "GetActive")
+	assert.False(t, ok, "subscription must be absent after rollback")
 
 	var status string
-	if err := db.QueryRowContext(ctx,
+	require.NoError(t, db.QueryRowContext(ctx,
 		`SELECT status FROM telegram_updates WHERE update_id = ?`, updateID,
-	).Scan(&status); err != nil {
-		t.Fatalf("read update status: %v", err)
-	}
-
-	if status != string(store.TelegramUpdatePending) {
-		t.Fatalf("status after rollback = %q, want pending", status)
-	}
+	).Scan(&status), "read update status")
+	assert.Equal(t, string(store.TelegramUpdatePending), status,
+		"rolled-back MarkTerminal must leave the update pending")
 }
 
 func TestRouterIgnoresBotAndRightsOnlyChatMemberEvents(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 
 	statusEngine := engine.New(nil)
@@ -535,23 +438,13 @@ func TestRouterIgnoresBotAndRightsOnlyChatMemberEvents(t *testing.T) {
 	}
 	for _, update := range updates {
 		result, err := router.Route(ctx, update)
-		if err != nil {
-			t.Fatalf("Route: %v", err)
-		}
-
-		if result.Status != store.TelegramUpdateProcessed {
-			t.Fatalf("status = %s, want processed", result.Status)
-		}
+		require.NoError(t, err, "Route")
+		assert.Equal(t, store.TelegramUpdateProcessed, result.Status)
 	}
 
 	active, err := store.NewSubscriptions(db).ListActiveByUser(ctx, 42)
-	if err != nil {
-		t.Fatalf("ListActiveByUser: %v", err)
-	}
-
-	if len(active) != 0 {
-		t.Fatalf("active subscriptions = %+v, want none", active)
-	}
+	require.NoError(t, err, "ListActiveByUser")
+	assert.Empty(t, active, "bot and rights-only events must not grant access")
 }
 
 func sourceJoinUpdate(chatID, tgID int64) *models.Update {
@@ -648,7 +541,7 @@ func seedRouterSharedInvite(
 ) {
 	t.Helper()
 
-	if _, err := store.NewInvites(db).SaveCreated(context.Background(),
+	_, err := store.NewInvites(db).SaveCreated(context.Background(),
 		store.InviteLinkInput{
 			Resource:           resource,
 			Mode:               domain.InviteSharedJoinRequest,
@@ -656,9 +549,8 @@ func seedRouterSharedInvite(
 			InviteLinkHash:     routerInviteHash(rawLink),
 			TelegramName:       "gk-router",
 			CreatesJoinRequest: true,
-		}); err != nil {
-		t.Fatalf("save shared invite: %v", err)
-	}
+		})
+	require.NoError(t, err, "save shared invite")
 }
 
 func activeSnapshotForRouter(tgID int64) *engine.Snapshot {
@@ -698,12 +590,10 @@ func countRouterActions(t *testing.T, db *sql.DB, action domain.ActionType) int 
 	t.Helper()
 
 	var n int
-	if err := db.QueryRowContext(context.Background(), `
+	require.NoError(t, db.QueryRowContext(context.Background(), `
 		SELECT count(*)
 		FROM access_actions
-		WHERE action_type = ?`, string(action)).Scan(&n); err != nil {
-		t.Fatalf("count actions: %v", err)
-	}
+		WHERE action_type = ?`, string(action)).Scan(&n), "count actions")
 
 	return n
 }
@@ -712,12 +602,10 @@ func countRouterAlerts(t *testing.T, db *sql.DB, kind string) int {
 	t.Helper()
 
 	var n int
-	if err := db.QueryRowContext(context.Background(), `
+	require.NoError(t, db.QueryRowContext(context.Background(), `
 		SELECT count(*)
 		FROM admin_alerts
-		WHERE kind = ?`, kind).Scan(&n); err != nil {
-		t.Fatalf("count alerts: %v", err)
-	}
+		WHERE kind = ?`, kind).Scan(&n), "count alerts")
 
 	return n
 }
@@ -731,19 +619,15 @@ func firstRouterDMPayload(t *testing.T, db *sql.DB) routerDMPayload {
 	t.Helper()
 
 	var raw string
-	if err := db.QueryRowContext(context.Background(), `
+	require.NoError(t, db.QueryRowContext(context.Background(), `
 		SELECT payload_json
 		FROM access_actions
 		WHERE action_type = ?
 		ORDER BY id
-		LIMIT 1`, string(domain.ActionSendDM)).Scan(&raw); err != nil {
-		t.Fatalf("read action payload: %v", err)
-	}
+		LIMIT 1`, string(domain.ActionSendDM)).Scan(&raw), "read action payload")
 
 	var payload routerDMPayload
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		t.Fatalf("decode action payload: %v", err)
-	}
+	require.NoError(t, json.Unmarshal([]byte(raw), &payload), "decode action payload")
 
 	return payload
 }

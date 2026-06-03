@@ -9,13 +9,16 @@ import (
 	"testing"
 
 	"github.com/go-telegram/bot/models"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/store"
+	"github.com/justskiv/gatekeeper/internal/testutil"
 )
 
 func TestCheckStartupHealthRecordsHealthyChat(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	client := newBotAPITestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch methodName(r.URL.Path) {
 		case "getChat":
@@ -44,47 +47,35 @@ func TestCheckStartupHealthRecordsHealthyChat(t *testing.T) {
 		Severity:            "critical",
 		RequiresManageRight: true,
 	}
-	if _, err := store.NewAlerts(db).Create(context.Background(), store.AlertInput{
+	_, err := store.NewAlerts(db).Create(context.Background(), store.AlertInput{
 		Severity: "critical",
 		Kind:     alertKindBotRightsLost,
 		Title:    alertTitle(chat),
 		Detail:   "stale",
-	}); err != nil {
-		t.Fatalf("create stale alert: %v", err)
-	}
+	})
+	require.NoError(t, err, "create stale alert")
 
-	if err := CheckStartupHealth(
+	require.NoError(t, CheckStartupHealth(
 		context.Background(), db, client, nil,
 		[]HealthChat{chat}, nil, 123, slog.Default(),
-	); err != nil {
-		t.Fatalf("CheckStartupHealth: %v", err)
-	}
+	), "CheckStartupHealth")
 
 	value, ok, err := store.NewMeta(db).Get(context.Background(), "health.club_chat")
-	if err != nil {
-		t.Fatalf("get health: %v", err)
-	}
-
-	if !ok || value != "ok" {
-		t.Fatalf("health = (%q, %v), want ok", value, ok)
-	}
+	require.NoError(t, err, "get health")
+	require.True(t, ok)
+	assert.Equal(t, "ok", value)
 
 	var openAlerts int
-	if err := db.QueryRowContext(context.Background(), `
+	require.NoError(t, db.QueryRowContext(context.Background(), `
 		SELECT count(*)
 		FROM admin_alerts
 		WHERE status = 'open' AND kind = 'bot_rights_lost'`,
-	).Scan(&openAlerts); err != nil {
-		t.Fatalf("count open alerts: %v", err)
-	}
-
-	if openAlerts != 0 {
-		t.Fatalf("open alerts = %d, want 0", openAlerts)
-	}
+	).Scan(&openAlerts), "count open alerts")
+	assert.Zero(t, openAlerts)
 }
 
 func TestCheckStartupHealthDegradesMissingRights(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	client := newBotAPITestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch methodName(r.URL.Path) {
 		case "getChat":
@@ -111,37 +102,25 @@ func TestCheckStartupHealthDegradesMissingRights(t *testing.T) {
 		Severity: "critical",
 	}
 	for range 2 {
-		if err := CheckStartupHealth(
+		require.NoError(t, CheckStartupHealth(
 			context.Background(), db, client, nil,
 			[]HealthChat{chat}, nil, 123, slog.Default(),
-		); err != nil {
-			t.Fatalf("CheckStartupHealth: %v", err)
-		}
+		), "CheckStartupHealth")
 	}
 
 	value, _, err := store.NewMeta(db).Get(context.Background(), "health.club_chat")
-	if err != nil {
-		t.Fatalf("get health: %v", err)
-	}
-
-	if value != "fail:not_admin" {
-		t.Fatalf("health = %q, want fail:not_admin", value)
-	}
+	require.NoError(t, err, "get health")
+	assert.Equal(t, "fail:not_admin", value)
 
 	var alerts int
-	if err := db.QueryRowContext(context.Background(),
+	require.NoError(t, db.QueryRowContext(context.Background(),
 		`SELECT count(*) FROM admin_alerts WHERE severity = 'critical'`,
-	).Scan(&alerts); err != nil {
-		t.Fatalf("count alerts: %v", err)
-	}
-
-	if alerts != 1 {
-		t.Fatalf("alerts = %d, want 1", alerts)
-	}
+	).Scan(&alerts), "count alerts")
+	assert.Equal(t, 1, alerts)
 }
 
 func TestCheckStartupHealthRejectsWrongChatType(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	client := newBotAPITestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if methodName(r.URL.Path) != "getChat" {
 			t.Fatalf("unexpected method %s", methodName(r.URL.Path))
@@ -159,21 +138,14 @@ func TestCheckStartupHealthRejectsWrongChatType(t *testing.T) {
 		Resource: string(domain.ResourceChannel),
 		Severity: "critical",
 	}
-	if err := CheckStartupHealth(
+	require.NoError(t, CheckStartupHealth(
 		context.Background(), db, client, nil,
 		[]HealthChat{chat}, nil, 123, slog.Default(),
-	); err != nil {
-		t.Fatalf("CheckStartupHealth: %v", err)
-	}
+	), "CheckStartupHealth")
 
 	value, _, err := store.NewMeta(db).Get(context.Background(), "health.club_channel")
-	if err != nil {
-		t.Fatalf("get health: %v", err)
-	}
-
-	if value != "fail:wrong_type" {
-		t.Fatalf("health = %q, want fail:wrong_type", value)
-	}
+	require.NoError(t, err, "get health")
+	assert.Equal(t, "fail:wrong_type", value)
 }
 
 func TestGetMeUnauthorizedIsFatalSignal(t *testing.T) {
@@ -185,13 +157,12 @@ func TestGetMeUnauthorizedIsFatalSignal(t *testing.T) {
 		writeTelegramError(w, http.StatusUnauthorized, "Unauthorized")
 	})
 
-	if _, err := client.GetMe(context.Background()); err == nil {
-		t.Fatal("GetMe returned nil error, want unauthorized")
-	}
+	_, err := client.GetMe(context.Background())
+	require.Error(t, err, "GetMe must fail on unauthorized")
 }
 
 func TestMyChatMemberPrivateUpdatesDMStateAndEnsuresUser(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 
 	_, err := handleMyChatMember(ctx, healthRepos{
@@ -206,35 +177,26 @@ func TestMyChatMemberPrivateUpdatesDMStateAndEnsuresUser(t *testing.T) {
 			Type: models.ChatMemberTypeBanned,
 		},
 	}, slog.Default())
-	if err != nil {
-		t.Fatalf("handleMyChatMember: %v", err)
-	}
+	require.NoError(t, err, "handleMyChatMember")
 
 	user, err := store.NewUsers(db).Get(ctx, 77)
-	if err != nil {
-		t.Fatalf("get user: %v", err)
-	}
-
-	if user.DMState != domain.DMBlocked {
-		t.Fatalf("dm_state = %s, want blocked", user.DMState)
-	}
+	require.NoError(t, err, "get user")
+	assert.Equal(t, domain.DMBlocked, user.DMState)
 }
 
 func TestMyChatMemberPrivatePreservesAdminOwnedUserFields(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 
 	users := store.NewUsers(db)
-	if err := users.Upsert(ctx, domain.User{
+	require.NoError(t, users.Upsert(ctx, domain.User{
 		TGID:         77,
 		Username:     "user",
 		DMState:      domain.DMOpen,
 		Banned:       true,
 		BannedReason: "manual",
 		Notes:        "watch",
-	}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	}), "upsert user")
 
 	_, err := handleMyChatMember(ctx, healthRepos{
 		users:  users,
@@ -248,25 +210,18 @@ func TestMyChatMemberPrivatePreservesAdminOwnedUserFields(t *testing.T) {
 			Type: models.ChatMemberTypeBanned,
 		},
 	}, slog.Default())
-	if err != nil {
-		t.Fatalf("handleMyChatMember: %v", err)
-	}
+	require.NoError(t, err, "handleMyChatMember")
 
 	user, err := users.Get(ctx, 77)
-	if err != nil {
-		t.Fatalf("get user: %v", err)
-	}
-
-	if user.DMState != domain.DMBlocked ||
-		!user.Banned ||
-		user.BannedReason != "manual" ||
-		user.Notes != "watch" {
-		t.Fatalf("user = %+v, want blocked with admin fields preserved", user)
-	}
+	require.NoError(t, err, "get user")
+	assert.Equal(t, domain.DMBlocked, user.DMState)
+	assert.True(t, user.Banned, "ban must be preserved")
+	assert.Equal(t, "manual", user.BannedReason)
+	assert.Equal(t, "watch", user.Notes)
 }
 
 func TestMyChatMemberKnownChatUpdatesHealthAndAlerts(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	chat := HealthChat{
 		Key:      "club_chat",
@@ -294,37 +249,24 @@ func TestMyChatMemberKnownChatUpdatesHealthAndAlerts(t *testing.T) {
 			Type: models.ChatMemberTypeMember,
 		},
 	}, slog.Default())
-	if err != nil {
-		t.Fatalf("handleMyChatMember: %v", err)
-	}
+	require.NoError(t, err, "handleMyChatMember")
 
-	if len(effects) != 1 || effects[0].Kind != OutboundDM {
-		t.Fatalf("effects = %+v, want one owner dm", effects)
-	}
+	require.Len(t, effects, 1)
+	assert.Equal(t, OutboundDM, effects[0].Kind)
 
 	value, _, err := store.NewMeta(db).Get(ctx, "health.club_chat")
-	if err != nil {
-		t.Fatalf("get health: %v", err)
-	}
-
-	if value != "fail:not_admin" {
-		t.Fatalf("health = %q, want fail:not_admin", value)
-	}
+	require.NoError(t, err, "get health")
+	assert.Equal(t, "fail:not_admin", value)
 
 	var alerts int
-	if err := db.QueryRowContext(ctx,
+	require.NoError(t, db.QueryRowContext(ctx,
 		`SELECT count(*) FROM admin_alerts WHERE kind = 'bot_rights_lost'`,
-	).Scan(&alerts); err != nil {
-		t.Fatalf("count alerts: %v", err)
-	}
-
-	if alerts != 1 {
-		t.Fatalf("alerts = %d, want 1", alerts)
-	}
+	).Scan(&alerts), "count alerts")
+	assert.Equal(t, 1, alerts)
 }
 
 func TestMyChatMemberUnknownChatReturnsDiscoveryDM(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 
 	effects, err := handleMyChatMember(context.Background(), healthRepos{
 		users:  store.NewUsers(db),
@@ -342,17 +284,15 @@ func TestMyChatMemberUnknownChatReturnsDiscoveryDM(t *testing.T) {
 			Type: models.ChatMemberTypeAdministrator,
 		},
 	}, slog.Default())
-	if err != nil {
-		t.Fatalf("handleMyChatMember: %v", err)
-	}
+	require.NoError(t, err, "handleMyChatMember")
 
-	if len(effects) != 1 || effects[0].TGID != 1 || effects[0].Text == "" {
-		t.Fatalf("effects = %+v, want owner discovery dm", effects)
-	}
+	require.Len(t, effects, 1)
+	assert.Equal(t, int64(1), effects[0].TGID)
+	assert.NotEmpty(t, effects[0].Text, "discovery dm must carry text")
 }
 
 func TestMyChatMemberUnknownChatIgnoresRemoval(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 
 	effects, err := handleMyChatMember(context.Background(), healthRepos{
 		users:  store.NewUsers(db),
@@ -370,13 +310,8 @@ func TestMyChatMemberUnknownChatIgnoresRemoval(t *testing.T) {
 			Type: models.ChatMemberTypeLeft,
 		},
 	}, slog.Default())
-	if err != nil {
-		t.Fatalf("handleMyChatMember: %v", err)
-	}
-
-	if len(effects) != 0 {
-		t.Fatalf("effects = %+v, want none", effects)
-	}
+	require.NoError(t, err, "handleMyChatMember")
+	assert.Empty(t, effects, "removal of unknown chat must produce no effects")
 }
 
 func newBotAPITestClient(
@@ -395,9 +330,7 @@ func newBotAPITestClient(
 	client, err := NewClient("123:ABC",
 		WithServerURL("http://telegram.test"),
 		WithHTTPClient(httpClient))
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 
 	return client
 }

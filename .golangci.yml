@@ -45,7 +45,11 @@ linters:
             - golang.org/x/sync/errgroup
         domain:
           list-mode: strict
+          # Both globs are needed: `**/dir/**/*.go` does not match files
+          # directly in dir (the middle `**` requires >=1 segment), so the
+          # `*.go` form covers top-level files and `**/*.go` covers nested.
           files:
+            - "**/internal/domain/*.go"
             - "**/internal/domain/**/*.go"
           allow:
             - $gostd
@@ -53,13 +57,26 @@ linters:
           list-mode: strict
           files:
             - "**/internal/**/*.go"
+            - "!**/internal/domain/*.go"
             - "!**/internal/domain/**/*.go"
+            - "!**/internal/testutil/*.go"
+            - "!**/internal/testutil/**/*.go"
           allow:
             - $gostd
             - github.com/go-telegram/bot
             - github.com/joho/godotenv
             - github.com/justskiv/gatekeeper/internal
             - modernc.org/sqlite
+        testutil:
+          list-mode: strict
+          files:
+            - "**/internal/testutil/*.go"
+            - "**/internal/testutil/**/*.go"
+          allow:
+            - $gostd
+            - github.com/justskiv/gatekeeper/internal
+            - github.com/pressly/goose/v3
+            - github.com/stretchr/testify
     exhaustive:
       default-signifies-exhaustive: true
     funlen:

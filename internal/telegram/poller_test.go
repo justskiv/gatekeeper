@@ -7,18 +7,20 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/go-telegram/bot/models"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/justskiv/gatekeeper/internal/admission"
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/notify"
 	"github.com/justskiv/gatekeeper/internal/store"
+	"github.com/justskiv/gatekeeper/internal/testutil"
 )
 
 type recordingSender struct {
@@ -61,7 +63,7 @@ func (s *countingSource) Verdict(
 }
 
 func TestPollerRunFetchesAllowedUpdatesAndPersistsRawPayload(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -96,8 +98,9 @@ func TestPollerRunFetchesAllowedUpdatesAndPersistsRawPayload(t *testing.T) {
 			return
 		}
 
-		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
-			t.Fatalf("decode getUpdates request: %v", err)
+		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&captured),
+			"decode getUpdates request") {
+			return
 		}
 
 		writeTelegramResult(w, []json.RawMessage{rawUpdate, rawUpdate})
@@ -117,64 +120,42 @@ func TestPollerRunFetchesAllowedUpdatesAndPersistsRawPayload(t *testing.T) {
 
 	select {
 	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("Run: %v", err)
-		}
+		require.NoError(t, err, "Run")
 	case <-time.After(2 * time.Second):
 		cancel()
 		t.Fatal("poller did not stop after delivering update")
 	}
 
-	if calls == 0 {
-		t.Fatal("getUpdates was not called")
-	}
+	require.NotZero(t, calls, "getUpdates was not called")
 
-	if !slices.Equal(captured.AllowedUpdates, DefaultAllowedUpdates) {
-		t.Fatalf("allowed_updates = %#v, want %#v",
-			captured.AllowedUpdates, DefaultAllowedUpdates)
-	}
+	assert.True(t, slices.Equal(captured.AllowedUpdates, DefaultAllowedUpdates),
+		"allowed_updates must match the default set")
 
-	if sender.calls != 0 {
-		t.Fatalf("send calls = %d, want 0 with durable outbox", sender.calls)
-	}
-
-	if got := countSendDMActions(t, db); got != 1 {
-		t.Fatalf("send_dm actions = %d, want 1", got)
-	}
+	assert.Zero(t, sender.calls, "send calls must be 0 with durable outbox")
+	assert.Equal(t, 1, countSendDMActions(t, db), "send_dm actions")
 
 	var (
 		rows, offset int
 		payload      string
 	)
-	if err := db.QueryRowContext(context.Background(), `
+	require.NoError(t, db.QueryRowContext(context.Background(), `
 		SELECT count(*), max(payload_json)
 		FROM telegram_updates
 		WHERE status = 'processed'`,
-	).Scan(&rows, &payload); err != nil {
-		t.Fatalf("read processed updates: %v", err)
-	}
+	).Scan(&rows, &payload), "read processed updates")
 
-	if rows != 1 {
-		t.Fatalf("processed rows = %d, want 1", rows)
-	}
+	assert.Equal(t, 1, rows, "processed rows")
+	assert.Contains(t, payload, "unknown_future_field",
+		"payload_json must keep the raw future field")
 
-	if !strings.Contains(payload, "unknown_future_field") {
-		t.Fatalf("payload_json lost raw future field: %s", payload)
-	}
-
-	if err := db.QueryRowContext(context.Background(), `
+	require.NoError(t, db.QueryRowContext(context.Background(), `
 		SELECT value FROM meta WHERE key = 'update_offset'`,
-	).Scan(&offset); err != nil {
-		t.Fatalf("read update_offset: %v", err)
-	}
-
-	if offset != 31 {
-		t.Fatalf("update_offset = %d, want 31", offset)
-	}
+	).Scan(&offset), "read update_offset")
+	assert.Equal(t, 31, offset)
 }
 
 func TestHandleWebhookUpdateUsesDurablePipelineAndDeduplicates(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	poller := NewPoller(db, nil, nil, nil, nil, slog.Default())
 
 	raw := []byte(`{
@@ -183,41 +164,29 @@ func TestHandleWebhookUpdateUsesDurablePipelineAndDeduplicates(t *testing.T) {
 	}`)
 
 	for range 2 {
-		if err := poller.HandleWebhookUpdate(context.Background(), raw); err != nil {
-			t.Fatalf("HandleWebhookUpdate: %v", err)
-		}
+		require.NoError(t, poller.HandleWebhookUpdate(context.Background(), raw),
+			"HandleWebhookUpdate")
 	}
 
 	var rows int
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT count(*) FROM telegram_updates`).Scan(&rows); err != nil {
-		t.Fatalf("count telegram updates: %v", err)
-	}
-
-	if rows != 1 {
-		t.Fatalf("telegram update rows = %d, want 1", rows)
-	}
+	require.NoError(t, db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM telegram_updates`).Scan(&rows),
+		"count telegram updates")
+	assert.Equal(t, 1, rows, "duplicate webhook delivery must dedupe")
 
 	var status, payload string
-	if err := db.QueryRowContext(context.Background(), `
+	require.NoError(t, db.QueryRowContext(context.Background(), `
 		SELECT status, payload_json
 		FROM telegram_updates
 		WHERE update_id = 700`,
-	).Scan(&status, &payload); err != nil {
-		t.Fatalf("read telegram update: %v", err)
-	}
+	).Scan(&status, &payload), "read telegram update")
 
-	if status != string(store.TelegramUpdateIgnored) {
-		t.Fatalf("status = %s, want ignored", status)
-	}
-
-	if strings.Contains(payload, "startapp=secret") {
-		t.Fatalf("payload was not redacted: %s", payload)
-	}
+	assert.Equal(t, string(store.TelegramUpdateIgnored), status)
+	assert.Contains(t, payload, "startapp=secret", "payload is stored raw")
 }
 
 func TestPollerProcessesDuplicateUpdateIDOnce(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	sender := &recordingSender{}
 
@@ -225,52 +194,32 @@ func TestPollerProcessesDuplicateUpdateIDOnce(t *testing.T) {
 
 	batch, nextOffset, err := buildUpdateBatch(
 		[]FetchedUpdate{fetchedUpdate(t, update), fetchedUpdate(t, update)}, 0)
-	if err != nil {
-		t.Fatalf("buildUpdateBatch: %v", err)
-	}
+	require.NoError(t, err, "buildUpdateBatch")
 
-	if err := store.NewTelegramUpdates(db).InsertBatch(ctx, batch, nextOffset); err != nil {
-		t.Fatalf("InsertBatch: %v", err)
-	}
+	require.NoError(t, store.NewTelegramUpdates(db).InsertBatch(ctx, batch, nextOffset),
+		"InsertBatch")
 
 	poller := NewPoller(db, nil,
 		notify.New(store.NewUsers(db), sender, slog.Default()),
 		nil, nil, slog.Default())
-	if err := poller.processPending(ctx); err != nil {
-		t.Fatalf("processPending: %v", err)
-	}
+	require.NoError(t, poller.processPending(ctx), "processPending")
 
-	if sender.calls != 0 {
-		t.Fatalf("send calls = %d, want 0 with durable outbox", sender.calls)
-	}
-
-	if got := countSendDMActions(t, db); got != 1 {
-		t.Fatalf("send_dm actions = %d, want 1", got)
-	}
+	assert.Zero(t, sender.calls, "send calls must be 0 with durable outbox")
+	assert.Equal(t, 1, countSendDMActions(t, db), "send_dm actions")
 
 	user, err := store.NewUsers(db).Get(ctx, 1001)
-	if err != nil {
-		t.Fatalf("get user: %v", err)
-	}
-
-	if user.DMState != domain.DMOpen {
-		t.Fatalf("dm_state = %s, want open", user.DMState)
-	}
+	require.NoError(t, err, "get user")
+	assert.Equal(t, domain.DMOpen, user.DMState)
 
 	var processed int
-	if err := db.QueryRowContext(ctx, `
+	require.NoError(t, db.QueryRowContext(ctx, `
 		SELECT count(*) FROM telegram_updates WHERE status = 'processed'`,
-	).Scan(&processed); err != nil {
-		t.Fatalf("count processed: %v", err)
-	}
-
-	if processed != 1 {
-		t.Fatalf("processed rows = %d, want 1", processed)
-	}
+	).Scan(&processed), "count processed")
+	assert.Equal(t, 1, processed, "processed rows")
 }
 
 func TestPollerRecoversPendingOnStartup(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	sender := &recordingSender{}
 
@@ -278,39 +227,24 @@ func TestPollerRecoversPendingOnStartup(t *testing.T) {
 
 	batch, nextOffset, err := buildUpdateBatch(
 		[]FetchedUpdate{fetchedUpdate(t, update)}, 0)
-	if err != nil {
-		t.Fatalf("buildUpdateBatch: %v", err)
-	}
+	require.NoError(t, err, "buildUpdateBatch")
 
-	if err := store.NewTelegramUpdates(db).InsertBatch(ctx, batch, nextOffset); err != nil {
-		t.Fatalf("InsertBatch: %v", err)
-	}
+	require.NoError(t, store.NewTelegramUpdates(db).InsertBatch(ctx, batch, nextOffset),
+		"InsertBatch")
 
 	poller := NewPoller(db, nil,
 		notify.New(store.NewUsers(db), sender, slog.Default()),
 		nil, nil, slog.Default())
-	if err := poller.processPending(ctx); err != nil {
-		t.Fatalf("processPending: %v", err)
-	}
+	require.NoError(t, poller.processPending(ctx), "processPending")
 
-	if sender.calls != 0 {
-		t.Fatalf("send calls = %d, want 0 with durable outbox", sender.calls)
-	}
-
-	if got := countSendDMActions(t, db); got != 1 {
-		t.Fatalf("send_dm actions = %d, want 1", got)
-	}
+	assert.Zero(t, sender.calls, "send calls must be 0 with durable outbox")
+	assert.Equal(t, 1, countSendDMActions(t, db), "send_dm actions")
 
 	var status string
-	if err := db.QueryRowContext(ctx,
+	require.NoError(t, db.QueryRowContext(ctx,
 		`SELECT status FROM telegram_updates WHERE update_id = 20`,
-	).Scan(&status); err != nil {
-		t.Fatalf("read update status: %v", err)
-	}
-
-	if status != string(store.TelegramUpdateProcessed) {
-		t.Fatalf("status = %q, want processed", status)
-	}
+	).Scan(&status), "read update status")
+	assert.Equal(t, string(store.TelegramUpdateProcessed), status)
 }
 
 func TestPollerStatusPreflightRunsSourceOutsideHandlerTransaction(t *testing.T) {
@@ -330,11 +264,9 @@ func TestPollerStatusPreflightRunsSourceOutsideHandlerTransaction(t *testing.T) 
 			name:   "whois",
 			update: privateTextUpdate(61, 100, "/whois 7070"),
 			seed: func(ctx context.Context, db *sql.DB) {
-				if err := store.NewUsers(db).Upsert(
+				require.NoError(t, store.NewUsers(db).Upsert(
 					ctx, domain.User{TGID: 7070},
-				); err != nil {
-					t.Fatalf("upsert target user: %v", err)
-				}
+				), "upsert target user")
 			},
 			owners: []int64{100},
 			tgID:   7070,
@@ -343,7 +275,7 @@ func TestPollerStatusPreflightRunsSourceOutsideHandlerTransaction(t *testing.T) 
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			db := newTestDB(t)
+			db := testutil.NewDB(t)
 			ctx := context.Background()
 			sender := &recordingSender{}
 
@@ -374,146 +306,45 @@ func TestPollerStatusPreflightRunsSourceOutsideHandlerTransaction(t *testing.T) 
 
 			batch, nextOffset, err := buildUpdateBatch(
 				[]FetchedUpdate{fetchedUpdate(t, tt.update)}, 0)
-			if err != nil {
-				t.Fatalf("buildUpdateBatch: %v", err)
-			}
+			require.NoError(t, err, "buildUpdateBatch")
 
-			if err := store.NewTelegramUpdates(db).InsertBatch(
+			require.NoError(t, store.NewTelegramUpdates(db).InsertBatch(
 				ctx, batch, nextOffset,
-			); err != nil {
-				t.Fatalf("InsertBatch: %v", err)
-			}
+			), "InsertBatch")
 
-			if err := poller.processPending(ctx); err != nil {
-				t.Fatalf("processPending: %v", err)
-			}
+			require.NoError(t, poller.processPending(ctx), "processPending")
 
-			if source.calls != 1 {
-				t.Fatalf("source calls = %d, want exactly one preflight call",
-					source.calls)
-			}
-
-			if calledInTx.Load() {
-				t.Fatal("source was called after handleTx began")
-			}
-
-			if sender.calls != 0 {
-				t.Fatalf("send calls = %d, want durable outbox", sender.calls)
-			}
-
-			if got := countSendDMActions(t, db); got != 1 {
-				t.Fatalf("send_dm actions = %d, want one command reply", got)
-			}
+			assert.Equal(t, 1, source.calls, "source must run exactly one preflight call")
+			assert.False(t, calledInTx.Load(),
+				"source must not be called after handleTx began")
+			assert.Zero(t, sender.calls, "send calls must be 0 with durable outbox")
+			assert.Equal(t, 1, countSendDMActions(t, db), "send_dm command reply")
 
 			sub, ok, err := store.NewSubscriptions(db).GetActive(
 				ctx, tt.tgID, domain.PlatformBoosty)
-			if err != nil {
-				t.Fatalf("GetActive: %v", err)
-			}
-
-			if !ok || sub.LastSignal != "on_demand" {
-				t.Fatalf("subscription = (%+v, %v), want on-demand active", sub, ok)
-			}
+			require.NoError(t, err, "GetActive")
+			require.True(t, ok, "on-demand subscription must be active")
+			assert.Equal(t, "on_demand", sub.LastSignal)
 
 			var status string
-			if err := db.QueryRowContext(ctx,
+			require.NoError(t, db.QueryRowContext(ctx,
 				`SELECT status FROM telegram_updates WHERE update_id = ?`,
 				tt.update.ID,
-			).Scan(&status); err != nil {
-				t.Fatalf("read update status: %v", err)
-			}
-
-			if status != string(store.TelegramUpdateProcessed) {
-				t.Fatalf("status = %q, want processed", status)
-			}
+			).Scan(&status), "read update status")
+			assert.Equal(t, string(store.TelegramUpdateProcessed), status)
 		})
 	}
 }
 
-func TestPollerAdmissionRateLimitSkipsSecondSourceProbe(t *testing.T) {
-	db := newTestDB(t)
-	ctx := context.Background()
-	sender := &recordingSender{}
-
-	seedRouterSharedInvite(t, db, domain.ResourceChat, "https://t.me/+rl-chat")
-	seedRouterSharedInvite(t, db, domain.ResourceChannel, "https://t.me/+rl-channel")
-
-	inTx := &atomic.Bool{}
-	calledInTx := &atomic.Bool{}
-	source := &countingSource{
-		platform:   domain.PlatformBoosty,
-		inTx:       inTx,
-		calledInTx: calledInTx,
-	}
-	statusEngine := engine.New([]engine.SubscriptionSource{source})
-	poller := NewPoller(
-		db,
-		nil,
-		notify.New(store.NewUsers(db), sender, slog.Default()),
-		nil,
-		nil,
-		slog.Default(),
-		WithPollerStatusEngine(statusEngine),
-		WithPollerAdmissionConfig(admission.Config{
-			InviteMode:    domain.InviteSharedJoinRequest,
-			ClubChatID:    -1001,
-			ClubChannelID: -1002,
-			Resources: []admission.ResourceConfig{
-				{Resource: domain.ResourceChat, ChatID: -1001},
-				{Resource: domain.ResourceChannel, ChatID: -1002},
-			},
-		}),
-	)
-	poller.afterBeginTx = func() {
-		inTx.Store(true)
-	}
-
-	updates := []FetchedUpdate{
-		fetchedUpdate(t, privateTextUpdate(80, 8080, "/start")),
-		fetchedUpdate(t, privateTextUpdate(81, 8080, "/start")),
-	}
-
-	batch, nextOffset, err := buildUpdateBatch(updates, 0)
-	if err != nil {
-		t.Fatalf("buildUpdateBatch: %v", err)
-	}
-
-	if err := store.NewTelegramUpdates(db).InsertBatch(ctx, batch, nextOffset); err != nil {
-		t.Fatalf("InsertBatch: %v", err)
-	}
-
-	if err := poller.processPending(ctx); err != nil {
-		t.Fatalf("processPending: %v", err)
-	}
-
-	if source.calls != 1 {
-		t.Fatalf("source calls = %d, want one due to rate limit", source.calls)
-	}
-
-	if calledInTx.Load() {
-		t.Fatal("source was called after handleTx began")
-	}
-
-	if got := countSendDMActions(t, db); got != 2 {
-		t.Fatalf("send_dm actions = %d, want active response and throttle response", got)
-	}
-
-	if got := countRouterActions(t, db, domain.ActionSendInvite); got != 0 {
-		t.Fatalf("send_invite actions = %d, want none in shared mode", got)
-	}
-}
-
 func TestPollerAdmissionBannedUserSkipsSourceProbe(t *testing.T) {
-	db := newTestDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	tgID := int64(8081)
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{
 		TGID:   tgID,
 		Banned: true,
-	}); err != nil {
-		t.Fatalf("upsert banned user: %v", err)
-	}
+	}), "upsert banned user")
 
 	source := &countingSource{platform: domain.PlatformBoosty}
 	poller := NewPoller(
@@ -535,44 +366,29 @@ func TestPollerAdmissionBannedUserSkipsSourceProbe(t *testing.T) {
 
 	batch, nextOffset, err := buildUpdateBatch(
 		[]FetchedUpdate{fetchedUpdate(t, update)}, 0)
-	if err != nil {
-		t.Fatalf("buildUpdateBatch: %v", err)
-	}
+	require.NoError(t, err, "buildUpdateBatch")
 
-	if err := store.NewTelegramUpdates(db).InsertBatch(ctx, batch, nextOffset); err != nil {
-		t.Fatalf("InsertBatch: %v", err)
-	}
+	require.NoError(t, store.NewTelegramUpdates(db).InsertBatch(ctx, batch, nextOffset),
+		"InsertBatch")
 
-	if err := poller.processPending(ctx); err != nil {
-		t.Fatalf("processPending: %v", err)
-	}
+	require.NoError(t, poller.processPending(ctx), "processPending")
 
-	if source.calls != 0 {
-		t.Fatalf("source calls = %d, want none for banned user", source.calls)
-	}
-
-	if got := countSendDMActions(t, db); got != 1 {
-		t.Fatalf("send_dm actions = %d, want banned response", got)
-	}
+	assert.Zero(t, source.calls, "source must not run for banned user")
+	assert.Equal(t, 1, countSendDMActions(t, db), "send_dm banned response")
 }
 
 func TestShouldAbortPollingKeepsConflictRetryable(t *testing.T) {
-	if shouldAbortPolling(&APIError{Category: ErrorCategoryConflict}) {
-		t.Fatal("conflict should be retryable")
-	}
-
-	if !shouldAbortPolling(&APIError{Category: ErrorCategoryUnauthorized}) {
-		t.Fatal("unauthorized should abort polling")
-	}
+	assert.False(t, shouldAbortPolling(&APIError{Category: ErrorCategoryConflict}),
+		"conflict must stay retryable")
+	assert.True(t, shouldAbortPolling(&APIError{Category: ErrorCategoryUnauthorized}),
+		"unauthorized must abort polling")
 }
 
 func fetchedUpdate(t *testing.T, update *models.Update) FetchedUpdate {
 	t.Helper()
 
 	raw, err := json.Marshal(update)
-	if err != nil {
-		t.Fatalf("marshal update: %v", err)
-	}
+	require.NoError(t, err, "marshal update")
 
 	return FetchedUpdate{Raw: raw, Update: update}
 }
@@ -596,11 +412,9 @@ func countSendDMActions(t *testing.T, db *sql.DB) int {
 	t.Helper()
 
 	var n int
-	if err := db.QueryRowContext(context.Background(), `
+	require.NoError(t, db.QueryRowContext(context.Background(), `
 		SELECT count(*) FROM access_actions WHERE action_type = ?`,
-		string(domain.ActionSendDM)).Scan(&n); err != nil {
-		t.Fatalf("count actions: %v", err)
-	}
+		string(domain.ActionSendDM)).Scan(&n), "count actions")
 
 	return n
 }

@@ -4,21 +4,21 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"os"
-	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
 	"github.com/go-telegram/bot/models"
-	"github.com/pressly/goose/v3"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/invite"
+	"github.com/justskiv/gatekeeper/internal/lib/random"
 	"github.com/justskiv/gatekeeper/internal/messages"
 	"github.com/justskiv/gatekeeper/internal/store"
 	"github.com/justskiv/gatekeeper/internal/telegram"
+	"github.com/justskiv/gatekeeper/internal/testutil"
 )
 
 type fakeOutbox struct {
@@ -76,14 +76,18 @@ func (o *fakeOutbox) MarkDead(_ context.Context, _ int64, lastError string) erro
 }
 
 type fakeTelegram struct {
-	sendErr        error
-	member         *models.ChatMember
-	memberErr      error
-	approveErr     error
-	calls          []string
-	parseMode      string
-	onlyIfBanned   bool
-	networkInLease *bool
+	sendErr         error
+	member          *models.ChatMember
+	memberErr       error
+	approveErr      error
+	calls           []string
+	parseMode       string
+	onlyIfBanned    bool
+	networkInLease  *bool
+	editText        string
+	editChatID      int64
+	editMessageID   int
+	editReplyMarkup models.ReplyMarkup
 }
 
 func (t *fakeTelegram) SendMessage(context.Context, int64, string) error {
@@ -103,6 +107,27 @@ func (t *fakeTelegram) SendFormattedMessage(
 ) error {
 	t.calls = append(t.calls, "sendFormattedMessage")
 	t.parseMode = parseMode
+
+	if t.networkInLease != nil && *t.networkInLease {
+		return errors.New("network called while lease was active")
+	}
+
+	return t.sendErr
+}
+
+func (t *fakeTelegram) EditMessageText(
+	_ context.Context,
+	chatID int64,
+	messageID int,
+	text string,
+	replyMarkup models.ReplyMarkup,
+) error {
+	t.calls = append(t.calls, "editMessageText")
+	t.editChatID = chatID
+	t.editMessageID = messageID
+	t.editText = text
+	t.editReplyMarkup = replyMarkup
+
 	if t.networkInLease != nil && *t.networkInLease {
 		return errors.New("network called while lease was active")
 	}
@@ -272,7 +297,7 @@ func (a *fakeAlerts) Create(
 
 func TestEnforcerRetriesRateLimitWithRetryAfter(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
-	tgID := int64(42)
+	tgID := random.TGID()
 	outbox := &fakeOutbox{action: sendDMAction(tgID, 0)}
 	tg := &fakeTelegram{
 		sendErr: &telegram.APIError{
@@ -286,17 +311,14 @@ func TestEnforcerRetriesRateLimitWithRetryAfter(t *testing.T) {
 		WithClock(func() time.Time { return now }))
 
 	ok, err := e.runOnce(context.Background())
-	if err != nil {
-		t.Fatalf("runOnce: %v", err)
-	}
-
-	if !ok || !outbox.retryRunAt.Equal(now.Add(17*time.Second)) {
-		t.Fatalf("retry = (%v, %v), want retry_after", ok, outbox.retryRunAt)
-	}
+	require.NoError(t, err, "runOnce")
+	assert.True(t, ok, "rate-limited action must be retried")
+	assert.True(t, outbox.retryRunAt.Equal(now.Add(17*time.Second)),
+		"retry must honor retry_after")
 }
 
 func TestEnforcerSendDMBlockedMarksUserAndCompletes(t *testing.T) {
-	tgID := int64(43)
+	tgID := random.TGID()
 	outbox := &fakeOutbox{action: sendDMAction(tgID, 0)}
 	users := &fakeUsers{}
 	tg := &fakeTelegram{
@@ -308,18 +330,15 @@ func TestEnforcerSendDMBlockedMarksUserAndCompletes(t *testing.T) {
 	}
 	e := newTestEnforcer(outbox, tg, users, &fakeAlerts{})
 
-	if _, err := e.runOnce(context.Background()); err != nil {
-		t.Fatalf("runOnce: %v", err)
-	}
-
-	if users.blocked != tgID || !outbox.done || outbox.retryError != "" {
-		t.Fatalf("blocked=%d done=%v retry=%q, want blocked done without retry",
-			users.blocked, outbox.done, outbox.retryError)
-	}
+	_, err := e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce")
+	assert.Equal(t, tgID, users.blocked, "blocked user must be recorded")
+	assert.True(t, outbox.done, "action must complete")
+	assert.Empty(t, outbox.retryError, "blocked DM must not retry")
 }
 
 func TestEnforcerSendDMRetryButtonUsesReplyMarkup(t *testing.T) {
-	tgID := int64(53)
+	tgID := random.TGID()
 	outbox := &fakeOutbox{action: domain.AccessAction{
 		ID:             1,
 		Type:           domain.ActionSendDM,
@@ -331,17 +350,14 @@ func TestEnforcerSendDMRetryButtonUsesReplyMarkup(t *testing.T) {
 	tg := &fakeTelegram{}
 	e := newTestEnforcer(outbox, tg, &fakeUsers{}, &fakeAlerts{})
 
-	if _, err := e.runOnce(context.Background()); err != nil {
-		t.Fatalf("runOnce: %v", err)
-	}
-
-	if len(tg.calls) != 1 || tg.calls[0] != "sendMessageWithReplyMarkup" {
-		t.Fatalf("calls=%v, want reply markup send", tg.calls)
-	}
+	_, err := e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce")
+	require.Len(t, tg.calls, 1, "want one telegram call")
+	assert.Equal(t, "sendMessageWithReplyMarkup", tg.calls[0])
 }
 
 func TestEnforcerFormattedDMPreservesParseMode(t *testing.T) {
-	tgID := int64(59)
+	tgID := random.TGID()
 	outbox := &fakeOutbox{action: domain.AccessAction{
 		ID:             1,
 		Type:           domain.ActionSendDM,
@@ -354,19 +370,15 @@ func TestEnforcerFormattedDMPreservesParseMode(t *testing.T) {
 	tg := &fakeTelegram{}
 	e := newTestEnforcer(outbox, tg, &fakeUsers{}, &fakeAlerts{})
 
-	if _, err := e.runOnce(context.Background()); err != nil {
-		t.Fatalf("runOnce: %v", err)
-	}
-
-	if len(tg.calls) != 1 || tg.calls[0] != "sendFormattedMessage" ||
-		tg.parseMode != messages.ParseModeHTML {
-		t.Fatalf("calls=%v parse_mode=%q, want formatted HTML send",
-			tg.calls, tg.parseMode)
-	}
+	_, err := e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce")
+	require.Len(t, tg.calls, 1, "want one telegram call")
+	assert.Equal(t, "sendFormattedMessage", tg.calls[0])
+	assert.Equal(t, messages.ParseModeHTML, tg.parseMode)
 }
 
 func TestEnforcerFormattedDMRetryButtonPreservesParseMode(t *testing.T) {
-	tgID := int64(60)
+	tgID := random.TGID()
 	outbox := &fakeOutbox{action: domain.AccessAction{
 		ID:             1,
 		Type:           domain.ActionSendDM,
@@ -379,20 +391,15 @@ func TestEnforcerFormattedDMRetryButtonPreservesParseMode(t *testing.T) {
 	tg := &fakeTelegram{}
 	e := newTestEnforcer(outbox, tg, &fakeUsers{}, &fakeAlerts{})
 
-	if _, err := e.runOnce(context.Background()); err != nil {
-		t.Fatalf("runOnce: %v", err)
-	}
-
-	if len(tg.calls) != 1 ||
-		tg.calls[0] != "sendFormattedMessageWithReplyMarkup" ||
-		tg.parseMode != messages.ParseModeHTML {
-		t.Fatalf("calls=%v parse_mode=%q, want formatted reply-markup send",
-			tg.calls, tg.parseMode)
-	}
+	_, err := e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce")
+	require.Len(t, tg.calls, 1, "want one telegram call")
+	assert.Equal(t, "sendFormattedMessageWithReplyMarkup", tg.calls[0])
+	assert.Equal(t, messages.ParseModeHTML, tg.parseMode)
 }
 
 func TestEnforcerLegacyDMPayloadWithoutParseModeStaysPlain(t *testing.T) {
-	tgID := int64(61)
+	tgID := random.TGID()
 	outbox := &fakeOutbox{action: domain.AccessAction{
 		ID:             1,
 		Type:           domain.ActionSendDM,
@@ -404,18 +411,15 @@ func TestEnforcerLegacyDMPayloadWithoutParseModeStaysPlain(t *testing.T) {
 	tg := &fakeTelegram{}
 	e := newTestEnforcer(outbox, tg, &fakeUsers{}, &fakeAlerts{})
 
-	if _, err := e.runOnce(context.Background()); err != nil {
-		t.Fatalf("runOnce: %v", err)
-	}
-
-	if len(tg.calls) != 1 || tg.calls[0] != "sendMessage" || tg.parseMode != "" {
-		t.Fatalf("calls=%v parse_mode=%q, want plain legacy send",
-			tg.calls, tg.parseMode)
-	}
+	_, err := e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce")
+	require.Len(t, tg.calls, 1, "want one telegram call")
+	assert.Equal(t, "sendMessage", tg.calls[0])
+	assert.Empty(t, tg.parseMode, "legacy payload must stay plain")
 }
 
 func TestEnforcerFormattedInvitePreservesParseMode(t *testing.T) {
-	tgID := int64(62)
+	tgID := random.TGID()
 	action := resourceAction(domain.ActionSendInvite, tgID)
 	action.PayloadJSON = []byte(`{"text":"<b>invite</b>","parse_mode":"HTML"}`)
 	outbox := &fakeOutbox{action: action}
@@ -430,19 +434,15 @@ func TestEnforcerFormattedInvitePreservesParseMode(t *testing.T) {
 		ClubChannelID: -1002,
 	}, WithRateLimiter(noopLimiter{}))
 
-	if _, err := e.runOnce(context.Background()); err != nil {
-		t.Fatalf("runOnce: %v", err)
-	}
-
-	if len(tg.calls) != 1 || tg.calls[0] != "sendFormattedMessage" ||
-		tg.parseMode != messages.ParseModeHTML {
-		t.Fatalf("calls=%v parse_mode=%q, want formatted invite send",
-			tg.calls, tg.parseMode)
-	}
+	_, err := e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce")
+	require.Len(t, tg.calls, 1, "want one telegram call")
+	assert.Equal(t, "sendFormattedMessage", tg.calls[0])
+	assert.Equal(t, messages.ParseModeHTML, tg.parseMode)
 }
 
 func TestEnforcerSendInviteBlockedMarksUserAndCompletes(t *testing.T) {
-	tgID := int64(49)
+	tgID := random.TGID()
 	outbox := &fakeOutbox{action: resourceAction(domain.ActionSendInvite, tgID)}
 	users := &fakeUsers{}
 	tg := &fakeTelegram{
@@ -454,18 +454,15 @@ func TestEnforcerSendInviteBlockedMarksUserAndCompletes(t *testing.T) {
 	}
 	e := newTestEnforcer(outbox, tg, users, &fakeAlerts{})
 
-	if _, err := e.runOnce(context.Background()); err != nil {
-		t.Fatalf("runOnce: %v", err)
-	}
-
-	if users.blocked != tgID || !outbox.done || outbox.retryError != "" {
-		t.Fatalf("blocked=%d done=%v retry=%q, want blocked done without retry",
-			users.blocked, outbox.done, outbox.retryError)
-	}
+	_, err := e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce")
+	assert.Equal(t, tgID, users.blocked, "blocked user must be recorded")
+	assert.True(t, outbox.done, "action must complete")
+	assert.Empty(t, outbox.retryError, "blocked DM must not retry")
 }
 
 func TestEnforcerSendInviteCompletesWhenMarkSentFails(t *testing.T) {
-	tgID := int64(51)
+	tgID := random.TGID()
 	outbox := &fakeOutbox{action: resourceAction(domain.ActionSendInvite, tgID)}
 	tg := &fakeTelegram{}
 	invites := &fakeInvites{markSentErr: errors.New("mark sent failed")}
@@ -478,26 +475,18 @@ func TestEnforcerSendInviteCompletesWhenMarkSentFails(t *testing.T) {
 		ClubChannelID: -1002,
 	}, WithRateLimiter(noopLimiter{}))
 
-	if _, err := e.runOnce(context.Background()); err != nil {
-		t.Fatalf("runOnce: %v", err)
-	}
-
-	if !outbox.done || outbox.retryError != "" || outbox.dead {
-		t.Fatalf("done=%v retry=%q dead=%v, want done without retry",
-			outbox.done, outbox.retryError, outbox.dead)
-	}
-
-	if invites.markSentCalls != 1 {
-		t.Fatalf("markSentCalls=%d, want 1", invites.markSentCalls)
-	}
-
-	if len(tg.calls) != 1 || tg.calls[0] != "sendMessage" {
-		t.Fatalf("calls=%v, want one sendMessage", tg.calls)
-	}
+	_, err := e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce")
+	assert.True(t, outbox.done, "action must complete")
+	assert.Empty(t, outbox.retryError, "mark-sent failure must not retry")
+	assert.False(t, outbox.dead, "mark-sent failure must not go dead")
+	assert.Equal(t, 1, invites.markSentCalls, "mark sent must be attempted once")
+	require.Len(t, tg.calls, 1, "want one telegram call")
+	assert.Equal(t, "sendMessage", tg.calls[0])
 }
 
 func TestEnforcerApproveJoinExpectedNoopCompletes(t *testing.T) {
-	tgID := int64(44)
+	tgID := random.TGID()
 	resource := domain.ResourceChat
 	outbox := &fakeOutbox{action: domain.AccessAction{
 		ID:             1,
@@ -513,17 +502,14 @@ func TestEnforcerApproveJoinExpectedNoopCompletes(t *testing.T) {
 	}
 	e := newTestEnforcer(outbox, tg, &fakeUsers{}, &fakeAlerts{})
 
-	if _, err := e.runOnce(context.Background()); err != nil {
-		t.Fatalf("runOnce: %v", err)
-	}
-
-	if !outbox.done || outbox.retryError != "" {
-		t.Fatalf("done=%v retry=%q, want no-op done", outbox.done, outbox.retryError)
-	}
+	_, err := e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce")
+	assert.True(t, outbox.done, "expected no-op must complete")
+	assert.Empty(t, outbox.retryError, "no-op must not retry")
 }
 
 func TestEnforcerChatNotFoundRetriesAction(t *testing.T) {
-	tgID := int64(50)
+	tgID := random.TGID()
 	outbox := &fakeOutbox{action: resourceAction(domain.ActionApproveJoin, tgID)}
 	tg := &fakeTelegram{
 		approveErr: errors.New("bad request: chat not found"),
@@ -533,18 +519,14 @@ func TestEnforcerChatNotFoundRetriesAction(t *testing.T) {
 			return time.Unix(1_700_000_000, 0)
 		}))
 
-	if _, err := e.runOnce(context.Background()); err != nil {
-		t.Fatalf("runOnce: %v", err)
-	}
-
-	if outbox.done || outbox.retryError == "" {
-		t.Fatalf("done=%v retry=%q, want retry instead of no-op done",
-			outbox.done, outbox.retryError)
-	}
+	_, err := e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce")
+	assert.False(t, outbox.done, "chat-not-found must not complete as no-op")
+	assert.NotEmpty(t, outbox.retryError, "chat-not-found must retry")
 }
 
 func TestEnforcerForbiddenActionGoesDeadWithoutRetry(t *testing.T) {
-	tgID := int64(52)
+	tgID := random.TGID()
 	outbox := &fakeOutbox{action: resourceAction(domain.ActionApproveJoin, tgID)}
 	alerts := &fakeAlerts{}
 	tg := &fakeTelegram{
@@ -556,125 +538,96 @@ func TestEnforcerForbiddenActionGoesDeadWithoutRetry(t *testing.T) {
 	}
 	e := newTestEnforcer(outbox, tg, &fakeUsers{}, alerts)
 
-	if _, err := e.runOnce(context.Background()); err != nil {
-		t.Fatalf("runOnce: %v", err)
-	}
-
-	if !outbox.dead || outbox.done || outbox.retryError != "" {
-		t.Fatalf("dead=%v done=%v retry=%q, want dead without retry",
-			outbox.dead, outbox.done, outbox.retryError)
-	}
-
-	if len(alerts.created) != 1 ||
-		alerts.created[0].Kind != "outbox_action_dead" {
-		t.Fatalf("alerts=%+v, want one dead-action alert", alerts.created)
-	}
+	_, err := e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce")
+	assert.True(t, outbox.dead, "forbidden action must go dead")
+	assert.False(t, outbox.done, "forbidden action must not complete")
+	assert.Empty(t, outbox.retryError, "forbidden action must not retry")
+	require.Len(t, alerts.created, 1, "want one dead-action alert")
+	assert.Equal(t, "outbox_action_dead", alerts.created[0].Kind)
 }
 
 func TestEnforcerSoftKickSkipsCreatorOrAdmin(t *testing.T) {
-	tgID := int64(45)
+	tgID := random.TGID()
 	outbox := &fakeOutbox{action: resourceAction(domain.ActionSoftKick, tgID)}
 	tg := &fakeTelegram{member: &models.ChatMember{
 		Type: models.ChatMemberTypeAdministrator,
 	}}
 	e := newTestEnforcer(outbox, tg, &fakeUsers{}, &fakeAlerts{})
 
-	if _, err := e.runOnce(context.Background()); err != nil {
-		t.Fatalf("runOnce: %v", err)
-	}
-
-	if !outbox.done {
-		t.Fatal("soft_kick admin was not completed as no-op")
-	}
-
-	if len(tg.calls) != 1 || tg.calls[0] != "getChatMember" {
-		t.Fatalf("calls = %v, want only getChatMember", tg.calls)
-	}
+	_, err := e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce")
+	assert.True(t, outbox.done, "soft_kick admin must complete as no-op")
+	require.Len(t, tg.calls, 1, "want only getChatMember")
+	assert.Equal(t, "getChatMember", tg.calls[0])
 }
 
 func TestEnforcerSoftKickBanThenUnban(t *testing.T) {
-	tgID := int64(46)
+	tgID := random.TGID()
 	outbox := &fakeOutbox{action: resourceAction(domain.ActionSoftKick, tgID)}
 	tg := &fakeTelegram{member: &models.ChatMember{
 		Type: models.ChatMemberTypeMember,
 	}}
 	e := newTestEnforcer(outbox, tg, &fakeUsers{}, &fakeAlerts{})
 
-	if _, err := e.runOnce(context.Background()); err != nil {
-		t.Fatalf("runOnce: %v", err)
-	}
-
-	wantCalls := []string{"getChatMember", "banChatMember", "unbanChatMember"}
-	if !equalStrings(tg.calls, wantCalls) || !tg.onlyIfBanned || !outbox.done {
-		t.Fatalf("calls=%v only_if_banned=%v done=%v",
-			tg.calls, tg.onlyIfBanned, outbox.done)
-	}
+	_, err := e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce")
+	assert.Equal(t,
+		[]string{"getChatMember", "banChatMember", "unbanChatMember"}, tg.calls)
+	assert.True(t, tg.onlyIfBanned, "unban must use only_if_banned")
+	assert.True(t, outbox.done, "soft_kick must complete")
 }
 
 func TestEnforcerHardBanSkipsProtectedAdmin(t *testing.T) {
-	tgID := int64(54)
+	tgID := random.TGID()
 	outbox := &fakeOutbox{action: resourceAction(domain.ActionHardBan, tgID)}
 	tg := &fakeTelegram{member: &models.ChatMember{
 		Type: models.ChatMemberTypeAdministrator,
 	}}
 	e := newTestEnforcer(outbox, tg, &fakeUsers{}, &fakeAlerts{})
 
-	if _, err := e.runOnce(context.Background()); err != nil {
-		t.Fatalf("runOnce: %v", err)
-	}
-
-	if !outbox.done {
-		t.Fatal("hard_ban admin was not completed as no-op")
-	}
-
-	if len(tg.calls) != 1 || tg.calls[0] != "getChatMember" {
-		t.Fatalf("calls = %v, want only getChatMember", tg.calls)
-	}
+	_, err := e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce")
+	assert.True(t, outbox.done, "hard_ban admin must complete as no-op")
+	require.Len(t, tg.calls, 1, "want only getChatMember")
+	assert.Equal(t, "getChatMember", tg.calls[0])
 }
 
 func TestEnforcerUnbanUsesOnlyIfBanned(t *testing.T) {
-	tgID := int64(55)
+	tgID := random.TGID()
 	outbox := &fakeOutbox{action: resourceAction(domain.ActionUnban, tgID)}
 	tg := &fakeTelegram{}
 	e := newTestEnforcer(outbox, tg, &fakeUsers{}, &fakeAlerts{})
 
-	if _, err := e.runOnce(context.Background()); err != nil {
-		t.Fatalf("runOnce: %v", err)
-	}
-
-	if !outbox.done || !tg.onlyIfBanned {
-		t.Fatalf("done=%v only_if_banned=%v, want done true",
-			outbox.done, tg.onlyIfBanned)
-	}
+	_, err := e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce")
+	assert.True(t, outbox.done, "unban must complete")
+	assert.True(t, tg.onlyIfBanned, "unban must use only_if_banned")
 }
 
 func TestEnforcerVerifyMemberSourceInactiveSchedulesRevocation(t *testing.T) {
-	db := newStoreDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(56)
+	tgID := random.TGID()
 	outbox := store.NewOutbox(db)
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
-	if _, err := store.NewSubscriptions(db).UpsertActive(ctx, domain.Subscription{
+	_, err := store.NewSubscriptions(db).UpsertActive(ctx, domain.Subscription{
 		TGID:       tgID,
 		Platform:   domain.PlatformBoosty,
 		StartedAt:  time.Now().Add(-time.Hour),
 		LastSignal: "event",
-	}); err != nil {
-		t.Fatalf("upsert subscription: %v", err)
-	}
+	})
+	require.NoError(t, err, "upsert subscription")
 
-	if err := store.NewGrants(db).Upsert(ctx, domain.AccessGrant{
+	require.NoError(t, store.NewGrants(db).Upsert(ctx, domain.AccessGrant{
 		TGID:       tgID,
 		Resource:   domain.ResourceChat,
 		State:      domain.GrantJoined,
 		AdmittedBy: "bot",
-	}); err != nil {
-		t.Fatalf("upsert grant: %v", err)
-	}
+	}), "upsert grant")
 
 	enqueueVerifyMember(t, ctx, outbox, tgID, nil,
 		[]byte(`{"kind":"source","platform":"boosty","chat_id":-1001}`))
@@ -697,43 +650,38 @@ func TestEnforcerVerifyMemberSourceInactiveSchedulesRevocation(t *testing.T) {
 		ClubChannelID: -1002,
 	}, WithRateLimiter(noopLimiter{}))
 
-	if _, err := e.runOnce(ctx); err != nil {
-		t.Fatalf("runOnce: %v", err)
-	}
+	_, err = e.runOnce(ctx)
+	require.NoError(t, err, "runOnce")
 
-	if _, ok, err := store.NewSubscriptions(db).GetActive(
-		ctx, tgID, domain.PlatformBoosty,
-	); err != nil || ok {
-		t.Fatalf("active subscription = (_, %v, %v), want expired", ok, err)
-	}
+	_, ok, err := store.NewSubscriptions(db).GetActive(
+		ctx, tgID, domain.PlatformBoosty)
+	require.NoError(t, err)
+	assert.False(t, ok, "inactive source must expire the subscription")
 
-	if _, ok, err := store.NewRevocations(db).Get(ctx, tgID); err != nil || !ok {
-		t.Fatalf("pending revocation = (_, %v, %v), want present", ok, err)
-	}
+	_, ok, err = store.NewRevocations(db).Get(ctx, tgID)
+	require.NoError(t, err)
+	assert.True(t, ok, "a pending revocation must be scheduled")
 
-	if got := countStoreActions(t, db, domain.ActionSoftKick); got != 0 {
-		t.Fatalf("soft_kick actions = %d, want zero during grace", got)
-	}
+	assert.Zero(t, countStoreActions(t, db, domain.ActionSoftKick),
+		"grace must not soft kick immediately")
 }
 
 func TestEnforcerVerifyMemberUnknownLeavesAccessUntouched(t *testing.T) {
-	db := newStoreDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(57)
+	tgID := random.TGID()
 	outbox := store.NewOutbox(db)
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
-	if _, err := store.NewSubscriptions(db).UpsertActive(ctx, domain.Subscription{
+	_, err := store.NewSubscriptions(db).UpsertActive(ctx, domain.Subscription{
 		TGID:       tgID,
 		Platform:   domain.PlatformBoosty,
 		StartedAt:  time.Now().Add(-time.Hour),
 		LastSignal: "event",
-	}); err != nil {
-		t.Fatalf("upsert subscription: %v", err)
-	}
+	})
+	require.NoError(t, err, "upsert subscription")
 
 	enqueueVerifyMember(t, ctx, outbox, tgID, nil,
 		[]byte(`{"kind":"source","platform":"boosty","chat_id":-1001}`))
@@ -754,42 +702,37 @@ func TestEnforcerVerifyMemberUnknownLeavesAccessUntouched(t *testing.T) {
 		ClubChannelID: -1002,
 	}, WithRateLimiter(noopLimiter{}))
 
-	if _, err := e.runOnce(ctx); err != nil {
-		t.Fatalf("runOnce: %v", err)
-	}
+	_, err = e.runOnce(ctx)
+	require.NoError(t, err, "runOnce")
 
-	if _, ok, err := store.NewSubscriptions(db).GetActive(
-		ctx, tgID, domain.PlatformBoosty,
-	); err != nil || !ok {
-		t.Fatalf("active subscription = (_, %v, %v), want preserved", ok, err)
-	}
+	_, ok, err := store.NewSubscriptions(db).GetActive(
+		ctx, tgID, domain.PlatformBoosty)
+	require.NoError(t, err)
+	assert.True(t, ok, "unknown verdict must preserve the subscription")
 
-	if _, ok, err := store.NewRevocations(db).Get(ctx, tgID); err != nil || ok {
-		t.Fatalf("pending revocation = (_, %v, %v), want absent", ok, err)
-	}
+	_, ok, err = store.NewRevocations(db).Get(ctx, tgID)
+	require.NoError(t, err)
+	assert.False(t, ok, "unknown verdict must not schedule a revocation")
 }
 
 func TestEnforcerVerifyMemberClubPreservesRevokedGrant(t *testing.T) {
-	db := newStoreDB(t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
-	tgID := int64(58)
+	tgID := random.TGID()
 	outbox := store.NewOutbox(db)
 	resource := domain.ResourceChat
 
-	if err := store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}); err != nil {
-		t.Fatalf("upsert user: %v", err)
-	}
+	require.NoError(t, store.NewUsers(db).Upsert(ctx, domain.User{TGID: tgID}),
+		"upsert user")
 
-	if err := store.NewGrants(db).Upsert(ctx, domain.AccessGrant{
+	require.NoError(t, store.NewGrants(db).Upsert(ctx, domain.AccessGrant{
 		TGID:          tgID,
 		Resource:      resource,
 		State:         domain.GrantRevoked,
 		AdmittedBy:    "bot",
 		RevokedAt:     ptrTime(time.Now().Add(-time.Hour)),
 		RevokedReason: "expired",
-	}); err != nil {
-		t.Fatalf("upsert revoked grant: %v", err)
-	}
+	}), "upsert revoked grant")
 
 	enqueueVerifyMember(t, ctx, outbox, tgID, &resource,
 		[]byte(`{"kind":"club","resource":"chat","chat_id":-1001}`))
@@ -807,40 +750,31 @@ func TestEnforcerVerifyMemberClubPreservesRevokedGrant(t *testing.T) {
 		ClubChannelID: -1002,
 	}, WithRateLimiter(noopLimiter{}))
 
-	if _, err := e.runOnce(ctx); err != nil {
-		t.Fatalf("runOnce: %v", err)
-	}
+	_, err := e.runOnce(ctx)
+	require.NoError(t, err, "runOnce")
 
 	grant, err := store.NewGrants(db).Get(ctx, tgID, resource)
-	if err != nil {
-		t.Fatalf("get grant: %v", err)
-	}
-
-	if grant.State != domain.GrantRevoked {
-		t.Fatalf("grant state = %s, want revoked", grant.State)
-	}
+	require.NoError(t, err, "get grant")
+	assert.Equal(t, domain.GrantRevoked, grant.State,
+		"club membership must not resurrect a revoked grant")
 }
 
 func TestEnforcerDeadActionCreatesAlert(t *testing.T) {
-	tgID := int64(47)
+	tgID := random.TGID()
 	outbox := &fakeOutbox{action: sendDMAction(tgID, 7)}
 	alerts := &fakeAlerts{}
 	tg := &fakeTelegram{sendErr: errors.New("network down")}
 	e := newTestEnforcer(outbox, tg, &fakeUsers{}, alerts)
 
-	if _, err := e.runOnce(context.Background()); err != nil {
-		t.Fatalf("runOnce: %v", err)
-	}
-
-	if !outbox.dead || len(alerts.created) != 1 ||
-		alerts.created[0].Kind != "outbox_action_dead" {
-		t.Fatalf("dead=%v alerts=%+v, want one dead alert",
-			outbox.dead, alerts.created)
-	}
+	_, err := e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce")
+	assert.True(t, outbox.dead, "exhausted action must go dead")
+	require.Len(t, alerts.created, 1, "want one dead-action alert")
+	assert.Equal(t, "outbox_action_dead", alerts.created[0].Kind)
 }
 
 func TestEnforcerNetworkRunsAfterLeaseReturns(t *testing.T) {
-	tgID := int64(48)
+	tgID := random.TGID()
 	inLease := false
 	outbox := &fakeOutbox{
 		action:  sendDMAction(tgID, 0),
@@ -849,13 +783,9 @@ func TestEnforcerNetworkRunsAfterLeaseReturns(t *testing.T) {
 	tg := &fakeTelegram{networkInLease: &inLease}
 	e := newTestEnforcer(outbox, tg, &fakeUsers{}, &fakeAlerts{})
 
-	if _, err := e.runOnce(context.Background()); err != nil {
-		t.Fatalf("runOnce: %v", err)
-	}
-
-	if !outbox.done {
-		t.Fatal("action was not completed")
-	}
+	_, err := e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce")
+	assert.True(t, outbox.done, "action must complete after the lease returns")
 }
 
 func TestEnforcerLimitsInviteOperations(t *testing.T) {
@@ -879,15 +809,12 @@ func TestEnforcerLimitsInviteOperations(t *testing.T) {
 		ClubChannelID: -1002,
 	}, WithRateLimiter(limiter))
 
-	if _, err := e.runOnce(context.Background()); err != nil {
-		t.Fatalf("runOnce ensure_invite: %v", err)
-	}
-
-	if invites.ensureCalls != 1 ||
-		len(limiter.calls) != 1 ||
-		limiter.calls[0] != (limiterCall{kind: requestKindDefault, chatID: -1001}) {
-		t.Fatalf("ensure calls=%d limiter=%+v", invites.ensureCalls, limiter.calls)
-	}
+	_, err := e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce ensure_invite")
+	assert.Equal(t, 1, invites.ensureCalls, "ensure must be called once")
+	assert.Equal(t,
+		[]limiterCall{{kind: requestKindDefault, chatID: -1001}}, limiter.calls,
+		"ensure must be rate limited on the club chat")
 
 	limiter.calls = nil
 	invites.revokeCalls = 0
@@ -903,15 +830,12 @@ func TestEnforcerLimitsInviteOperations(t *testing.T) {
 	outbox.leased = false
 	outbox.done = false
 
-	if _, err := e.runOnce(context.Background()); err != nil {
-		t.Fatalf("runOnce revoke_invite: %v", err)
-	}
-
-	if invites.revokeCalls != 1 ||
-		len(limiter.calls) != 1 ||
-		limiter.calls[0] != (limiterCall{kind: requestKindDefault, chatID: -1001}) {
-		t.Fatalf("revoke calls=%d limiter=%+v", invites.revokeCalls, limiter.calls)
-	}
+	_, err = e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce revoke_invite")
+	assert.Equal(t, 1, invites.revokeCalls, "revoke must be called once")
+	assert.Equal(t,
+		[]limiterCall{{kind: requestKindDefault, chatID: -1001}}, limiter.calls,
+		"revoke must be rate limited on the club chat")
 }
 
 func enqueueVerifyMember(
@@ -932,47 +856,11 @@ func enqueueVerifyMember(
 			domain.ActionVerifyMember, &tgID, resource, string(payload)),
 		PayloadJSON: payload,
 	})
-	if err != nil {
-		t.Fatalf("enqueue verify_member: %v", err)
-	}
+	require.NoError(t, err, "enqueue verify_member")
 }
 
 func ptrTime(value time.Time) *time.Time {
 	return &value
-}
-
-func newStoreDB(t *testing.T) *sql.DB {
-	t.Helper()
-
-	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("open database: %v", err)
-	}
-
-	t.Cleanup(func() { _ = db.Close() })
-
-	provider, err := goose.NewProvider(
-		goose.DialectSQLite3, db, os.DirFS(enforcerMigrationsDir(t)))
-	if err != nil {
-		t.Fatalf("new goose provider: %v", err)
-	}
-
-	if _, err := provider.Up(context.Background()); err != nil {
-		t.Fatalf("apply migrations: %v", err)
-	}
-
-	return db
-}
-
-func enforcerMigrationsDir(t *testing.T) string {
-	t.Helper()
-
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-
-	return filepath.Join(filepath.Dir(file), "..", "..", "migrations")
 }
 
 func countStoreActions(
@@ -983,11 +871,9 @@ func countStoreActions(
 	t.Helper()
 
 	var got int
-	if err := db.QueryRowContext(context.Background(), `
+	require.NoError(t, db.QueryRowContext(context.Background(), `
 		SELECT count(*) FROM access_actions WHERE action_type = ?`,
-		string(actionType)).Scan(&got); err != nil {
-		t.Fatalf("count actions: %v", err)
-	}
+		string(actionType)).Scan(&got), "count actions")
 
 	return got
 }
@@ -1035,18 +921,4 @@ func resourceAction(actionType domain.ActionType, tgID int64) domain.AccessActio
 		PayloadJSON:    []byte(`{}`),
 		MaxAttempts:    8,
 	}
-}
-
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-
-	return true
 }

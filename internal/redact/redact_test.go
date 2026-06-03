@@ -1,8 +1,9 @@
 package redact
 
 import (
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestJSONPayloadRedactsSensitiveFields(t *testing.T) {
@@ -23,9 +24,7 @@ func TestJSONPayloadRedactsSensitiveFields(t *testing.T) {
 		"https://t.me/+abcdef",
 		"123456:abcdefghijklmnopqrstuvwxyz",
 	} {
-		if strings.Contains(redacted, forbidden) {
-			t.Fatalf("redacted payload contains %q: %s", forbidden, redacted)
-		}
+		assert.NotContains(t, redacted, forbidden, "redacted payload leaks %q", forbidden)
 	}
 
 	for _, preserved := range []string{
@@ -34,9 +33,7 @@ func TestJSONPayloadRedactsSensitiveFields(t *testing.T) {
 		"123",
 		"456",
 	} {
-		if !strings.Contains(redacted, preserved) {
-			t.Fatalf("redacted payload missing %q: %s", preserved, redacted)
-		}
+		assert.Contains(t, redacted, preserved, "redacted payload drops %q", preserved)
 	}
 }
 
@@ -51,8 +48,6 @@ func TestRedactStringMasksEmailsTokensAndInviteURLs(t *testing.T) {
 		"123456:abcdefghijklmnopqrstuvwxyz",
 		"https://t.me/joinchat/abcdef",
 	} {
-		if strings.Contains(got, forbidden) {
-			t.Fatalf("redacted string contains %q: %s", forbidden, got)
-		}
+		assert.NotContains(t, got, forbidden, "redacted string leaks %q", forbidden)
 	}
 }
