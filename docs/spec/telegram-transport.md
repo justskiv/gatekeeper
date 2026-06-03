@@ -10,8 +10,10 @@ durable inbox, маршрутизация и восстановление. Чи�
 `github.com/go-telegram/bot`. Свои интерфейсы пакет не объявляет:
 узкие интерфейсы задают потребители. Клиент покрывает `getMe`,
 `getChat`, `getChatMember`, `sendMessage`, `setMyCommands`, `setWebhook`,
-`deleteWebhook`, а также методы Bot API, нужные Enforcer'у:
-`createChatInviteLink`, `revokeChatInviteLink`, `approveChatJoinRequest`,
+`deleteWebhook`, методы in-place правки и подтверждения callback'ов
+`answerCallbackQuery`, `editMessageText`, `editMessageReplyMarkup`, а
+также методы Bot API, нужные Enforcer'у: `createChatInviteLink`,
+`revokeChatInviteLink`, `approveChatJoinRequest`,
 `declineChatJoinRequest`, `banChatMember`, `unbanChatMember`.
 
 Ошибки Telegram нормализуются в категории, чтобы вызывающий код не
@@ -58,6 +60,16 @@ MarkdownV2 для основного renderer'а не используется �
 запрещён для новых сообщений. Guard-тест ловит
 `models.ParseModeMarkdownV1` и сырой `"Markdown"` в send-путях.
 
+## Правка сообщений на месте
+
+`editMessageText` редактирует текст и inline-клавиатуру существующего
+сообщения с тем же HTML parse mode, что и форматированные исходящие
+сообщения; `editMessageReplyMarkup` меняет только клавиатуру, не трогая
+текст. Ответ Telegram `message is not modified` для обоих методов
+трактуется как успех — желаемое состояние уже достигнуто.
+`answerCallbackQuery` подтверждает callback query, чтобы клиент убрал
+спиннер на inline-кнопке.
+
 ## Long polling
 
 Поллер забирает обновления через `getUpdates` одной горутиной и всегда
@@ -96,10 +108,18 @@ outbox actions и терминальный статус коммитятся а�
 ## Durable inbox
 
 Каждый батч сначала сохраняется в `telegram_updates`, и только после
-коммита начинается обработка. В одной транзакции пишутся `pending`
-строки с raw JSON payload и продвигается `meta.update_offset` до
-`max(update_id)+1`. После этого Telegram уже не вернёт эти update id, а
-локальная обработка восстановима из БД.
+коммита начинается обработка. В одной транзакции (`receiveTx`) пишутся
+`pending` строки с raw JSON payload (`payload_json`, `NOT NULL`) и
+продвигается `meta.update_offset` до `max(update_id)+1`. После этого
+Telegram уже не вернёт эти update id, а локальная обработка восстановима
+из БД.
+
+`payload_json` хранит сырое обновление ровно в том виде, в каком его
+прислал Telegram. Redaction (`redact`) применяется *только* на границе
+логирования и не затрагивает persisted или processed payload. Обработчик
+разбирает тот же сырой payload, что был сохранён: redaction
+processed-payload'а уничтожала поля, по которым бот принимает решения
+(например `invite_link` в join-request), и приводила к тихим отказам.
 
 Для каждого обновления открывается отдельная транзакция обработчика
 (`handleTx`). Два инварианта:
@@ -165,3 +185,17 @@ id и club resource id отклоняется на уровне runtime/config �
 игнорируются; смена прав без смены членства — no-op. Применение идёт
 внутри `handleTx` с соблюдением I1/I2: членство берётся из payload, не из
 сети.
+
+## Подтверждение retry-access нажатий
+
+Retry-access нажатие получает мгновенную обратную связь до того, как
+запустится медленный admission preflight. Для update'а с
+`callback_query`, чья `data` равна retry-access callback data, поллер
+подтверждает callback query (`answerCallbackQuery`, убирает спиннер
+inline-кнопки) и меняет inline-кнопку на лейбл «проверяем»
+(`editMessageReplyMarkup`), не трогая тело сообщения.
+
+Обе операции best-effort: сбой логируется на `warn` и не прерывает
+обработку update'а — она продолжается обычным admission-флоу. Отменённый
+контекст просто завершает подтверждение без ошибки. Подтверждение идёт
+вне `handleTx`, как обычный preflight Telegram-вызов (инвариант I2).

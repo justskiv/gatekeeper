@@ -28,7 +28,7 @@ summary-first. Архивированы changes `phase-02..07` и
 | [migrations](migrations.md) | Отдельный `migrate` CLI, forward-only через goose |
 | [runtime](runtime.md) | Порядок старта `gatekeeper`, supervision и остановка |
 | [telegram-transport](telegram-transport.md) | Telegram-клиент, long polling, durable inbox, маршрутизация |
-| [bot-commands](bot-commands.md) | `/start`, `/help`, `/here`, `/status`, `/whois`, DM-доставка |
+| [bot-commands](bot-commands.md) | `/start`, `/help`, `/boosty`, `/tribute`, `/status`, `/whois`, DM-доставка |
 | [bot-message-ux](bot-message-ux.md) | Голос сообщений, privacy-граница user/owner, эмодзи, summary-first |
 | [chat-health](chat-health.md) | Проверка прав бота, health-ключи, discovery чатов |
 | [status-core](status-core.md) | Вердикты источников, агрегатор статуса, события подписки |

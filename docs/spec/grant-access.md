@@ -9,11 +9,15 @@ Pull-модель доступа к клубным ресурсам: запро�
 - **active** — flow зовёт `recomputeAccess`, находит клубные ресурсы (чат и канал), где grant отсутствует или не равен `joined`, и в короткой handler-транзакции записывает `access_grants.state='pending'`, `audit_log` и нужные outbox actions. Дальнейшее зависит от `INVITE_MODE`:
   - `shared_join_request` — `send_dm` с `MSG_ACTIVE` и ссылками из активных shared-строк `invite_links`;
   - `personal_join_request` или `direct` — `send_invite`, а немедленный durable ответ пользователю — `MSG_INVITE_SOON`.
-- **inactive** — `send_dm` с `MSG_NO_SUB`; grants и invite actions не создаются.
+- **inactive** — `send_dm` с `MSG_NO_SUB`; grants и invite actions не создаются. Сообщение несёт retry-кнопку «Проверить ещё раз», чтобы пользователь после оплаты мог перепроверить доступ.
 - **unknown** — fallback только на свежую active-подписку из БД в пределах `ADMISSION_FALLBACK_MAX_AGE`; такой fallback обрабатывается как `active`, а audit фиксирует, что выдача была основана на нём. Без fallback — `send_dm` с `MSG_TRY_LATER` и `admin_alert` о недоступности источника.
 - **banned** (`users.banned=1`) — `send_dm` с `MSG_BANNED`; источники подписки доступа не дают.
 
-Повторный запрос идемпотентен: на пару `(tg_id, resource)` остаётся одна строка grant, одинаковые invite actions не плодятся за счёт outbox idempotency keys, а уже `joined` ресурсы сообщаются как уже доступные. До Фазы 06 `recomputeAccess` не содержит `inactive`-ветки отзыва — ни soft-kick, ни revocation actions.
+Каждый запрос доступа получает ответ: idempotency-маркер user-facing reply — per-request (UnixNano), а не 30-секундный time-bucket, поэтому повторный `/start` или повторное нажатие retry снова отвечают пользователю, а не подавляются общим ключом. Per-user throttle на effective-проверку снят: каждое нажатие запускает живую проверку (защита от нагрузки — in-memory decision cache — отложена и в этот контракт не входит). Action-маркеры grant/invite свою идемпотентность сохраняют.
+
+Когда запрос пришёл retry-callback'ом и несёт edit-target (`chat_id` и `message_id` исходного сообщения), результат доставляется правкой того же сообщения на месте (`edit_message`, см. [outbox-enforcer](outbox-enforcer.md)), а не новым DM; если edit-target отсутствует или недоступен (сообщение слишком старое для правки), ответ падает обратно на свежий `send_dm`. Меняется только форма доставки — durable-побочные эффекты выдачи (grants, invite actions) остаются неизменными.
+
+Повторный запрос идемпотентен по durable-эффектам: на пару `(tg_id, resource)` остаётся одна строка grant, одинаковые invite actions не плодятся за счёт outbox idempotency keys, а уже `joined` ресурсы сообщаются как уже доступные. До Фазы 06 `recomputeAccess` не содержит `inactive`-ветки отзыва — ни soft-kick, ни revocation actions.
 
 ## Одобрение join-request
 
@@ -26,6 +30,8 @@ Pull-модель доступа к клубным ресурсам: запро�
 - устойчивый **unknown** после ретраев → `decline_join` и `MSG_TRY_LATER`.
 
 DM-ответы используют `user_chat_id` из Telegram, когда он доступен, чтобы пользователь, ранее не запускавший бота, всё равно получил результат admission. Idempotency key для `approve_join` включает resource, tg_id и дату/идентификатор заявки: новая заявка после выхода считается новым действием и не подавляется старым approve.
+
+Decline по неразрешённой invite-ссылке (`invite_unresolved`) несёт отдельное сообщение о нераспознанной ссылке, а не сообщение о временной проблеме проверки: это проблема приглашения, а не подписки, и copy направляет пользователя запросить доступ заново через `/start` за свежими ссылками. Если такой decline приходит пользователю со свежей *активной* подпиской, handler поднимает `admin_alert(kind='join_declined_active_sub', severity='warning')` — развернуть eligible-пользователя аномально и обычно означает сломанную invite-ссылку или логический баг. Обычный `inactive`-decline (нет подписки) ожидаем и этот alert не поднимает.
 
 Если personal-ссылка принадлежит tg_id A, а заявка пришла от tg_id B, handler отклоняет B, помечает invite `used_by_other` с `attempted_by=B` и пишет audit о misuse. Отсутствие поля `invite_link` в shared-режиме не отклоняет active-пользователя: решение опирается на resource и live status.
 
@@ -41,8 +47,11 @@ DM-ответы используют `user_chat_id` из Telegram, когда о
 
 ## Приёмка
 
-- Active в shared-режиме получает `pending` grants на чат и канал плюс `send_dm` с `MSG_ACTIVE` и ссылками; inactive — `MSG_NO_SUB` без grants.
+- Active в shared-режиме получает `pending` grants на чат и канал плюс `send_dm` с `MSG_ACTIVE` и ссылками; inactive — `MSG_NO_SUB` с retry-кнопкой, без grants.
+- Повторный `/start` и повторное нажатие retry каждый раз отвечают пользователю (per-request idempotency, throttle снят); durable grants/invite actions при этом не дублируются.
+- Retry-нажатие с доступным edit-target правит исходное сообщение на месте (`edit_message`); без edit-target ответ идёт свежим `send_dm`.
 - Unknown со свежей active-подпиской обрабатывается как active (с пометкой fallback в audit); без неё — `MSG_TRY_LATER` и `admin_alert`.
 - Active join-request → `approve_join`, grant `joined`/`bot`, `MSG_GRANTED`; inactive → `decline_join`, `MSG_NO_SUB`; устойчивый unknown → `decline_join`, `MSG_TRY_LATER`.
+- Decline по `invite_unresolved` → отдельное сообщение о нераспознанной ссылке с путём через `/start`; если у пользователя свежая active-подписка — `admin_alert(kind='join_declined_active_sub', severity='warning')`.
 - Personal-ссылка, использованная другим tg_id, → `decline_join`, `used_by_other` с `attempted_by`, audit о misuse.
 - External join → `joined`/`external` + `admin_alert`, без `soft_kick`; выход → `left` и `member_left`; выход поверх `revoked` grant состояние не меняет.
