@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Telegram bot replies now use formatted, safer copy for users and owners.
 
+### Fixed
+
+- Adding the bot to an unknown chat no longer sends the owner several
+  duplicate discovery notices; the alert now fires only on the join.
+
 ### Security
 
 - Subscriber messages never expose internal access reasons, chat IDs, or

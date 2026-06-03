@@ -215,13 +215,20 @@ func handleMyChatMember(
 		return nil, nil
 	}
 
-	if memberIsPresent(update.NewChatMember) && !memberIsPresent(update.OldChatMember) {
+	justJoined := memberIsPresent(update.NewChatMember) &&
+		!memberIsPresent(update.OldChatMember)
+	if justJoined {
 		logBotAddedToChat(logger, update)
 	}
 
 	chat, ok := findHealthChat(chats, update.Chat.ID)
 	if !ok {
-		if !memberIsPresent(update.NewChatMember) {
+		// Alert only on the actual join transition. Telegram emits a
+		// separate my_chat_member for every later status change (e.g.
+		// member→administrator, admin rights edits), and each one would
+		// otherwise re-fire the "unknown chat" alert for a chat we have
+		// already reported.
+		if !justJoined {
 			return nil, nil
 		}
 

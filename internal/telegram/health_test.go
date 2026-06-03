@@ -291,6 +291,37 @@ func TestMyChatMemberUnknownChatReturnsDiscoveryDM(t *testing.T) {
 	assert.NotEmpty(t, effects[0].Text, "discovery dm must carry text")
 }
 
+func TestMyChatMemberUnknownChatIgnoresLaterStatusChange(t *testing.T) {
+	db := testutil.NewDB(t)
+
+	// Telegram emits a separate my_chat_member for every status change.
+	// Once the bot is already present (e.g. member -> administrator, or an
+	// admin-rights edit), the discovery DM must not fire again: the owner
+	// has already been told about the chat on the join transition.
+	effects, err := handleMyChatMember(context.Background(), healthRepos{
+		users:  store.NewUsers(db),
+		meta:   store.NewMeta(db),
+		audit:  store.NewAudit(db),
+		alerts: store.NewAlerts(db),
+	}, nil, []int64{1}, &models.ChatMemberUpdated{
+		Chat: models.Chat{
+			ID:    -2001,
+			Type:  models.ChatTypeSupergroup,
+			Title: "new chat",
+		},
+		From: models.User{ID: 1, FirstName: "Owner"},
+		OldChatMember: models.ChatMember{
+			Type: models.ChatMemberTypeMember,
+		},
+		NewChatMember: models.ChatMember{
+			Type: models.ChatMemberTypeAdministrator,
+		},
+	}, slog.Default())
+	require.NoError(t, err, "handleMyChatMember")
+	assert.Empty(t, effects,
+		"later status change in unknown chat must not re-send discovery dm")
+}
+
 func TestMyChatMemberUnknownChatIgnoresRemoval(t *testing.T) {
 	db := testutil.NewDB(t)
 
