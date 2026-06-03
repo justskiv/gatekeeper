@@ -1,5 +1,13 @@
 # Gatekeeper
 
+[![CI](https://github.com/justskiv/gatekeeper/actions/workflows/ci.yml/badge.svg)](https://github.com/justskiv/gatekeeper/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/justskiv/gatekeeper.svg)](https://pkg.go.dev/github.com/justskiv/gatekeeper)
+[![Release](https://img.shields.io/github/release/justskiv/gatekeeper.svg)](https://github.com/justskiv/gatekeeper/releases)
+[![Telegram](https://img.shields.io/badge/Telegram-@ntuzov-blue?logo=telegram&logoColor=white)](https://t.me/ntuzov)
+
+[![Go Report Card](https://goreportcard.com/badge/github.com/justskiv/gatekeeper)](https://goreportcard.com/report/github.com/justskiv/gatekeeper)
+[![codecov](https://codecov.io/gh/justskiv/gatekeeper/branch/main/graph/badge.svg)](https://app.codecov.io/gh/justskiv/gatekeeper)
+
 Self-hosted Telegram access-control bot for paid subscriptions.
 Gatekeeper observes Boosty and Tribute subscription sources, stores a
 durable local access ledger and manages entry to a private club chat and
@@ -90,6 +98,13 @@ Telegram.
 `expires_at`. Set it to `true` only as an explicit operator override.
 
 ## Operations
+
+User commands:
+
+- `/start`
+- `/status`
+- `/help`
+- `/boosty`, `/tribute`
 
 Owner commands:
 
