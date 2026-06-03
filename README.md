@@ -112,7 +112,23 @@ When HTTP is enabled:
 
 ## Deployment
 
-Systemd and Docker examples live in `deploy/`.
+The canonical path is a published container image deployed with Docker
+Compose; a systemd unit is provided as an alternative. All deployment
+artifacts live in `deploy/`; the full runbook is `deploy/DEPLOYMENT.md`.
+
+For Docker Compose (GHCR):
+
+1. Push a `v*` tag. The **Build & publish image** workflow builds and
+   pushes `ghcr.io/<owner>/gatekeeper:<tag>` (and `:latest`).
+2. Run the **Deploy** workflow (manual dispatch, optional `tag`). It
+   copies the compose file, `config.env` and scripts to the droplet and
+   brings up the `gatekeeper-migrate` (one-shot) and `gatekeeper`
+   services. Non-secret configuration is committed in
+   `deploy/config.production.env`; `BOT_TOKEN` and the optional webhook
+   secrets are injected from the `Prod` GitHub Environment.
+
+Metrics/health are bound to `127.0.0.1:8090` on the host. Do not bake
+tokens or provider keys into the image.
 
 For systemd:
 

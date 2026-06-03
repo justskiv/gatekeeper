@@ -1,0 +1,81 @@
+name: Deploy
+run-name: Deploy → prod @ ${{ inputs.tag || 'latest' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to deploy (default: latest)'
+        required: false
+
+concurrency:
+  # Serialize prod deploys so two manual runs can't scp/up/migrate/prune
+  # the same /srv/gatekeeper at once. Don't cancel an in-flight deploy.
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Secrets live in the GitHub Environment named "Prod".
+    environment: Prod
+    env:
+      TAG: ${{ inputs.tag || 'latest' }}
+      OWNER: ${{ github.repository_owner }}
+      DIR: /srv/gatekeeper
+      COMPOSE_PROJECT_NAME: gatekeeper
+      METRICS_HOST_PORT: "8090"
+      CONTAINER_NAME: gatekeeper
+    steps:
+      - uses: actions/checkout@v4
+
+      # Stage the files the server needs: compose (as docker-compose.yml),
+      # the non-secret config (as config.env) and the deploy scripts.
+      - name: Prepare artifacts
+        run: |
+          mkdir -p deploy-out
+          cp deploy/docker-compose.production.yml deploy-out/docker-compose.yml
+          cp deploy/config.production.env deploy-out/config.env
+          cp -r deploy/scripts deploy-out/
+
+      - name: Debug connection info
+        run: |
+          echo "Target directory: ${DIR}"
+          echo "Compose project: ${COMPOSE_PROJECT_NAME}"
+          echo "Container: ${CONTAINER_NAME}"
+          echo "Metrics host port: ${METRICS_HOST_PORT}"
+          echo "Tag: ${TAG}"
+          echo "Connecting to: ${{ secrets.DEPLOY_HOST }} as ${{ secrets.DEPLOY_USER }}"
+
+      - name: Copy files to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          source: "deploy-out/*"
+          target: ${{ env.DIR }}
+          strip_components: 1
+          timeout: 30s
+          command_timeout: 10m
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          envs: TAG,DIR,OWNER,COMPOSE_PROJECT_NAME,METRICS_HOST_PORT,CONTAINER_NAME,GHCR_READ_TOKEN,BOT_TOKEN,TRIBUTE_API_KEY,TELEGRAM_WEBHOOK_SECRET
+          script: |
+            set -e
+            chmod +x $DIR/scripts/*.sh
+            $DIR/scripts/install-docker.sh
+            export DIR TAG OWNER COMPOSE_PROJECT_NAME METRICS_HOST_PORT CONTAINER_NAME
+            export GHCR_READ_TOKEN BOT_TOKEN TRIBUTE_API_KEY TELEGRAM_WEBHOOK_SECRET
+            $DIR/scripts/deploy-compose.sh
+        env:
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          # Optional — only consumed when the matching mode is webhook.
+          TRIBUTE_API_KEY: ${{ secrets.TRIBUTE_API_KEY }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}

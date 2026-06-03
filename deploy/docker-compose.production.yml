@@ -1,0 +1,63 @@
+services:
+  # One-shot schema migration. The serving binary never runs DDL, so the
+  # same image is run as the migrate CLI here and must complete before the
+  # bot starts. It also calls config.Load(), so it needs BOT_TOKEN too.
+  migrate:
+    image: ghcr.io/${REGISTRY_OWNER}/gatekeeper:${TAG:-latest}
+    container_name: gatekeeper-migrate
+    env_file:
+      - ./config.env
+    environment:
+      # migrate runs config.Load() too, which validates TRIBUTE_API_KEY /
+      # TELEGRAM_WEBHOOK_SECRET when the matching mode is webhook. Mirror
+      # them here so a webhook-mode deploy doesn't fail config validation
+      # before migrations run. Empty (and unused) in polling+observation.
+      BOT_TOKEN: ${BOT_TOKEN}
+      TRIBUTE_API_KEY: ${TRIBUTE_API_KEY:-}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+    volumes:
+      - ./data:/app/data
+    entrypoint: ["/usr/local/bin/migrate", "--migrations-dir", "/app/migrations", "up"]
+    restart: "no"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  gatekeeper:
+    image: ghcr.io/${REGISTRY_OWNER}/gatekeeper:${TAG:-latest}
+    container_name: gatekeeper
+    restart: always
+    env_file:
+      - ./config.env
+    environment:
+      # Secrets injected by the deploy workflow; they override config.env.
+      # The webhook secrets are empty in the default polling+observation
+      # deploy and are only required when their mode is set to webhook.
+      BOT_TOKEN: ${BOT_TOKEN}
+      TRIBUTE_API_KEY: ${TRIBUTE_API_KEY:-}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+    volumes:
+      - ./data:/app/data
+    ports:
+      # Metrics/health on localhost only. Host port avoids garvis (8080/8081)
+      # on the shared droplet; container always listens on :8080.
+      - "127.0.0.1:${METRICS_HOST_PORT:-8090}:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # Liveness only. /readyz is deliberately not used here — it is strict
+      # (DB, getMe, chat health, reconcile freshness) and would fail the
+      # container on a transient hiccup.
+      test: ["CMD-SHELL", "pgrep gatekeeper || exit 1"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

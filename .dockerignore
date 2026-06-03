@@ -1,0 +1,22 @@
+# Keep the build context small and avoid baking local state or secrets
+# into the image. migrations/ and go.{mod,sum} are intentionally kept.
+.git
+.github
+.idea
+.codex
+.antigravitycli
+.claude
+bin/
+data/
+gatekeeper
+*.db
+*.db-*
+.env
+.env.*
+*_test.go
+docs/
+openspec/
+local/
+*.md
+Taskfile.yml
+.golangci.yml
