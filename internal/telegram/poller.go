@@ -355,7 +355,8 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 		WithAdmissionConfig(p.admissionCfg),
 		WithPreflight(preflight),
 		WithMemberChecker(NewClubMemberChecker(
-			p.client, p.admissionCfg.ClubChatID, p.admissionCfg.ClubChannelID)))
+			p.client, p.admissionCfg.ClubChatID, p.admissionCfg.ClubChannelID)),
+		WithChatInfo(p.chatTitleResolver()))
 
 	result, err := router.Route(ctx, &update)
 	if err != nil {
@@ -391,6 +392,24 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 	p.deliverEffects(ctx, result.Effects)
 
 	return nil
+}
+
+// chatTitleResolver adapts the live Telegram client to a ChatTitleResolver for
+// owner /chats output. It returns false when no client is wired or the lookup
+// fails, so /chats falls back to bare chat ids.
+func (p *Poller) chatTitleResolver() commandbot.ChatTitleResolver {
+	if p.client == nil {
+		return nil
+	}
+
+	return func(ctx context.Context, chatID int64) (string, bool) {
+		info, err := p.client.GetChat(ctx, chatID)
+		if err != nil || info == nil || info.Title == "" {
+			return "", false
+		}
+
+		return info.Title, true
+	}
 }
 
 // acknowledgeRetryCallback gives a retry-access tap instant feedback before

@@ -188,7 +188,11 @@ func TestAccessRequestAlreadyInReturnsAlreadyIn(t *testing.T) {
 	}), "HandleAccessRequest")
 
 	payload := firstDMPayload(t, db)
-	assert.Equal(t, messages.AlreadyIn(), payload.Text, "dm text")
+	assert.Equal(t,
+		messages.AlreadyIn([]domain.Resource{
+			domain.ResourceChat, domain.ResourceChannel,
+		}),
+		payload.Text, "dm text")
 
 	assert.Equal(t, 0, countActions(t, db, domain.ActionSendInvite),
 		"send_invite actions")

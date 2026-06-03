@@ -69,7 +69,9 @@ func (h *UserCommands) handleAlerts(
 	return h.ownerReply(msg, messages.OpsAlerts(alertsMessageData(alerts))), nil
 }
 
-func (h *UserCommands) handleChats(msg *models.Message) (Result, error) {
+func (h *UserCommands) handleChats(
+	ctx context.Context, msg *models.Message,
+) (Result, error) {
 	if !h.isOwner(msg.From.ID) {
 		return Result{Ignored: true}, nil
 	}
@@ -78,7 +80,9 @@ func (h *UserCommands) handleChats(msg *models.Message) (Result, error) {
 		return h.ownerReply(msg, messages.OpsUnavailable()), nil
 	}
 
-	return h.ownerReply(msg, messages.OpsChats(chatRolesMessageData(h.deps.ChatRoles))), nil
+	data := chatRolesMessageData(ctx, h.deps.ChatRoles, h.deps.ChatInfo)
+
+	return h.ownerReply(msg, messages.OpsChats(data)), nil
 }
 
 func (h *UserCommands) handleHelpAdmin(msg *models.Message) (Result, error) {
@@ -238,13 +242,23 @@ func alertsMessageData(alerts []store.OpsAlert) []messages.OpsAlertData {
 	return out
 }
 
-func chatRolesMessageData(roles []ChatRole) []messages.ChatRoleData {
+func chatRolesMessageData(
+	ctx context.Context, roles []ChatRole, resolve ChatTitleResolver,
+) []messages.ChatRoleData {
 	out := make([]messages.ChatRoleData, 0, len(roles))
 	for _, role := range roles {
-		out = append(out, messages.ChatRoleData{
+		data := messages.ChatRoleData{
 			Role:   role.Role,
 			ChatID: role.ChatID,
-		})
+		}
+
+		if resolve != nil {
+			if title, ok := resolve(ctx, role.ChatID); ok {
+				data.Title = title
+			}
+		}
+
+		out = append(out, data)
 	}
 
 	return out

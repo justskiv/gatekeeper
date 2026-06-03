@@ -32,6 +32,11 @@ type Result struct {
 	Replies []Reply
 }
 
+// ChatTitleResolver resolves a chat's live Telegram title for owner-facing
+// diagnostics such as /chats. It returns false when the title cannot be read,
+// letting callers fall back to the bare chat id.
+type ChatTitleResolver func(ctx context.Context, chatID int64) (string, bool)
+
 // Button is one inline keyboard button for a command reply.
 type Button struct {
 	Text         string `json:"text"`
@@ -50,6 +55,7 @@ type CommandDeps struct {
 	Alerts        *store.Alerts
 	Ops           *store.Ops
 	ChatRoles     []ChatRole
+	ChatInfo      ChatTitleResolver
 	StatusEngine  *engine.Engine
 	Members       engine.MemberChecker
 	Preflight     *engine.Snapshot
@@ -110,7 +116,7 @@ func (h *UserCommands) HandlePrivate(
 	case "alerts":
 		return h.handleAlerts(ctx, msg)
 	case "chats":
-		return h.handleChats(msg)
+		return h.handleChats(ctx, msg)
 	case "help_admin":
 		return h.handleHelpAdmin(msg)
 	case "export":
@@ -202,13 +208,62 @@ func (h *UserCommands) handleStatus(
 		return Result{}, err
 	}
 
-	return Result{Replies: []Reply{{
+	var graceUntil *time.Time
+
+	if h.deps.Revocations != nil {
+		revocation, ok, err := h.deps.Revocations.Get(ctx, tgID)
+		if err != nil {
+			return Result{}, err
+		}
+
+		if ok {
+			graceUntil = &revocation.ScheduledAt
+		}
+	}
+
+	offerAccess := offersAccessButton(decision, grants)
+
+	reply := Reply{
 		ChatID:    msg.Chat.ID,
 		TGID:      tgID,
-		Text:      messages.Status(decision, subs, grants),
+		Text:      messages.Status(decision, subs, grants, graceUntil, offerAccess),
 		ParseMode: messages.ParseModeHTML,
 		DM:        true,
-	}}}, nil
+	}
+
+	if offerAccess {
+		reply.Buttons = [][]Button{{{
+			Text:         messages.GetAccessButtonText,
+			CallbackData: messages.RetryAccessCallbackData,
+		}}}
+	}
+
+	return Result{Replies: []Reply{reply}}, nil
+}
+
+// offersAccessButton reports whether /status should carry the GetAccess inline
+// button: the user has active access but is not yet in every resource, so a
+// single tap can hand off to the admission flow. A tap that turns out to have
+// nothing missing simply yields the AlreadyIn reply, so the heuristic can err
+// towards showing the button.
+func offersAccessButton(
+	decision domain.AccessDecision, grants []domain.AccessGrant,
+) bool {
+	if decision.Status != domain.StatusActive {
+		return false
+	}
+
+	if len(grants) == 0 {
+		return true
+	}
+
+	for _, grant := range grants {
+		if grant.State != domain.GrantJoined {
+			return true
+		}
+	}
+
+	return false
 }
 
 // HandleHere returns chat id/type for owners in non-private chats.

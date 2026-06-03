@@ -235,7 +235,7 @@ func TestUserStatusHidesInternalDiagnostics(t *testing.T) {
 			Verdict: domain.VerdictUnknown,
 			Detail:  "whitelist chat_id=-1001 reason=local database failed",
 		}},
-	}, nil, nil)
+	}, nil, nil, nil, false)
 
 	for _, forbidden := range []string{
 		"whitelist",

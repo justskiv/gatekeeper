@@ -55,7 +55,7 @@ func TestRenderedTemplatesUseAllowedTelegramHTMLTags(t *testing.T) {
 			URL:      "https://t.me/+club?x=1&y=2",
 		}}),
 		Help(),
-		Status(domain.AccessDecision{Status: domain.StatusActive}, nil, nil),
+		Status(domain.AccessDecision{Status: domain.StatusActive}, nil, nil, nil, false),
 		AdminHelp(),
 		AdminCommandUsage("whois"),
 		Whois(WhoisData{

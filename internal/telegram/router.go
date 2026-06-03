@@ -68,6 +68,7 @@ type Router struct {
 	ownerIDs       []int64
 	adminLogChatID *int64
 	chatRoles      []commandbot.ChatRole
+	chatInfo       commandbot.ChatTitleResolver
 	members        engine.MemberChecker
 	logger         *slog.Logger
 }
@@ -138,6 +139,13 @@ func WithPreflight(preflight RoutePreflight) RouterOption {
 func WithMemberChecker(checker engine.MemberChecker) RouterOption {
 	return func(r *Router) {
 		r.members = checker
+	}
+}
+
+// WithChatInfo attaches a live chat-title resolver for owner /chats output.
+func WithChatInfo(resolve commandbot.ChatTitleResolver) RouterOption {
+	return func(r *Router) {
+		r.chatInfo = resolve
 	}
 }
 
@@ -231,6 +239,7 @@ func (r *Router) routeMessage(
 		Alerts:        r.alerts,
 		Ops:           r.ops,
 		ChatRoles:     r.chatRoles,
+		ChatInfo:      r.chatInfo,
 		StatusEngine:  r.statusEngine,
 		Members:       r.members,
 		Preflight:     r.preflight.Snapshot,

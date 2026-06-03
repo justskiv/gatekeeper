@@ -425,7 +425,7 @@ func (h *Handler) grantAccess(
 	if len(missing) == 0 {
 		return h.enqueueDM(ctx, h.accessResultDM(req, dmRequest{
 			TGID:   req.User.TGID,
-			Text:   messages.AlreadyIn(),
+			Text:   messages.AlreadyIn(h.configuredResources()),
 			Marker: h.accessMarker(req.User.TGID, "already-in"),
 		}))
 	}
@@ -465,7 +465,7 @@ func (h *Handler) grantAccess(
 
 		return h.enqueueDM(ctx, h.accessResultDM(req, dmRequest{
 			TGID:   req.User.TGID,
-			Text:   messages.ActiveShared(links),
+			Text:   messages.ActiveShared(h.sharedResourceLines(missing, links)),
 			Marker: h.accessMarker(req.User.TGID, "active:shared"),
 		}))
 	case domain.InvitePersonalJoinRequest, domain.InviteDirect:
@@ -622,6 +622,53 @@ func (h *Handler) hasFreshActiveSubscription(
 	}
 
 	return false, nil
+}
+
+// configuredResources lists managed resources in their configured order.
+func (h *Handler) configuredResources() []domain.Resource {
+	resources := make([]domain.Resource, 0, len(h.cfg.Resources))
+	for _, resource := range h.cfg.Resources {
+		resources = append(resources, resource.Resource)
+	}
+
+	return resources
+}
+
+// sharedResourceLines builds the full ordered resource list for the active
+// admission reply: missing resources carry their join link, the rest are
+// marked as already joined.
+func (h *Handler) sharedResourceLines(
+	missing []domain.Resource,
+	links []messages.InviteLinkLine,
+) []messages.InviteLinkLine {
+	urlByResource := make(map[domain.Resource]string, len(links))
+	for _, link := range links {
+		urlByResource[link.Resource] = link.URL
+	}
+
+	missingSet := make(map[domain.Resource]struct{}, len(missing))
+	for _, resource := range missing {
+		missingSet[resource] = struct{}{}
+	}
+
+	lines := make([]messages.InviteLinkLine, 0, len(h.cfg.Resources))
+	for _, resource := range h.cfg.Resources {
+		if _, ok := missingSet[resource.Resource]; ok {
+			lines = append(lines, messages.InviteLinkLine{
+				Resource: resource.Resource,
+				URL:      urlByResource[resource.Resource],
+			})
+
+			continue
+		}
+
+		lines = append(lines, messages.InviteLinkLine{
+			Resource: resource.Resource,
+			Joined:   true,
+		})
+	}
+
+	return lines
 }
 
 func (h *Handler) missingResources(
