@@ -788,6 +788,7 @@ func (r *Router) durableDMEffects(
 		} else {
 			err = notifier.SendDurableDM(ctx, effect.TGID, effect.Text, marker)
 		}
+
 		if err != nil {
 			return nil, err
 		}

@@ -136,6 +136,7 @@ func (n *Notifier) sendDM(
 	} else {
 		err = n.sender.SendMessage(ctx, tgID, text)
 	}
+
 	if err == nil {
 		return nil
 	}

@@ -318,7 +318,8 @@ func (e *Enforcer) sendInvite(
 		return err
 	}
 
-	if err := e.sendPayloadMessage(ctx, tgID, text, payload.ParseMode, payload.Plain, nil); err != nil {
+	err = e.sendPayloadMessage(ctx, tgID, text, payload.ParseMode, payload.Plain, nil)
+	if err != nil {
 		return err
 	}
 
@@ -1175,14 +1176,14 @@ type replyMarkupDelivery struct {
 	replyMarkup models.ReplyMarkup
 }
 
-func retryKeyboardWithSender(sender replyMarkupSender) replyMarkupSend {
+func retryKeyboardWithSender(sender replyMarkupSender) replyMarkupDelivery {
 	return keyboardWithSender(sender, retryKeyboard())
 }
 
 func keyboardWithSender(
 	sender replyMarkupSender,
 	replyMarkup models.ReplyMarkup,
-) replyMarkupSend {
+) replyMarkupDelivery {
 	return replyMarkupDelivery{sender: sender, replyMarkup: replyMarkup}
 }
 

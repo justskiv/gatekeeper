@@ -194,6 +194,7 @@ func (c *Client) sendMessage(
 	if parseMode != "" {
 		params.ParseMode = models.ParseMode(parseMode)
 	}
+
 	if replyMarkup != nil {
 		params.ReplyMarkup = replyMarkup
 	}
