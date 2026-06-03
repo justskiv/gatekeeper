@@ -20,7 +20,7 @@ Gatekeeper развёртывается одним контуром (тольк�
 
 ### 1. GitHub Environment и секреты
 
-В Settings → Environments создайте environment `Prod` (при желании с Required reviewers). Положите в него секреты:
+Создайте environment `Prod` (при желании с Required reviewers). Секреты можно положить на уровень репозитория или в сам environment — job деплоя видит и те, и другие:
 
 | Секрет | Назначение |
 |---|---|
@@ -30,14 +30,24 @@ Gatekeeper развёртывается одним контуром (тольк�
 | `GHCR_READ_TOKEN` | PAT с `read:packages` для pull образа на сервере |
 | `BOT_TOKEN` | токен Telegram-бота (единственный всегда обязательный секрет приложения) |
 
-Условно (только если включаете соответствующий режим в `config.production.env`):
+Условно (только при соответствующем режиме):
 
 | Секрет | Когда нужен |
 |---|---|
 | `TRIBUTE_API_KEY` | `TRIBUTE_MODE=webhook` |
 | `TELEGRAM_WEBHOOK_SECRET` | `TELEGRAM_MODE=webhook` |
 
-Build-workflow дополнительных секретов не требует — он пушит в GHCR через встроенный `GITHUB_TOKEN`.
+Несекретные значения деплоя — как **Environment variables** в `Prod` (workflow рендерит из них `config.env` на сервере):
+
+| Переменная | Назначение |
+|---|---|
+| `OWNER_TG_IDS` | владельцы (через запятую) |
+| `BOOSTY_GROUP_ID`, `TRIBUTE_CHANNEL_ID` | наблюдаемые источники |
+| `CLUB_CHAT_ID`, `CLUB_CHANNEL_ID` | управляемые клубные ресурсы |
+| `BOOSTY_SUBSCRIBE_URL`, `TRIBUTE_SUBSCRIBE_URL` | ссылки на подписку |
+| `TIMEZONE` | таймзона (напр. `Europe/Moscow`) |
+
+Завести их можно из CLI: `gh variable set OWNER_TG_IDS --env Prod --body "…"`. Полный список ключей и их назначение — в `deploy/config.production.env.example`. Build-workflow дополнительных секретов не требует (пушит в GHCR через `GITHUB_TOKEN`).
 
 ### 2. Сервер
 
@@ -53,7 +63,7 @@ echo "ВАШ_ПУБЛИЧНЫЙ_КЛЮЧ" >> ~/.ssh/authorized_keys
 
 ### 3. Конфигурация
 
-Заполните реальными значениями `deploy/config.production.env` (chat ID, ссылки на подписку, владельцы, режимы) и закоммитьте. Это несекретный слой — он копируется на сервер как `config.env` и грузится обоими контейнерами через `env_file`. Секреты в этот файл не кладутся: `BOT_TOKEN` (и при webhook-режимах `TRIBUTE_API_KEY` / `TELEGRAM_WEBHOOK_SECRET`) приходят из секретов окружения `Prod` и переопределяют `config.env`.
+Реальные значения нигде в репозитории не лежат. На деплое workflow рендерит `config.env` на сервере из Environment variables `Prod` плюс фиксированных контейнерных констант (`DB_PATH`, `METRICS_ENABLED`, `WEBHOOK_LISTEN_ADDR`), а секреты (`BOT_TOKEN`, при webhook-режимах `TRIBUTE_API_KEY` / `TELEGRAM_WEBHOOK_SECRET`) инъектятся в рантайме через compose `environment:` и на диск не пишутся. В репозитории остаётся только `deploy/config.production.env.example` — справочник ключей для форка или ручной серверной настройки. Незаданные опциональные значения берут дефолты из загрузчика конфигурации; пустое required-значение валит старт с явной ошибкой `X is required`.
 
 ## Процесс развёртывания
 

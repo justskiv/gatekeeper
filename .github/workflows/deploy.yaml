@@ -30,13 +30,38 @@ jobs:
       - uses: actions/checkout@v4
 
       # Stage the files the server needs: compose (as docker-compose.yml),
-      # the non-secret config (as config.env) and the deploy scripts.
+      # the deploy scripts, and a freshly rendered config.env. The config
+      # is built from GitHub Environment "Prod" variables (non-secret) plus
+      # fixed container constants — secrets (BOT_TOKEN, webhook secrets)
+      # are injected separately via compose `environment:` and never
+      # written to disk here. Nothing real lives in the repo.
       - name: Prepare artifacts
+        env:
+          OWNER_TG_IDS: ${{ vars.OWNER_TG_IDS }}
+          BOOSTY_GROUP_ID: ${{ vars.BOOSTY_GROUP_ID }}
+          TRIBUTE_CHANNEL_ID: ${{ vars.TRIBUTE_CHANNEL_ID }}
+          CLUB_CHAT_ID: ${{ vars.CLUB_CHAT_ID }}
+          CLUB_CHANNEL_ID: ${{ vars.CLUB_CHANNEL_ID }}
+          BOOSTY_SUBSCRIBE_URL: ${{ vars.BOOSTY_SUBSCRIBE_URL }}
+          TRIBUTE_SUBSCRIBE_URL: ${{ vars.TRIBUTE_SUBSCRIBE_URL }}
+          TIMEZONE: ${{ vars.TIMEZONE }}
         run: |
           mkdir -p deploy-out
           cp deploy/docker-compose.production.yml deploy-out/docker-compose.yml
-          cp deploy/config.production.env deploy-out/config.env
           cp -r deploy/scripts deploy-out/
+          cat > deploy-out/config.env <<EOF
+          OWNER_TG_IDS=${OWNER_TG_IDS}
+          BOOSTY_GROUP_ID=${BOOSTY_GROUP_ID}
+          TRIBUTE_CHANNEL_ID=${TRIBUTE_CHANNEL_ID}
+          CLUB_CHAT_ID=${CLUB_CHAT_ID}
+          CLUB_CHANNEL_ID=${CLUB_CHANNEL_ID}
+          BOOSTY_SUBSCRIBE_URL=${BOOSTY_SUBSCRIBE_URL}
+          TRIBUTE_SUBSCRIBE_URL=${TRIBUTE_SUBSCRIBE_URL}
+          TIMEZONE=${TIMEZONE}
+          DB_PATH=/app/data/gatekeeper.db
+          METRICS_ENABLED=true
+          WEBHOOK_LISTEN_ADDR=:8080
+          EOF
 
       - name: Debug connection info
         run: |
