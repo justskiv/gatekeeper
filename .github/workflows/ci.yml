@@ -24,7 +24,14 @@ jobs:
         run: task build
 
       - name: Test
-        run: task test
+        run: task test:cover
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: justskiv/gatekeeper
+          files: ./coverage.out
 
       - name: Lint
         run: task lint

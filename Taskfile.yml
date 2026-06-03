@@ -48,6 +48,11 @@ tasks:
     cmds:
       - go test ./...
 
+  test:cover:
+    desc: Run tests with the race detector and a coverage profile
+    cmds:
+      - go test -race -covermode=atomic -coverprofile=coverage.out ./...
+
   lint:
     desc: Run go vet and golangci-lint (linter fetched on demand, no install step)
     cmds:
