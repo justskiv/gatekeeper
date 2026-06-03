@@ -26,6 +26,8 @@ Enforcer — единственная точка доменных исходящ
 - **`send_dm`** при Telegram `403` помечает пользователя `dm_state='blocked'` и завершается без retry — закрытая личка не сбой.
 - **Ожидаемые no-op** (`approve_join`/`decline_join`/`soft_kick`/`revoke_invite` получают ошибку «уже сделано / уже невозможно») считаются успешным исполнением: action помечается `done`, событие логируется на `warn`, ретрая нет.
 
+Форматирование переносится в payload: `send_dm` и `send_invite` несут per-message `parse_mode`, и Enforcer отправляет сообщение как HTML, когда payload его объявляет, и как plain иначе. Payload без объявленного `parse_mode` всегда уходит plain — это закрывает cutover durable-очереди: ранее поставленная plain-строка с литеральным `<` (например usage-текст с `<tg_id|@username>`) не переинтерпретируется как HTML, не ловит `400` и не отравляет outbox. Голый invite-link и CSV `/export` отправляются как plain.
+
 ## Retry, throttle и dead-action alerts
 
 Перед Telegram-вызовами Enforcer применяет общий rate limiter: примерно один message-вызов в секунду на chat, общий потолок заметно ниже 30 запросов/с, консервативный лимит для `getChatMember` около 1–2 запросов/с. Telegram `429` перепланирует action на `now + retry_after`; прочие retryable ошибки — с backoff и jitter. Воркер не держит открытую DB-транзакцию во время ожидания limiter'а или сетевого ответа: lease уже закоммичен, финальный статус пишется отдельной короткой транзакцией.
@@ -38,3 +40,4 @@ Enforcer — единственная точка доменных исходящ
 - Дубль `idempotency_key` не создаёт второй строки; готовое действие лизится одним воркером; зависшее `running` подхватывается по истечении `locked_until`.
 - `soft_kick` = ban + unban, но не для creator/admin; `send_dm` 403 → `dm_state='blocked'` без retry; ожидаемые no-op → `done` + warning.
 - `429` → `run_after=now+retry_after` без падения процесса; исчерпание попыток → `status='dead'` + `outbox_action_dead`; сеть всегда вне DB-транзакции.
+- `send_dm`/`send_invite` отправляются с `parse_mode` из payload; payload без объявленного parse mode уходит plain (cutover), поэтому старая plain-строка с `<` не ломает доставку.

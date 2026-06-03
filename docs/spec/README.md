@@ -14,8 +14,11 @@ Reconciler. Опционально включаются: приём вебхук
 точными `expires_at`), webhook-транспорт самого бота, HTTP-эндпоинты
 `/healthz`/`/readyz`/`/metrics` и owner ops-команды. Поставляются
 артефакты развёртывания (systemd, Dockerfile, CI) и OSS-метаданные.
-Архивированы changes `phase-02..07`, их дельты влиты в
-`openspec/specs/`.
+Финализирован продуктовый UX сообщений: серверные тексты рендерятся как
+Telegram HTML через централизованный renderer, пользовательские
+сообщения скрывают внутреннюю диагностику, owner-ответы идут
+summary-first. Архивированы changes `phase-02..07` и
+`polish-bot-message-ux`, их дельты влиты в `openspec/specs/`.
 
 | Раздел | Что описывает |
 |---|---|
@@ -26,11 +29,14 @@ Reconciler. Опционально включаются: приём вебхук
 | [runtime](runtime.md) | Порядок старта `gatekeeper`, supervision и остановка |
 | [telegram-transport](telegram-transport.md) | Telegram-клиент, long polling, durable inbox, маршрутизация |
 | [bot-commands](bot-commands.md) | `/start`, `/help`, `/here`, `/status`, `/whois`, DM-доставка |
+| [bot-message-ux](bot-message-ux.md) | Голос сообщений, privacy-граница user/owner, эмодзи, summary-first |
 | [chat-health](chat-health.md) | Проверка прав бота, health-ключи, discovery чатов |
 | [status-core](status-core.md) | Вердикты источников, агрегатор статуса, события подписки |
 | [outbox-enforcer](outbox-enforcer.md) | Durable outbox `access_actions` и исполнение Enforcer'ом |
 | [invite-links](invite-links.md) | Режимы invite-ссылок, lifecycle, разрешение для admission |
 | [grant-access](grant-access.md) | Выдача доступа: `/start`, join-request, фиксация членства |
+| [access-revocation](access-revocation.md) | Отзыв доступа, grace/immediate/notify, hard-ban, защита от лишних киков |
+| [reconciliation](reconciliation.md) | Периодическая сверка, due revocations, verify, health, invite-ссылки, cleanup |
 | [webhook-ops](webhook-ops.md) | HTTP-сервер, healthz/readyz/metrics, приём вебхуков Tribute |
 | [deployment-oss](deployment-oss.md) | systemd, Dockerfile, README-quickstart, CI и OSS-метаданные |
 
