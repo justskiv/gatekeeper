@@ -7,6 +7,7 @@
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/justskiv/gatekeeper)](https://goreportcard.com/report/github.com/justskiv/gatekeeper)
 [![codecov](https://codecov.io/gh/justskiv/gatekeeper/branch/main/graph/badge.svg)](https://app.codecov.io/gh/justskiv/gatekeeper)
+[![Coverage Status](https://coveralls.io/repos/github/justskiv/gatekeeper/badge.svg?branch=main)](https://coveralls.io/github/justskiv/gatekeeper?branch=main)
 
 Self-hosted Telegram access-control bot for paid subscriptions.
 Gatekeeper observes Boosty and Tribute subscription sources, stores a
