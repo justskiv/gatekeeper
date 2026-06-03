@@ -19,3 +19,7 @@ docs/.obsidian/
 
 # Planning and working materials — decide later what to publish
 local/
+
+# Local agent working notes — personal, kept out of the public repo
+AGENTS.md
+CLAUDE.md
