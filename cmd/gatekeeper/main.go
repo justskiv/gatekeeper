@@ -26,7 +26,9 @@ import (
 	"github.com/justskiv/gatekeeper/internal/enforcer"
 	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/invite"
+	"github.com/justskiv/gatekeeper/internal/messages"
 	"github.com/justskiv/gatekeeper/internal/notify"
+	"github.com/justskiv/gatekeeper/internal/operatorlog"
 	"github.com/justskiv/gatekeeper/internal/reconcile"
 	"github.com/justskiv/gatekeeper/internal/source"
 	"github.com/justskiv/gatekeeper/internal/store"
@@ -100,7 +102,20 @@ func run() error {
 	}
 
 	notifier := notify.New(store.NewUsers(db), tgClient, logger)
-	healthChats := telegram.HealthChatsFromConfig(cfg)
+
+	// Construct the operator event-log writer before transport starts and
+	// thread it through every emit path (poller/router, reconciler, tribute).
+	// It targets EVENT_LOG_CHAT_ID via durable send_dm and never falls back
+	// to ADMIN_LOG_CHAT_ID or owner DMs.
+	operatorWriter := operatorlog.New(
+		cfg.EventLogChatID, messages.RenderOperatorEvent, logger)
+
+	// The event-log chat is monitored by chat-health (posting ability, not
+	// admin) but is never treated as a managed/observed resource. A startup
+	// probe failure is non-fatal: it records an alert and the bot keeps
+	// serving updates.
+	healthChats := append(
+		telegram.HealthChatsFromConfig(cfg), telegram.EventLogHealthChat(cfg))
 
 	if err := checkStartupHealth(
 		ctx, db, tgClient, notifier, healthChats, cfg.OwnerTGIDs, me.ID, logger,
@@ -109,7 +124,7 @@ func run() error {
 	}
 
 	runtime, runtimeCtx := startRuntime(
-		ctx, db, cfg, tgClient, statusEngine, healthChats, logger)
+		ctx, db, cfg, tgClient, statusEngine, healthChats, operatorWriter, logger)
 
 	if err := prepareInviteStartup(ctx, runtimeCtx, cfg, runtime); err != nil {
 		runtime.stopAndWait()
@@ -131,12 +146,13 @@ func run() error {
 		telegram.WithPollerSourceChats(sourceChats),
 		telegram.WithPollerAdmissionConfig(admissionConfig(cfg)),
 		telegram.WithPollerAdminLogChatID(cfg.AdminLogChatID),
+		telegram.WithPollerOperatorLog(operatorWriter),
 		telegram.WithPollerChatRoles(chatRolesFromConfig(cfg)))
 
 	var telegramWebhookRegistered atomic.Bool
 	if shouldStartHTTPServer(cfg) {
 		server := newHTTPServer(
-			db, cfg, statusEngine, poller, healthChats,
+			db, cfg, statusEngine, poller, healthChats, operatorWriter,
 			func() bool { return true },
 			telegramWebhookRegistered.Load,
 			logger,
@@ -219,6 +235,7 @@ func newHTTPServer(
 	statusEngine *engine.Engine,
 	poller *telegram.Poller,
 	healthChats []telegram.HealthChat,
+	operatorWriter *operatorlog.Writer,
 	getMeOK func() bool,
 	telegramWebhookRegistered func() bool,
 	logger *slog.Logger,
@@ -232,6 +249,7 @@ func newHTTPServer(
 			CancelImmediate: cfg.TributeCancelIsImmediate,
 			OwnerIDs:        cfg.OwnerTGIDs,
 			AdminLogChatID:  cfg.AdminLogChatID,
+			OperatorLog:     operatorWriter,
 			Logger:          logger,
 		}
 	}
@@ -272,6 +290,13 @@ func telegramWebhookURL(cfg config.Config) string {
 func healthKeys(chats []telegram.HealthChat) []string {
 	keys := make([]string, 0, len(chats))
 	for _, chat := range chats {
+		// The operator event-log feed is observability: its health is
+		// recorded and alerted, but it MUST NOT gate readiness of the
+		// access-control core.
+		if chat.PostingOnly {
+			continue
+		}
+
 		keys = append(keys, chat.Key)
 	}
 
@@ -379,6 +404,7 @@ func startRuntime(
 	tgClient *telegram.Client,
 	statusEngine *engine.Engine,
 	healthChats []telegram.HealthChat,
+	operatorWriter *operatorlog.Writer,
 	logger *slog.Logger,
 ) (runtimeGroup, context.Context) {
 	outbox := store.NewOutbox(db)
@@ -401,6 +427,7 @@ func startRuntime(
 		Alerts: store.NewAlertsWithDelivery(
 			db, outbox, cfg.OwnerTGIDs, cfg.AdminLogChatID),
 		StatusEngine: statusEngine,
+		OperatorLog:  operatorWriter,
 	}, tgClient, inviteService, enforcer.Config{
 		Workers:       cfg.EnforcerWorkers,
 		ClubChatID:    cfg.ClubChatID,
@@ -435,6 +462,7 @@ func startRuntime(
 		}),
 		reconcile.WithMemberChecker(telegram.NewClubMemberChecker(
 			tgClient, cfg.ClubChatID, cfg.ClubChannelID)),
+		reconcile.WithOperatorLog(operatorWriter),
 	)
 
 	return runtimeGroup{

@@ -174,6 +174,19 @@ func (e *Engine) HandleEvent(
 	}
 
 	tgID := event.TGUserID
+
+	// Capture the effective status before applying the event so the engine
+	// can emit access_granted only on a real non-active→active transition.
+	var priorStatus domain.EffectiveStatus
+	if repos.OperatorLog != nil {
+		prior, err := e.persistedDecision(ctx, repos, tgID)
+		if err != nil {
+			return nil, err
+		}
+
+		priorStatus = prior.Status
+	}
+
 	switch event.Kind {
 	case domain.EventActivated:
 		signal := signalEvent
@@ -216,6 +229,12 @@ func (e *Engine) HandleEvent(
 		}); err != nil {
 			return nil, err
 		}
+
+		if err := e.emitSourceEvent(ctx, repos,
+			domain.OpSourceSubscriptionActivated, subjectFromEvent(event),
+			event); err != nil {
+			return nil, err
+		}
 	case domain.EventDeactivated:
 		signal := signalEvent
 		endedAt := now
@@ -249,6 +268,12 @@ func (e *Engine) HandleEvent(
 			}); err != nil {
 				return nil, err
 			}
+
+			if err := e.emitSourceEvent(ctx, repos,
+				domain.OpSourceSubscriptionExpired, subjectFromEvent(event),
+				event); err != nil {
+				return nil, err
+			}
 		}
 	case domain.EventCancelledSubscription:
 		if err := repos.Audit.Append(ctx, store.AuditEntry{
@@ -279,6 +304,11 @@ func (e *Engine) HandleEvent(
 
 	effects, err := e.recomputeAccess(ctx, repos, tgID)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := e.emitAccessGrantedOnTransition(
+		ctx, repos, tgID, priorStatus); err != nil {
 		return nil, err
 	}
 
@@ -331,6 +361,10 @@ func (e *Engine) recomputeAccess(
 				Actor:  "system",
 				Detail: "subscription is active again",
 			}); err != nil {
+				return nil, err
+			}
+
+			if err := e.emitAccessKept(ctx, repos, tgID, decision); err != nil {
 				return nil, err
 			}
 
@@ -419,6 +453,11 @@ func (e *Engine) handleInactive(
 			return nil, err
 		}
 
+		if err := e.emitAccessLossScheduled(
+			ctx, repos, tgID, scheduledAt); err != nil {
+			return nil, err
+		}
+
 		effects, err := e.notifyUser(ctx, repos, tgID, messages.ExpiryWarning(scheduledAt),
 			"expiry_warning:"+scheduledAt.UTC().Format(time.RFC3339))
 		if err != nil {
@@ -465,7 +504,7 @@ func (e *Engine) revokeNow(
 
 		switch decision.Status {
 		case domain.StatusActive:
-			return e.cancelRevocation(ctx, repos, tgID)
+			return e.cancelRevocation(ctx, repos, tgID, decision)
 		case domain.StatusUnknown:
 			return nil, e.alertUnsafeRevocation(ctx, repos, tgID, reason)
 		case domain.StatusInactive:
@@ -477,7 +516,7 @@ func (e *Engine) revokeNow(
 		return nil, err
 	}
 
-	revoked := 0
+	revokedResources := make([]domain.Resource, 0, len(grants))
 
 	for _, grant := range grants {
 		ok, err := e.revokeGrant(ctx, repos, grant, reason)
@@ -486,11 +525,11 @@ func (e *Engine) revokeNow(
 		}
 
 		if ok {
-			revoked++
+			revokedResources = append(revokedResources, grant.Resource)
 		}
 	}
 
-	if revoked == 0 {
+	if len(revokedResources) == 0 {
 		if err := repos.Revocations.Delete(ctx, tgID); err != nil {
 			return nil, err
 		}
@@ -508,6 +547,11 @@ func (e *Engine) revokeNow(
 	}
 
 	if err := repos.Revocations.Delete(ctx, tgID); err != nil {
+		return nil, err
+	}
+
+	if err := e.emitAccessLost(ctx, repos, tgID, revokedResources, reason,
+		e.lossMode(finalCheck)); err != nil {
 		return nil, err
 	}
 
@@ -558,6 +602,7 @@ func (e *Engine) cancelRevocation(
 	ctx context.Context,
 	repos Store,
 	tgID int64,
+	decision domain.AccessDecision,
 ) ([]Effect, error) {
 	if err := repos.Revocations.Delete(ctx, tgID); err != nil {
 		return nil, err
@@ -569,6 +614,10 @@ func (e *Engine) cancelRevocation(
 		Actor:  "system",
 		Detail: "subscription is active again",
 	}); err != nil {
+		return nil, err
+	}
+
+	if err := e.emitAccessKept(ctx, repos, tgID, decision); err != nil {
 		return nil, err
 	}
 

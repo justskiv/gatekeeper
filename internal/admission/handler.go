@@ -12,6 +12,7 @@ import (
 	"github.com/justskiv/gatekeeper/internal/engine"
 	invitepkg "github.com/justskiv/gatekeeper/internal/invite"
 	"github.com/justskiv/gatekeeper/internal/messages"
+	"github.com/justskiv/gatekeeper/internal/operatorlog"
 	"github.com/justskiv/gatekeeper/internal/store"
 )
 
@@ -64,6 +65,10 @@ type Deps struct {
 	Revocations   *store.Revocations
 	StatusEngine  *engine.Engine
 	Members       engine.MemberChecker
+
+	// OperatorLog, when set, receives durable operator events emitted in the
+	// admission transaction. Optional: a nil writer disables the feed.
+	OperatorLog *operatorlog.Writer
 }
 
 // Handler applies admission decisions inside the handler transaction.
@@ -314,6 +319,12 @@ type MembershipUpdate struct {
 	InviteLink     string
 	EventDate      time.Time
 	Snapshot       *engine.Snapshot
+
+	// Actor is the Telegram user that performed an external membership change
+	// (ChatMemberUpdated.from), when Telegram exposed one. It is nil for bot
+	// flows and when no actor is available; it is used only to render a safe
+	// actor label, never to assert who added the user when absent.
+	Actor *domain.User
 }
 
 // HandleMembershipUpdate records factual membership in access_grants.
@@ -341,6 +352,10 @@ func (h *Handler) HandleMembershipUpdate(
 			return err
 		}
 
+		if err := h.emitMembership(ctx, update, user, ""); err != nil {
+			return err
+		}
+
 		return h.audit(ctx, update.User.TGID, auditMemberLeft,
 			update.Resource, "member left managed resource")
 	}
@@ -355,23 +370,44 @@ func (h *Handler) HandleMembershipUpdate(
 			return err
 		}
 
+		if err := h.emitBannedJoinAttempt(ctx, update, user); err != nil {
+			return err
+		}
+
 		return h.audit(ctx, update.User.TGID, "banned_join_detected",
 			update.Resource, "joined while banned")
 	}
 
+	return h.handleJoinedMembership(ctx, update, user)
+}
+
+// handleJoinedMembership records a join, emits the membership event with the
+// resolved admission method, and applies the external/direct follow-ups.
+func (h *Handler) handleJoinedMembership(
+	ctx context.Context,
+	update MembershipUpdate,
+	user domain.User,
+) error {
 	botAdmitted, directEvidence, err := h.botAdmissionEvidence(ctx, update)
 	if err != nil {
 		return err
 	}
 
 	admittedBy := "external"
+	method := domain.AdmissionExternal
+
 	if botAdmitted {
 		admittedBy = "bot"
+		method = domain.AdmissionBotLink
 	}
 
 	if err := h.deps.Grants.MarkJoined(
 		ctx, update.User.TGID, update.Resource, admittedBy,
 	); err != nil {
+		return err
+	}
+
+	if err := h.emitMembership(ctx, update, user, method); err != nil {
 		return err
 	}
 
@@ -384,24 +420,24 @@ func (h *Handler) HandleMembershipUpdate(
 		return h.alertExternalJoin(ctx, update.User.TGID, update.Resource)
 	}
 
-	if directEvidence {
-		if update.Snapshot == nil {
-			return h.alertDirectStatusMissing(ctx, update.User.TGID, update.Resource)
-		}
-
-		if snapshotStatus(update.Snapshot) != domain.StatusActive {
-			return h.enqueueSoftKick(ctx, update.User.TGID, update.Resource,
-				"direct_join_not_active", update.EventDate)
-		}
-
-		if err := h.persistLiveSnapshot(ctx, update.User.TGID, update.Snapshot); err != nil {
-			return err
-		}
-
-		return h.recompute(ctx, update.User.TGID)
+	if !directEvidence {
+		return nil
 	}
 
-	return nil
+	if update.Snapshot == nil {
+		return h.alertDirectStatusMissing(ctx, update.User.TGID, update.Resource)
+	}
+
+	if snapshotStatus(update.Snapshot) != domain.StatusActive {
+		return h.enqueueSoftKick(ctx, update.User.TGID, update.Resource,
+			"direct_join_not_active", update.EventDate)
+	}
+
+	if err := h.persistLiveSnapshot(ctx, update.User.TGID, update.Snapshot); err != nil {
+		return err
+	}
+
+	return h.recompute(ctx, update.User.TGID)
 }
 
 func (h *Handler) grantAccess(
@@ -414,6 +450,13 @@ func (h *Handler) grantAccess(
 	}
 
 	if err := h.recompute(ctx, req.User.TGID); err != nil {
+		return err
+	}
+
+	// Admission establishes active eligibility here. The shared per-episode
+	// marker makes this idempotent against an engine transition that already
+	// logged the same episode and against a repeated /start.
+	if err := h.emitAccessGranted(ctx, req.User, fallback); err != nil {
 		return err
 	}
 
@@ -847,6 +890,7 @@ func (h *Handler) engineStore() engine.Store {
 		Outbox:        h.deps.Outbox,
 		Alerts:        h.deps.Alerts,
 		Members:       h.deps.Members,
+		OperatorLog:   h.deps.OperatorLog,
 	}
 }
 

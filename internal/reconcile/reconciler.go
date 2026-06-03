@@ -12,6 +12,7 @@ import (
 
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/engine"
+	"github.com/justskiv/gatekeeper/internal/operatorlog"
 	"github.com/justskiv/gatekeeper/internal/store"
 )
 
@@ -68,6 +69,7 @@ type Reconciler struct {
 	sleep   func(context.Context, time.Duration) error
 	health  func(context.Context) error
 	members engine.MemberChecker
+	opLog   *operatorlog.Writer
 }
 
 // Option configures Reconciler.
@@ -98,6 +100,14 @@ func WithHealthCheck(check func(context.Context) error) Option {
 func WithMemberChecker(checker engine.MemberChecker) Option {
 	return func(r *Reconciler) {
 		r.members = checker
+	}
+}
+
+// WithOperatorLog attaches the operator event-log writer so reconcile-driven
+// revocations emit access lifecycle events.
+func WithOperatorLog(writer *operatorlog.Writer) Option {
+	return func(r *Reconciler) {
+		r.opLog = writer
 	}
 }
 
@@ -353,7 +363,8 @@ func (r *Reconciler) engineStore(db store.DBTX) engine.Store {
 		Outbox:        outbox,
 		Alerts: store.NewAlertsWithDelivery(
 			db, outbox, r.cfg.OwnerIDs, r.cfg.AdminLogChatID),
-		Members: r.members,
+		Members:     r.members,
+		OperatorLog: r.opLog,
 	}
 }
 

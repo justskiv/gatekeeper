@@ -12,6 +12,7 @@ import (
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/messages"
+	"github.com/justskiv/gatekeeper/internal/operatorlog"
 	"github.com/justskiv/gatekeeper/internal/store"
 )
 
@@ -60,6 +61,10 @@ type CommandDeps struct {
 	Members       engine.MemberChecker
 	Preflight     *engine.Snapshot
 	AdminSync     AdminSyncFunc
+
+	// OperatorLog, when set, receives durable operator events emitted in the
+	// command transaction. Optional: a nil writer disables the feed.
+	OperatorLog *operatorlog.Writer
 }
 
 // UserCommands handles user and owner bot commands.
@@ -389,6 +394,7 @@ func engineStore(deps CommandDeps) engine.Store {
 		Outbox:        deps.Outbox,
 		Alerts:        deps.Alerts,
 		Members:       deps.Members,
+		OperatorLog:   deps.OperatorLog,
 	}
 }
 

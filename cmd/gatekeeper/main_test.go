@@ -140,6 +140,7 @@ func TestRuntimeInitialReconcileAndGracefulShutdown(t *testing.T) {
 		client,
 		engine.New(nil),
 		nil,
+		nil,
 		slog.Default(),
 	)
 
@@ -189,6 +190,7 @@ func validEnv(dbPath string) map[string]string {
 		"CLUB_CHAT_ID":                "-1003333333333",
 		"CLUB_CHANNEL_ID":             "-1004444444444",
 		"ADMIN_LOG_CHAT_ID":           "",
+		"EVENT_LOG_CHAT_ID":           "-1006666666666",
 		"BOOSTY_SUBSCRIBE_URL":        "https://boosty.to/author",
 		"TRIBUTE_SUBSCRIBE_URL":       "https://t.me/tribute/app",
 		"INVITE_MODE":                 "shared_join_request",

@@ -300,6 +300,11 @@ func (h *UserCommands) executeGrant(
 		reason = "manual grant"
 	}
 
+	priorStatus, err := h.priorStatus(ctx, tgID)
+	if err != nil {
+		return "", err
+	}
+
 	if action.ExpiresAt == nil {
 		if err := h.deps.Whitelist.Add(ctx, tgID, action.OwnerID, reason); err != nil {
 			return "", err
@@ -319,7 +324,16 @@ func (h *UserCommands) executeGrant(
 		return "", err
 	}
 
+	if err := h.emitManual(ctx, action, domain.OpManualGrant); err != nil {
+		return "", err
+	}
+
 	if err := h.recomputeForAdmin(ctx, tgID); err != nil {
+		return "", err
+	}
+
+	if err := h.emitManualAccessGranted(
+		ctx, tgID, priorStatus, action); err != nil {
 		return "", err
 	}
 
@@ -356,6 +370,12 @@ func (h *UserCommands) executeRevoke(
 		return "", err
 	}
 
+	if err := h.emitManual(ctx, action, domain.OpManualRevoke); err != nil {
+		return "", err
+	}
+
+	// The access_lost event, if any, is emitted by the engine revocation flow
+	// reached through recomputeForAdmin — not by this command.
 	if err := h.recomputeForAdmin(ctx, tgID); err != nil {
 		return "", err
 	}
@@ -388,6 +408,8 @@ func (h *UserCommands) executeBan(
 		}
 	}
 
+	revokedResources := make([]domain.Resource, 0, 2)
+
 	for _, resource := range []domain.Resource{
 		domain.ResourceChat,
 		domain.ResourceChannel,
@@ -398,8 +420,13 @@ func (h *UserCommands) executeBan(
 			return "", err
 		}
 
-		if _, err := h.deps.Grants.Revoke(ctx, tgID, resource, reason); err != nil {
+		revoked, err := h.deps.Grants.Revoke(ctx, tgID, resource, reason)
+		if err != nil {
 			return "", err
+		}
+
+		if revoked {
+			revokedResources = append(revokedResources, resource)
 		}
 	}
 
@@ -409,6 +436,15 @@ func (h *UserCommands) executeBan(
 		Actor:  "admin",
 		Detail: reason,
 	}); err != nil {
+		return "", err
+	}
+
+	if err := h.emitManual(ctx, action, domain.OpManualBan); err != nil {
+		return "", err
+	}
+
+	if err := h.emitManualAccessLost(
+		ctx, tgID, revokedResources, action); err != nil {
 		return "", err
 	}
 
@@ -447,6 +483,12 @@ func (h *UserCommands) executeUnban(
 		Actor:  "admin",
 		Detail: reason,
 	}); err != nil {
+		return "", err
+	}
+
+	// /unban emits manual_unban only; it never emits access_granted. Access
+	// returns, if at all, through normal pull-based admission later.
+	if err := h.emitManual(ctx, action, domain.OpManualUnban); err != nil {
 		return "", err
 	}
 

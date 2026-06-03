@@ -15,6 +15,7 @@ import (
 	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/messages"
 	"github.com/justskiv/gatekeeper/internal/notify"
+	"github.com/justskiv/gatekeeper/internal/operatorlog"
 	"github.com/justskiv/gatekeeper/internal/reconcile"
 	"github.com/justskiv/gatekeeper/internal/source"
 	"github.com/justskiv/gatekeeper/internal/store"
@@ -70,6 +71,7 @@ type Router struct {
 	chatRoles      []commandbot.ChatRole
 	chatInfo       commandbot.ChatTitleResolver
 	members        engine.MemberChecker
+	operatorLog    *operatorlog.Writer
 	logger         *slog.Logger
 }
 
@@ -146,6 +148,14 @@ func WithMemberChecker(checker engine.MemberChecker) RouterOption {
 func WithChatInfo(resolve commandbot.ChatTitleResolver) RouterOption {
 	return func(r *Router) {
 		r.chatInfo = resolve
+	}
+}
+
+// WithOperatorLog attaches the operator event-log writer so admission,
+// engine and owner-command paths can emit operator events durably.
+func WithOperatorLog(writer *operatorlog.Writer) RouterOption {
+	return func(r *Router) {
+		r.operatorLog = writer
 	}
 }
 
@@ -244,6 +254,7 @@ func (r *Router) routeMessage(
 		Members:       r.members,
 		Preflight:     r.preflight.Snapshot,
 		AdminSync:     r.adminSync,
+		OperatorLog:   r.operatorLog,
 	}, r.ownerIDs)
 	if msg.Chat.Type == models.ChatTypePrivate {
 		result, err := commands.HandlePrivate(ctx, msg)
@@ -289,6 +300,7 @@ func (r *Router) routeChatMember(
 		Outbox:        r.outbox,
 		Alerts:        r.alerts,
 		Members:       r.members,
+		OperatorLog:   r.operatorLog,
 	}, event)
 	if err != nil {
 		return RouteResult{}, err
@@ -354,6 +366,7 @@ func (r *Router) routeCallback(
 			StatusEngine:  r.statusEngine,
 			Members:       r.members,
 			AdminSync:     r.adminSync,
+			OperatorLog:   r.operatorLog,
 		}, r.ownerIDs)
 
 		result, err := commands.HandleCallback(ctx, query)
@@ -445,6 +458,17 @@ func (r *Router) routeClubMembership(
 		eventDate = time.Unix(int64(update.Date), 0)
 	}
 
+	// Preserve the acting user (ChatMemberUpdated.from) only when it differs
+	// from the subject, i.e. someone else added them — so the feed can show a
+	// safe actor label for an external admin add without naming the user as
+	// their own adder.
+	var actor *domain.User
+
+	if update.From.ID != 0 && update.From.ID != user.ID {
+		added := userFromTelegram(update.From, "")
+		actor = &added
+	}
+
 	handler := r.admissionHandler()
 	if err := handler.HandleMembershipUpdate(ctx, admission.MembershipUpdate{
 		User:           userFromTelegram(*user, ""),
@@ -454,6 +478,7 @@ func (r *Router) routeClubMembership(
 		InviteLink:     inviteLink,
 		EventDate:      eventDate,
 		Snapshot:       r.preflight.Snapshot,
+		Actor:          actor,
 	}); err != nil {
 		return RouteResult{}, err
 	}
@@ -474,6 +499,7 @@ func (r *Router) admissionHandler() *admission.Handler {
 		Revocations:   r.revocations,
 		StatusEngine:  r.statusEngine,
 		Members:       r.members,
+		OperatorLog:   r.operatorLog,
 	}, r.admissionCfg)
 }
 
@@ -704,6 +730,7 @@ func (r *Router) adminSync(ctx context.Context, tgID *int64) (string, error) {
 		},
 		r.logger,
 		reconcile.WithMemberChecker(r.members),
+		reconcile.WithOperatorLog(r.operatorLog),
 	)
 
 	var (

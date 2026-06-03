@@ -18,6 +18,7 @@ import (
 	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/messages"
 	"github.com/justskiv/gatekeeper/internal/notify"
+	"github.com/justskiv/gatekeeper/internal/operatorlog"
 	"github.com/justskiv/gatekeeper/internal/source"
 	"github.com/justskiv/gatekeeper/internal/store"
 )
@@ -43,6 +44,7 @@ type Poller struct {
 	ownerIDs       []int64
 	adminLogChatID *int64
 	chatRoles      []commandbot.ChatRole
+	operatorLog    *operatorlog.Writer
 	logger         *slog.Logger
 
 	afterBeginTx func() // test hook for tx-boundary assertions
@@ -79,6 +81,14 @@ func WithPollerAdmissionConfig(cfg admission.Config) PollerOption {
 func WithPollerAdminLogChatID(chatID *int64) PollerOption {
 	return func(p *Poller) {
 		p.adminLogChatID = chatID
+	}
+}
+
+// WithPollerOperatorLog attaches the operator event-log writer forwarded to
+// each per-update router.
+func WithPollerOperatorLog(writer *operatorlog.Writer) PollerOption {
+	return func(p *Poller) {
+		p.operatorLog = writer
 	}
 }
 
@@ -356,7 +366,8 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 		WithPreflight(preflight),
 		WithMemberChecker(NewClubMemberChecker(
 			p.client, p.admissionCfg.ClubChatID, p.admissionCfg.ClubChannelID)),
-		WithChatInfo(p.chatTitleResolver()))
+		WithChatInfo(p.chatTitleResolver()),
+		WithOperatorLog(p.operatorLog))
 
 	result, err := router.Route(ctx, &update)
 	if err != nil {

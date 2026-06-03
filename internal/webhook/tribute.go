@@ -21,6 +21,7 @@ import (
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/notify"
+	"github.com/justskiv/gatekeeper/internal/operatorlog"
 	"github.com/justskiv/gatekeeper/internal/redact"
 	"github.com/justskiv/gatekeeper/internal/store"
 )
@@ -41,6 +42,7 @@ type TributeHandler struct {
 	CancelImmediate bool
 	OwnerIDs        []int64
 	AdminLogChatID  *int64
+	OperatorLog     *operatorlog.Writer
 	Logger          *slog.Logger
 }
 
@@ -255,6 +257,7 @@ func (h *TributeHandler) processSubscriptionEvent(
 		Grants:        store.NewGrants(tx),
 		Outbox:        outbox,
 		Alerts:        alerts,
+		OperatorLog:   h.OperatorLog,
 	}, subEvent)
 	if err != nil {
 		return err

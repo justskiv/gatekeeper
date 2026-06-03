@@ -8,6 +8,7 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"github.com/justskiv/gatekeeper/internal/domain"
+	"github.com/justskiv/gatekeeper/internal/operatorlog"
 	"github.com/justskiv/gatekeeper/internal/store"
 )
 
@@ -98,6 +99,10 @@ type Store struct {
 	Outbox        OutboxStore
 	Alerts        AlertStore
 	Members       MemberChecker
+
+	// OperatorLog, when set, receives durable operator events emitted in the
+	// caller's transaction. It is optional: a nil writer disables the feed.
+	OperatorLog *operatorlog.Writer
 }
 
 // Effect is a post-commit side effect prepared by the engine.

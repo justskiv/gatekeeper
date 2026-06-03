@@ -10,6 +10,7 @@ import (
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/invite"
+	"github.com/justskiv/gatekeeper/internal/operatorlog"
 	"github.com/justskiv/gatekeeper/internal/store"
 )
 
@@ -114,4 +115,8 @@ type Stores struct {
 	Whitelist     engine.WhitelistStore
 	Alerts        AlertStore
 	StatusEngine  *engine.Engine
+
+	// OperatorLog, when set, lets verify_member-driven recompute emit access
+	// lifecycle events through the same writer as the rest of the runtime.
+	OperatorLog *operatorlog.Writer
 }

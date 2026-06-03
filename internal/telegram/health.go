@@ -30,6 +30,26 @@ type HealthChat struct {
 	Resource            string
 	Severity            string
 	RequiresManageRight bool
+
+	// PostingOnly marks a feed chat (EVENT_LOG_CHAT_ID) where the bot only
+	// needs to be a member able to send messages — administrator status is
+	// not required, so a plain member with posting rights is healthy.
+	PostingOnly bool
+}
+
+// EventLogHealthChat describes the operator event-log feed chat. The bot only
+// needs posting rights there (member or admin), and a problem is severity
+// error: the feed is observability, not an access-control resource, and MUST
+// NOT be treated as one of the four source/club chats.
+func EventLogHealthChat(cfg config.Config) HealthChat {
+	return HealthChat{
+		Key:         "event_log",
+		Name:        "operator event log",
+		ID:          cfg.EventLogChatID,
+		Resource:    string(domain.ResourceChat),
+		Severity:    "error",
+		PostingOnly: true,
+	}
 }
 
 // HealthChatsFromConfig returns the four chats required by the product.
@@ -315,6 +335,10 @@ func memberHasRequiredRights(chat HealthChat, member *models.ChatMember) (bool, 
 		return false, "not_member"
 	}
 
+	if chat.PostingOnly {
+		return memberCanPost(member)
+	}
+
 	switch member.Type {
 	case models.ChatMemberTypeOwner:
 		return true, ""
@@ -334,6 +358,26 @@ func memberHasRequiredRights(chat HealthChat, member *models.ChatMember) (bool, 
 		return false, "not_member"
 	default:
 		return false, "not_admin"
+	}
+}
+
+// memberCanPost reports whether the bot can post to a posting-only feed chat.
+// Plain membership is enough unless the member is restricted from sending;
+// administrator status is not required.
+func memberCanPost(member *models.ChatMember) (bool, string) {
+	switch member.Type {
+	case models.ChatMemberTypeOwner,
+		models.ChatMemberTypeAdministrator,
+		models.ChatMemberTypeMember:
+		return true, ""
+	case models.ChatMemberTypeRestricted:
+		if member.Restricted != nil && member.Restricted.CanSendMessages {
+			return true, ""
+		}
+
+		return false, "cannot_post"
+	default:
+		return false, "not_member"
 	}
 }
 

@@ -740,6 +740,7 @@ func (e *Enforcer) recompute(ctx context.Context, tgID int64) error {
 		Alerts:        e.stores.Alerts,
 		Members: telegram.NewClubMemberChecker(
 			e.tg, e.cfg.ClubChatID, e.cfg.ClubChannelID),
+		OperatorLog: e.stores.OperatorLog,
 	}, tgID)
 
 	return err
@@ -863,6 +864,16 @@ func (e *Enforcer) handleFailure(
 	}
 
 	if actionCanBlockDM(action.Type) && telegram.IsDMBlocked(cause) {
+		// A 403 on a group/feed target (negative payload chat_id, e.g.
+		// EVENT_LOG_CHAT_ID or ADMIN_LOG_CHAT_ID) is a lost-posting-rights
+		// failure of the bot, not the subject blocking their DMs. It MUST NOT
+		// mark action.TGID dm_state='blocked' and MUST NOT count as delivered:
+		// route it to the permanent-failure path so the dead-action alert
+		// surfaces the unreachable feed chat instead of losing it silently.
+		if isGroupFeedTarget(action) {
+			return e.markDead(ctx, action, cause)
+		}
+
 		if err := e.markDMBlocked(ctx, action); err != nil {
 			return err
 		}
@@ -892,6 +903,25 @@ func (e *Enforcer) handleFailure(
 
 func actionCanBlockDM(actionType domain.ActionType) bool {
 	return actionType == domain.ActionSendDM || actionType == domain.ActionSendInvite
+}
+
+// isGroupFeedTarget reports whether the action sends to an explicit group or
+// channel target rather than a user's private chat. Private-DM sends carry no
+// chat_id or a positive user chat_id (including the user_chat_id admission
+// sets on a join-request grant DM); a negative chat_id is a group/supergroup/
+// channel such as a configured feed chat. send_invite always targets the
+// user's DM, so it is never a group-feed target.
+func isGroupFeedTarget(action domain.AccessAction) bool {
+	if action.Type != domain.ActionSendDM {
+		return false
+	}
+
+	var payload sendDMPayload
+	if err := decodePayload(action, &payload); err != nil {
+		return false
+	}
+
+	return payload.ChatID < 0
 }
 
 func (e *Enforcer) markDMBlocked(

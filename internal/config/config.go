@@ -33,6 +33,11 @@ type Config struct {
 	ClubChannelID  int64
 	AdminLogChatID *int64 // nil when unset
 
+	// Operator event feed. A dedicated group where the bot and owner are
+	// members; carries the human-readable access/membership event log,
+	// separate from ADMIN_LOG_CHAT_ID ops alerts.
+	EventLogChatID int64
+
 	// Subscribe links
 	BoostySubscribeURL  string
 	TributeSubscribeURL string
@@ -100,6 +105,7 @@ func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 	cfg.ClubChatID = l.chatID("CLUB_CHAT_ID")
 	cfg.ClubChannelID = l.chatID("CLUB_CHANNEL_ID")
 	cfg.AdminLogChatID = l.optionalChatID("ADMIN_LOG_CHAT_ID")
+	cfg.EventLogChatID = l.chatID("EVENT_LOG_CHAT_ID")
 
 	cfg.BoostySubscribeURL = l.required("BOOSTY_SUBSCRIBE_URL")
 	cfg.TributeSubscribeURL = l.required("TRIBUTE_SUBSCRIBE_URL")
@@ -382,6 +388,24 @@ func (l *loader) validateChatIDs(cfg *Config) {
 				l.errf("%s and %s must be different chats (both %d)",
 					chats[i].name, chats[j].name, chats[i].id)
 			}
+		}
+	}
+
+	// EVENT_LOG_CHAT_ID is a dedicated feed chat: it must not double as a
+	// source/club chat or as the ops-alert chat. It is intentionally NOT one
+	// of configuredChats — chat-health treats it separately, by posting
+	// ability rather than as a managed/observed resource.
+	if cfg.EventLogChatID != 0 {
+		for _, chat := range chats {
+			if chat.id != 0 && cfg.EventLogChatID == chat.id {
+				l.errf("EVENT_LOG_CHAT_ID must be different from %s (both %d)",
+					chat.name, chat.id)
+			}
+		}
+
+		if cfg.AdminLogChatID != nil && *cfg.AdminLogChatID == cfg.EventLogChatID {
+			l.errf("EVENT_LOG_CHAT_ID must be different from "+
+				"ADMIN_LOG_CHAT_ID (both %d)", cfg.EventLogChatID)
 		}
 	}
 
