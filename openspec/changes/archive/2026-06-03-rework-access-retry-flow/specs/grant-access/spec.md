@@ -1,11 +1,5 @@
-# grant-access Specification
+## MODIFIED Requirements
 
-## Purpose
-
-Описывает pull-модель выдачи доступа в клубные ресурсы через `/start`,
-invite-ссылки, `chat_join_request` approval и фиксацию membership в
-`access_grants`.
-## Requirements
 ### Requirement: Запрос доступа выдаёт pending только eligible-пользователям
 
 Grant-access flow MUST обрабатывать `/start`, некомандный DM и retry
@@ -212,56 +206,3 @@ resolution status, resource chat IDs, сырые source verdicts или
 - **THEN** создаётся `admin_alert(kind='join_declined_active_sub',
   severity='warning')`
 - **AND** обычный `inactive`-decline этот alert не поднимает
-
-### Requirement: Club membership updates поддерживают access grants
-
-`chat_member` для клубного чата и канала MUST обновлять
-`access_grants` как фактический сигнал членства. Если пользователь
-становится участником, handler MUST выставить `state='joined'`,
-`joined_at=now` и `admitted_by='bot'`, когда update пришёл через
-join request или совпадает с активной direct invite, созданной для
-этого пользователя; иначе handler MUST выставить
-`admitted_by='external'`.
-
-External joins MUST NOT приводить к автоматическому кику. Они MUST
-создавать `audit_log(external_join_detected)` и `admin_alert` с
-informational-severity. Если пользователь вступает по direct-инвайту,
-handler MUST повторно проверить живой статус вне `handleTx` и поставить
-`soft_kick`, когда статус не `active`.
-
-Если пользователь покидает managed resource, handler MUST перевести
-grant в `left` через `updated_at`, если текущий grant ещё не `revoked`,
-и MUST записать `audit_log(member_left)`. Уже `revoked` grant MUST
-сохранять состояние `revoked` и не перетираться выходом из чата.
-
-#### Scenario: Вступление через join request записывается как bot-admitted
-- **WHEN** club `chat_member` показывает, что пользователь вступил через
-  join request
-- **THEN** grant для этого resource сохраняется как `joined`
-- **AND** `admitted_by` равен `bot`
-
-#### Scenario: External join создаёт alert и не кикает
-- **WHEN** пользователь становится участником клубного ресурса без
-  подтверждённого ботом admission
-- **THEN** grant сохраняется как `joined` с `admitted_by='external'`
-- **AND** `admin_alert(kind='external_join')` создан
-- **AND** `soft_kick` action не ставится только из-за external join
-
-#### Scenario: Direct join без active status компенсируется
-- **WHEN** пользователь вступает по активному direct-инвайту, а живой
-  статус не `active`
-- **THEN** grant фиксирует наблюдаемое вступление
-- **AND** `soft_kick` action ставится для managed resource
-
-#### Scenario: Выход участника помечает grant как left
-- **WHEN** club `chat_member` показывает, что joined пользователь покинул
-  resource
-- **THEN** grant state становится `left`
-- **AND** audit фиксирует `member_left`
-
-#### Scenario: Revoked grant не перетирается выходом
-- **WHEN** club `chat_member` показывает выход пользователя, чей grant
-  уже находится в `revoked`
-- **THEN** grant остаётся `revoked`
-- **AND** обработчик не записывает `left` поверх отзыва
-

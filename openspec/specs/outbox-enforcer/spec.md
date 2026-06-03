@@ -70,9 +70,10 @@ Telegram. Он MUST читать `access_actions`, декодировать `pay
 
 Поддержанные `action_type` MUST включать:
 `ensure_invite`, `send_invite`, `approve_join`, `decline_join`,
-`soft_kick`, `hard_ban`, `unban`, `send_dm`, `verify_member`,
-`revoke_invite`. Ожидаемые no-op ошибки в контексте конкретного action
-MUST считаться успешным исполнением и логироваться на уровне `warn`.
+`soft_kick`, `hard_ban`, `unban`, `send_dm`, `edit_message`,
+`verify_member`, `revoke_invite`. Ожидаемые no-op ошибки в контексте
+конкретного action MUST считаться успешным исполнением и логироваться на
+уровне `warn`.
 
 `send_dm` и `send_invite` MUST сохранять контракт форматированного
 сообщения от durable payload до Telegram API call. Если payload содержит
@@ -85,6 +86,14 @@ HTML MUST NOT задним числом переинтерпретировать
 HTML и вызывать `can't parse entities`, отравляя outbox постоянными
 ретраями. Inline keyboard button labels и callback data MUST оставаться
 plain reply-markup fields, а не HTML-rendered content.
+
+`edit_message` MUST редактировать текст и inline-клавиатуру
+существующего сообщения по `chat_id` и `message_id` из payload с тем же
+HTML parse mode. Payload без `chat_id`, `message_id` или текста MUST
+считаться невалидным. Если payload требует retry-кнопку, Enforcer MUST
+выставить retry-клавиатуру; иначе он MUST очистить клавиатуру непустым
+(non-nil) пустым inline-keyboard, чтобы Telegram не отклонил правку.
+Ответ Telegram `message is not modified` MUST трактоваться как успех.
 
 #### Scenario: soft_kick выполняет ban и unban
 - **WHEN** Enforcer исполняет `soft_kick` для resource и пользователя
@@ -137,6 +146,16 @@ plain reply-markup fields, а не HTML-rendered content.
 - **THEN** Telegram получает текст с выбранным parse mode
 - **AND** fallback raw invite URL остаётся отправляемым, если
   форматированный текст не передан
+
+#### Scenario: edit_message редактирует существующее сообщение
+
+- **WHEN** Enforcer выполняет `edit_message` action с `chat_id`,
+  `message_id` и форматированным текстом
+- **THEN** текст и inline-клавиатура сообщения редактируются на месте с
+  `parse_mode="HTML"`
+- **AND** не-retry результат очищает клавиатуру непустым пустым
+  inline-keyboard, а ответ `message is not modified` трактуется как
+  успех
 
 ### Requirement: Enforcer retries, throttles and raises dead-action alerts
 
@@ -227,3 +246,4 @@ domain state already records the ban, and MUST log a warning.
 - **WHEN** `hard_ban` targets creator or administrator
 - **THEN** Enforcer does not remove the user
 - **AND** action finishes as expected no-op with warning
+
