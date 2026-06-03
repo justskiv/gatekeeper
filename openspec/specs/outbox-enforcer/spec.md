@@ -8,13 +8,13 @@ TBD - created by archiving change phase-04-outbox-enforcer-merge. Update Purpose
 Доменный код MUST записывать исходящее Telegram-действие в
 `access_actions` до исполнения. Если действие связано с изменением
 durable состояния, строка action MUST коммититься в той же
-handler-транзакции (`tx2`), что и доменное изменение, `audit_log` и
+handler-транзакции (`handleTx`), что и доменное изменение, `audit_log` и
 terminal status входящего update. Telegram-вызов MUST выполняться
 асинхронно Enforcer'ом после коммита.
 
 Транзакция БД MUST NOT удерживаться открытой во время сетевого вызова
-Telegram: сетевые probe выполняются до `tx2`, durable action пишется
-внутри `tx2`, фактический side effect выполняется после коммита.
+Telegram: сетевые probe выполняются до `handleTx`, durable action пишется
+внутри `handleTx`, фактический side effect выполняется после коммита.
 
 #### Scenario: Action и доменное изменение коммитятся атомарно
 - **WHEN** обработчик меняет доменное состояние и должен выполнить
@@ -24,9 +24,9 @@ Telegram: сетевые probe выполняются до `tx2`, durable action
 - **AND** при откате транзакции не сохраняется ни доменное изменение,
   ни строка action
 
-#### Scenario: Telegram-вызов не выполняется внутри tx2
+#### Scenario: Telegram-вызов не выполняется внутри handleTx
 - **WHEN** обработка требует Telegram side effect
-- **THEN** внутри `tx2` создаётся durable action
+- **THEN** внутри `handleTx` создаётся durable action
 - **AND** фактический вызов Telegram выполняет Enforcer после коммита
 
 ### Requirement: Actions are idempotent and leased by workers

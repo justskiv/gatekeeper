@@ -28,7 +28,7 @@ const (
 	OutboundDM          OutboundKind = "dm"
 )
 
-// OutboundMessage is a Telegram call to make after tx2 commits.
+// OutboundMessage is a Telegram call to make after handleTx commits.
 type OutboundMessage struct {
 	Kind    OutboundKind
 	ChatID  int64
@@ -96,7 +96,7 @@ type SourceChats struct {
 	TributeObservation bool
 }
 
-// RoutePreflight contains network reads performed before tx2.
+// RoutePreflight contains network reads performed before handleTx.
 type RoutePreflight struct {
 	Snapshot             *engine.Snapshot
 	AdmissionRateLimited bool
@@ -140,7 +140,7 @@ func WithMemberChecker(checker engine.MemberChecker) RouterOption {
 	}
 }
 
-// NewRouter returns a router bound to one tx2 repository set.
+// NewRouter returns a router bound to one handleTx repository set.
 func NewRouter(
 	deps RouterDeps,
 	chats []HealthChat,

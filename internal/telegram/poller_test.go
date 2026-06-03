@@ -394,7 +394,7 @@ func TestPollerStatusPreflightRunsSourceOutsideHandlerTransaction(t *testing.T) 
 			}
 
 			if calledInTx.Load() {
-				t.Fatal("source was called after tx2 began")
+				t.Fatal("source was called after handleTx began")
 			}
 
 			if sender.calls != 0 {
@@ -491,7 +491,7 @@ func TestPollerAdmissionRateLimitSkipsSecondSourceProbe(t *testing.T) {
 	}
 
 	if calledInTx.Load() {
-		t.Fatal("source was called after tx2 began")
+		t.Fatal("source was called after handleTx began")
 	}
 
 	if got := countSendDMActions(t, db); got != 2 {

@@ -2056,7 +2056,7 @@ poison-pill обновлений и forensics при инцидентах.
 resolved_offset := max(meta.update_offset,
                        MAX(telegram_updates.update_id) + 1)
 poll(offset = resolved_offset):
-  tx1: BEGIN
+  receiveTx: BEGIN
        for u in batch:
            INSERT OR IGNORE INTO telegram_updates(update_id, ...,
                                                   status='pending')
@@ -2066,15 +2066,15 @@ poll(offset = resolved_offset):
   -- с этого момента Telegram-очередь чиста: следующий getUpdates
   -- уже не вернёт эти update_id.
   for row in pending ORDER BY update_id:
-    tx2: BEGIN
-         <handler пишет всё через tx2>
+    handleTx: BEGIN
+         <handler пишет всё через handleTx>
          <финальный> UPDATE telegram_updates
                       SET status = 'processed' | 'ignored',
                           processed_at = now
                       WHERE update_id = row.update_id
          COMMIT
-    -- если внутри tx2 любая ошибка → ROLLBACK всё, домен не тронут:
-    tx3: BEGIN
+    -- если внутри handleTx любая ошибка → ROLLBACK всё, домен не тронут:
+    failTx: BEGIN
          UPDATE telegram_updates
             SET status = 'failed', error = ?, processed_at = now
             WHERE update_id = row.update_id
@@ -2089,12 +2089,12 @@ poll(offset = resolved_offset):
   (`subscriptions`, `access_grants`, …), outbox-INSERT'ы
   (`access_actions`), `audit_log`-записи и терминальный
   `UPDATE telegram_updates.status` коммитятся **в одной транзакции
-  (tx2)**. Side-effect'ов вне tx2 в handler'е нет — иначе при крэше
+  (handleTx)**. Side-effect'ов вне handleTx в handler'е нет — иначе при крэше
   между ними получим двойную обработку на старте.
 - **I2. Никаких внешних вызовов в tx.** Telegram-API из handler'а
   **запрещён**. Каждое действие, требующее обращения к Telegram,
   представляется строкой в `access_actions` и исполняется Enforcer'ом
-  асинхронно (§8.2). Это держит tx2 короткой, не зависящей от
+  асинхронно (§8.2). Это держит handleTx короткой, не зависящей от
   сетевых таймаутов, и оставляет ровно одну retry-семантику —
   outbox'овую.
 
@@ -2102,21 +2102,21 @@ poll(offset = resolved_offset):
 оставшиеся `pending` строки в порядке `update_id`. Это закрывает
 два сценария:
 
-1. Падение между tx1 и tx2 — строка осталась `pending`, ретраится.
-2. Падение между ROLLBACK tx2 и tx3 — то же.
+1. Падение между receiveTx и handleTx — строка осталась `pending`, ретраится.
+2. Падение между ROLLBACK handleTx и failTx — то же.
 
 Если ошибка была детерминированным багом, который не изменился —
-handler упадёт повторно, в итоге дойдёт до tx3 и запишет `failed`.
+handler упадёт повторно, в итоге дойдёт до failTx и запишет `failed`.
 Если между падениями окружение изменилось (поправили код, данные
 или схему) — может пройти успешно. В обоих случаях процесс
 сходится за конечное число итераций.
 
-**Offset.** Двойной источник — `meta.update_offset` (двинут в tx1) и
+**Offset.** Двойной источник — `meta.update_offset` (двинут в receiveTx) и
 `MAX(update_id)` из `telegram_updates`. Поллер стартует с
 `resolved_offset` (см. вычисление в псевдокоде выше) — это страхует
 от рассинхрона между meta и inbox при экзотических крэшах. Отдельной
 «сохранить offset при остановке» операции **нет**: значение durable
-после каждой `tx1`, и рестарт всегда находит его через
+после каждой `receiveTx`, и рестарт всегда находит его через
 `resolved_offset`.
 
 **24-часовое окно Telegram.** Простой бота дольше 24 ч → часть
@@ -2655,7 +2655,7 @@ Schema-владение вынесено из runtime-бинаря в отдел
   БД, пока живы писатели, нельзя). Опционально — жёсткий дедлайн
   (`time.AfterFunc` → `os.Exit`) на случай зависшей горутины.
 - Поллеру отдельная финализация offset не нужна: `update_offset`
-  durable после `tx1` каждого батча (§16.3), а на рестарте поллер
+  durable после `receiveTx` каждого батча (§16.3), а на рестарте поллер
   стартует с `resolved_offset`.
 
 ### 21.2. Ошибки Telegram API

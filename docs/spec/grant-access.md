@@ -4,7 +4,7 @@ Pull-модель доступа к клубным ресурсам: запро�
 
 ## Запрос доступа (`/start`, DM, retry)
 
-`/start`, любой некомандный текст в личке и callback кнопки «Проверить ещё раз» попадают в один и тот же grant-access flow как запрос доступа. Flow обеспечивает строку `users`, выставляет `dm_state='open'`, применяет hard-ban *до* проверки источников и считает живой `effectiveStatus` вне `tx2` (сетевой опрос не держит транзакцию). Решение зависит от итогового статуса:
+`/start`, любой некомандный текст в личке и callback кнопки «Проверить ещё раз» попадают в один и тот же grant-access flow как запрос доступа. Flow обеспечивает строку `users`, выставляет `dm_state='open'`, применяет hard-ban *до* проверки источников и считает живой `effectiveStatus` вне `handleTx` (сетевой опрос не держит транзакцию). Решение зависит от итогового статуса:
 
 - **active** — flow зовёт `recomputeAccess`, находит клубные ресурсы (чат и канал), где grant отсутствует или не равен `joined`, и в короткой handler-транзакции записывает `access_grants.state='pending'`, `audit_log` и нужные outbox actions. Дальнейшее зависит от `INVITE_MODE`:
   - `shared_join_request` — `send_dm` с `MSG_ACTIVE` и ссылками из активных shared-строк `invite_links`;
@@ -17,7 +17,7 @@ Pull-модель доступа к клубным ресурсам: запро�
 
 ## Одобрение join-request
 
-`chat_join_request` для управляемых клубных ресурсов — admission-шлагбаум. Handler сопоставляет `chat.id` с resource, обеспечивает пользователя, проверяет hard-ban, разрешает invite link по настроенному режиму (см. [invite-links](invite-links.md)) и считает живой `effectiveStatus` вне `tx2`. Для `unknown` живая проверка повторяется согласно `ADMISSION_JOIN_REQUEST_RETRIES` перед решением.
+`chat_join_request` для управляемых клубных ресурсов — admission-шлагбаум. Handler сопоставляет `chat.id` с resource, обеспечивает пользователя, проверяет hard-ban, разрешает invite link по настроенному режиму (см. [invite-links](invite-links.md)) и считает живой `effectiveStatus` вне `handleTx`. Для `unknown` живая проверка повторяется согласно `ADMISSION_JOIN_REQUEST_RETRIES` перед решением.
 
 Решение fail-closed — одобряет только финальный `active`:
 
@@ -34,7 +34,7 @@ DM-ответы используют `user_chat_id` из Telegram, когда о
 `chat_member` клубного чата и канала обновляет `access_grants` как фактический сигнал членства.
 
 - Пользователь стал участником → `state='joined'`, `joined_at=now`. `admitted_by='bot'`, если update пришёл через join request или совпадает с активным direct-инвайтом, созданным для этого пользователя; иначе `admitted_by='external'`.
-- External joins не приводят к автоматическому кику: пишется `audit_log(external_join_detected)` и informational-severity `admin_alert`. Если пользователь вступил по direct-инвайту, живой статус перепроверяется вне `tx2`, и при не-`active` статусе ставится `soft_kick`.
+- External joins не приводят к автоматическому кику: пишется `audit_log(external_join_detected)` и informational-severity `admin_alert`. Если пользователь вступил по direct-инвайту, живой статус перепроверяется вне `handleTx`, и при не-`active` статусе ставится `soft_kick`.
 - Пользователь покинул resource → grant переходит в `left` через `updated_at` (отдельной колонки времени выхода нет), пишется `audit_log(member_left)`. Уже `revoked` grant выходом не перетирается — отзыв сохраняется.
 
 ## Приёмка

@@ -325,7 +325,7 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 			return err
 		}
 
-		return fmt.Errorf("begin telegram update tx2: %w", err)
+		return fmt.Errorf("begin telegram update handleTx: %w", err)
 	}
 
 	if p.afterBeginTx != nil {
@@ -387,7 +387,7 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 			return err
 		}
 
-		return fmt.Errorf("commit telegram update tx2: %w", err)
+		return fmt.Errorf("commit telegram update handleTx: %w", err)
 	}
 
 	p.deliverEffects(ctx, result.Effects)
@@ -658,7 +658,7 @@ func (p *Poller) markFailed(ctx context.Context, updateID int64, cause error) er
 			return err
 		}
 
-		return fmt.Errorf("begin telegram update tx3: %w", err)
+		return fmt.Errorf("begin telegram update failTx: %w", err)
 	}
 
 	if err := store.NewTelegramUpdates(tx).MarkTerminal(
@@ -696,7 +696,7 @@ func (p *Poller) markFailed(ctx context.Context, updateID int64, cause error) er
 			return err
 		}
 
-		return fmt.Errorf("commit telegram update tx3: %w", err)
+		return fmt.Errorf("commit telegram update failTx: %w", err)
 	}
 
 	p.logger.Error("telegram update failed",

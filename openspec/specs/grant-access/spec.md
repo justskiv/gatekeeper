@@ -12,7 +12,7 @@ invite-ссылки, `chat_join_request` approval и фиксацию membership
 Grant-access flow MUST обрабатывать `/start`, некомандный DM и retry
 callback как запрос доступа. Handler MUST обеспечить строку `users`,
 выставить `dm_state='open'`, применить hard-ban до проверки источников
-и выполнить живой `effectiveStatus` вне `tx2`. При `active` handler
+и выполнить живой `effectiveStatus` вне `handleTx`. При `active` handler
 MUST вызвать `recomputeAccess`, определить club resources, где grant
 отсутствует или не равен `joined`, и в короткой handler-транзакции
 записать `access_grants.state='pending'`, audit и нужные outbox actions.
@@ -79,7 +79,7 @@ MUST вызвать `recomputeAccess`, определить club resources, гд
 `chat_join_request` MUST быть admission-шлагбаумом для managed club
 resources. Handler MUST сопоставить `chat.id` с resource, обеспечить
 пользователя, проверить hard-ban, разрешить invite link по настроенному
-mode и выполнить живой `effectiveStatus` вне `tx2`. Для `unknown`
+mode и выполнить живой `effectiveStatus` вне `handleTx`. Для `unknown`
 handler MUST повторить живую проверку согласно
 `ADMISSION_JOIN_REQUEST_RETRIES` перед решением.
 
@@ -147,7 +147,7 @@ join request или совпадает с активной direct invite, соз
 External joins MUST NOT приводить к автоматическому кику. Они MUST
 создавать `audit_log(external_join_detected)` и `admin_alert` с
 informational-severity. Если пользователь вступает по direct-инвайту,
-handler MUST повторно проверить живой статус вне `tx2` и поставить
+handler MUST повторно проверить живой статус вне `handleTx` и поставить
 `soft_kick`, когда статус не `active`.
 
 Если пользователь покидает managed resource, handler MUST перевести

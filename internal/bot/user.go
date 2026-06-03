@@ -65,7 +65,7 @@ func NewUserCommands(users *store.Users, ownerIDs []int64) *UserCommands {
 	return NewCommands(CommandDeps{Users: users}, ownerIDs)
 }
 
-// NewCommands returns command handlers bound to one tx2 dependency set.
+// NewCommands returns command handlers bound to one handleTx dependency set.
 func NewCommands(deps CommandDeps, ownerIDs []int64) *UserCommands {
 	owners := make(map[int64]struct{}, len(ownerIDs))
 	for _, id := range ownerIDs {

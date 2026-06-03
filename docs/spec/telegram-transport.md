@@ -70,16 +70,16 @@ outbox actions и терминальный статус коммитятся а�
 локальная обработка восстановима из БД.
 
 Для каждого обновления открывается отдельная транзакция обработчика
-(`tx2`). Два инварианта:
+(`handleTx`). Два инварианта:
 
 - **I1** — доменные изменения, `audit_log`-записи, INSERT'ы в
   `access_actions` и терминальный статус `processed`/`ignored`
-  коммитятся одной транзакцией. Side-effect'ов вне `tx2`, влияющих на
+  коммитятся одной транзакцией. Side-effect'ов вне `handleTx`, влияющих на
   durable-состояние, нет: иначе крэш между ними дал бы двойную
   обработку или потерянное исходящее действие.
-- **I2** — Telegram-вызовы внутри `tx2` запрещены. Если нужно отправить
+- **I2** — Telegram-вызовы внутри `handleTx` запрещены. Если нужно отправить
   сообщение, выдать invite, approve/decline join request и т. п.,
-  обработчик ставит соответствующий `access_actions` row в `tx2`;
+  обработчик ставит соответствующий `access_actions` row в `handleTx`;
   фактический вызов делает Enforcer после коммита (см.
   [outbox-enforcer](outbox-enforcer.md)).
 
@@ -104,7 +104,7 @@ retry для `failed` нет — возврат в `pending` только рук
 - `/here` в группе/супергруппе от владельца → ответ с `chat.id` и типом.
 - `my_chat_member` → chat health, DM-state и discovery.
 - `chat_member` в Boosty source chat (`BOOSTY_GROUP_ID`) → нормализация
-  в `SubscriptionEvent` и `engine.handleEvent` внутри `tx2`.
+  в `SubscriptionEvent` и `engine.handleEvent` внутри `handleTx`.
 - `chat_member` в Tribute source chat (`TRIBUTE_CHANNEL_ID`) →
   нормализация в `SubscriptionEvent` только при
   `TRIBUTE_MODE=observation`. При `TRIBUTE_MODE=webhook` членство
@@ -131,5 +131,5 @@ id и club resource id отклоняется на уровне runtime/config �
 считаются `creator`/`administrator`/`member` и `restricted` с
 `is_member=true`. Изменения, затрагивающие ботов (включая самого бота),
 игнорируются; смена прав без смены членства — no-op. Применение идёт
-внутри `tx2` с соблюдением I1/I2: членство берётся из payload, не из
+внутри `handleTx` с соблюдением I1/I2: членство берётся из payload, не из
 сети.

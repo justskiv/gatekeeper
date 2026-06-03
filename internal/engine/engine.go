@@ -89,7 +89,7 @@ func normalizeRevocationConfig(cfg RevocationConfig) RevocationConfig {
 	return cfg
 }
 
-// ApplyObservations persists live source observations inside tx2.
+// ApplyObservations persists live source observations inside handleTx.
 func (e *Engine) ApplyObservations(
 	ctx context.Context,
 	repos Store,
@@ -141,7 +141,7 @@ func (e *Engine) applyObservations(
 	return nil
 }
 
-// HandleEvent applies one normalized subscription event inside tx2.
+// HandleEvent applies one normalized subscription event inside handleTx.
 //
 //nolint:gocognit,gocyclo,cyclop,funlen,wsl_v5 // Domain event switch is explicit.
 func (e *Engine) HandleEvent(

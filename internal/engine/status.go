@@ -68,7 +68,7 @@ func Aggregate(
 	}
 }
 
-// LiveSnapshot collects source verdicts outside tx2 and aggregates them.
+// LiveSnapshot collects source verdicts outside handleTx and aggregates them.
 func (e *Engine) LiveSnapshot(
 	ctx context.Context,
 	repos Store,

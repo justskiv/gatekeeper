@@ -91,14 +91,14 @@ Enforcer'у в Фазе 04 и chat-health в этой фазе.
 ### Requirement: Incoming update batches are persisted to a durable inbox before handling
 
 Каждый батч MUST сначала **durable-сохраняться**, и только потом
-обрабатываться. В одной транзакции (`tx1`): каждое обновление пишется
+обрабатываться. В одной транзакции (`receiveTx`): каждое обновление пишется
 `INSERT OR IGNORE INTO telegram_updates(update_id, update_type, chat_id,
 tg_id, payload_json, received_at, status='pending')` — raw-JSON
 обновления сохраняется в `payload_json` (колонка `NOT NULL`, нужна для
 forensics и повторного разбора), и в той же транзакции
 `meta.update_offset` продвигается до `max(batch.update_id) + 1`. После
-коммита `tx1` очередь Telegram чиста: следующий `getUpdates` уже не
-вернёт эти `update_id`. Обработчики запускаются **после** `tx1`.
+коммита `receiveTx` очередь Telegram чиста: следующий `getUpdates` уже не
+вернёт эти `update_id`. Обработчики запускаются **после** `receiveTx`.
 
 #### Scenario: Батч сохранён и offset продвинут атомарно до обработки
 - **WHEN** поллер получил батч обновлений
@@ -117,10 +117,10 @@ forensics и повторного разбора), и в той же транз�
 `telegram_updates.status` MUST быть state machine с единственным
 транзитным статусом `pending` и тремя терминальными: `processed`,
 `ignored`, `failed`. Каждая `pending`-строка обрабатывается в порядке
-`update_id` в своей транзакции (`tx2`), которая завершается переходом в
+`update_id` в своей транзакции (`handleTx`), которая завершается переходом в
 `processed` (обработчик применил доменные изменения) или `ignored`
 (валидное обновление, нам не интересное). При любой ошибке обработчика
-`tx2` откатывается, домен не тронут, и отдельная транзакция (`tx3`)
+`handleTx` откатывается, домен не тронут, и отдельная транзакция (`failTx`)
 переводит строку в `failed`, записывает `error` и поднимает
 `admin_alert(severity='error')`. `failed` — терминальный: авто-retry
 нет, возврат в `pending` — только руками оператора.
@@ -135,8 +135,8 @@ forensics и повторного разбора), и в той же транз�
 
 #### Scenario: Ошибка обработчика помечает failed и поднимает alert
 - **WHEN** обработчик возвращает ошибку
-- **THEN** `tx2` откатывается, домен не изменён
-- **AND** `tx3` переводит строку в `failed` с текстом ошибки и поднимает
+- **THEN** `handleTx` откатывается, домен не изменён
+- **AND** `failTx` переводит строку в `failed` с текстом ошибки и поднимает
   `admin_alert(severity='error')`
 - **AND** авто-retry не выполняется
 
@@ -145,15 +145,15 @@ forensics и повторного разбора), и в той же транз�
 Обработчики обновлений MUST соблюдать два инварианта. **I1**: доменные
 изменения, `audit_log`-записи, `access_actions`-INSERT'ы и
 терминальный `UPDATE telegram_updates.status` коммитятся **в одной
-транзакции** (`tx2`). Side-effect'ов вне `tx2`, влияющих на
+транзакции** (`handleTx`). Side-effect'ов вне `handleTx`, влияющих на
 durable-состояние, нет — иначе крэш между ними дал бы двойную обработку
 на старте или потерянное исходящее действие.
 
-Инвариант **I2**: вызовы Telegram внутри `tx2` запрещены — транзакция
+Инвариант **I2**: вызовы Telegram внутри `handleTx` запрещены — транзакция
 не должна зависеть от сетевых таймаутов. Если обработчику нужно
 отправить сообщение, выдать invite, approve/decline join request или
 выполнить другое доменное Telegram-действие, обработчик MUST поставить
-соответствующий `access_actions` row в `tx2`; Enforcer выполнит
+соответствующий `access_actions` row в `handleTx`; Enforcer выполнит
 Telegram-вызов после коммита.
 
 #### Scenario: Доменное изменение, outbox action и terminal status делят транзакцию
@@ -167,7 +167,7 @@ Telegram-вызов после коммита.
 #### Scenario: В handler-транзакции нет Telegram-вызова
 - **WHEN** обработчику нужно отправить сообщение или изменить состояние
   пользователя в Telegram
-- **THEN** внутри `tx2` создаётся outbox action
+- **THEN** внутри `handleTx` создаётся outbox action
 - **AND** прямой вызов Telegram выполняется только Enforcer'ом после
   коммита
 
@@ -178,9 +178,9 @@ Telegram-вызов после коммита.
 что страхует от рассинхрона `meta` и inbox при экзотических крэшах.
 Перед входом в цикл опроса поллер MUST **досканировать** оставшиеся
 `pending`-строки в порядке `update_id` — это закрывает падения между
-`tx1` и `tx2` и между откатом `tx2` и `tx3`. Отдельной операции
+`receiveTx` и `handleTx` и между откатом `handleTx` и `failTx`. Отдельной операции
 «сохранить offset при остановке» нет: значение durable после каждой
-`tx1`.
+`receiveTx`.
 
 #### Scenario: Оставшиеся pending-строки переобрабатываются на старте
 - **WHEN** при старте в `telegram_updates` есть строки в статусе
@@ -201,7 +201,7 @@ Telegram-вызов после коммита.
 группе или супергруппе от владельца -> ответ с `chat.id` (в каналах
 недоступна: нет `channel_post` в `allowed_updates`);
 `my_chat_member` -> chat-health; `chat_member` в Boosty source chat ->
-нормализация в `SubscriptionEvent` и `engine.handleEvent` внутри `tx2`;
+нормализация в `SubscriptionEvent` и `engine.handleEvent` внутри `handleTx`;
 `chat_member` в Tribute source chat -> нормализация в
 `SubscriptionEvent` только при `TRIBUTE_MODE=observation`; при
 `TRIBUTE_MODE=webhook` membership Tribute-канала MUST NOT истекать
@@ -269,7 +269,7 @@ channel -> club membership handler. Прочее завершается как `
 `creator`/`administrator`/`member` и `restricted` с `is_member=true`.
 Изменения, затрагивающие ботов (включая самого бота), MUST
 игнорироваться; смена прав без смены членства (членство до == после)
-MUST быть no-op. Применение события MUST идти внутри `tx2`, сохраняя
+MUST быть no-op. Применение события MUST идти внутри `handleTx`, сохраняя
 инварианты I1 (атомарность с терминальным статусом) и I2 (без вызовов
 Telegram в транзакции — членство берётся из payload, не из сети).
 
