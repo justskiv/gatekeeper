@@ -28,6 +28,7 @@ func TestEscapeKeepsQuotesAndEscapesTelegramHTML(t *testing.T) {
 
 func TestSafeLinkValidatesURLAndEscapesHrefAndLabel(t *testing.T) {
 	got := SafeLink(`https://example.com/a?x=1&y=<bad>"`, `<label&>`)
+
 	want := `<a href="https://example.com/a?x=1&amp;y=&lt;bad&gt;&quot;">` +
 		`&lt;label&amp;&gt;</a>`
 	if got != want {
@@ -88,6 +89,7 @@ func TestRenderedTemplatesUseAllowedTelegramHTMLTags(t *testing.T) {
 
 	tagRE := regexp.MustCompile(`<(/?)([a-zA-Z0-9_]+)(?:\s[^>]*)?>`)
 	allowed := map[string]bool{"a": true, "b": true, "i": true, "code": true, "pre": true}
+
 	for _, sample := range samples {
 		for _, match := range tagRE.FindAllStringSubmatch(sample, -1) {
 			if !allowed[strings.ToLower(match[2])] {

@@ -155,6 +155,7 @@ func (h *UserCommands) hasWhoisDeps() bool {
 
 func (h *UserCommands) ownerReply(msg *models.Message, text string) Result {
 	parts := splitFormattedReply(text, replyChunkSize)
+
 	replies := make([]Reply, 0, len(parts))
 	for _, part := range parts {
 		replies = append(replies, Reply{

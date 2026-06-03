@@ -108,6 +108,7 @@ func TestOpsAlertsKeepsEmojiOnAlertTitleLines(t *testing.T) {
 	})
 
 	markerLines := 0
+
 	for _, line := range strings.Split(text, "\n") {
 		hasMarker := strings.Contains(line, "⚠️") || strings.Contains(line, "ℹ️")
 		if !hasMarker {
@@ -115,6 +116,7 @@ func TestOpsAlertsKeepsEmojiOnAlertTitleLines(t *testing.T) {
 		}
 
 		markerLines++
+
 		if strings.HasPrefix(line, "• ") {
 			t.Fatalf("data row has emoji marker: %q\nfull text:\n%s", line, text)
 		}

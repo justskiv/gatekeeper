@@ -268,6 +268,7 @@ func TestFormattedReplySplitKeepsTagsOnLineBoundaries(t *testing.T) {
 		if strings.Contains(part, "<code>") && !strings.Contains(part, "</code>") {
 			t.Fatalf("part = %q, split inside code tag", part)
 		}
+
 		if strings.Contains(part, "&amp") && !strings.Contains(part, "&amp;") {
 			t.Fatalf("part = %q, split inside entity", part)
 		}
@@ -288,9 +289,11 @@ func TestOwnerReplySplitsLongFormattedDiagnostics(t *testing.T) {
 		if len(reply.Text) > replyChunkSize {
 			t.Fatalf("reply length = %d, want <= %d", len(reply.Text), replyChunkSize)
 		}
+
 		if reply.ParseMode != messages.ParseModeHTML {
 			t.Fatalf("parse_mode = %q, want HTML", reply.ParseMode)
 		}
+
 		if strings.Count(reply.Text, "<code>") != strings.Count(reply.Text, "</code>") {
 			t.Fatalf("reply = %q, unbalanced code tags", reply.Text)
 		}
