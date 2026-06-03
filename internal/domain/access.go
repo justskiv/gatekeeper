@@ -49,6 +49,7 @@ const (
 	ActionHardBan      ActionType = "hard_ban"
 	ActionUnban        ActionType = "unban"
 	ActionSendDM       ActionType = "send_dm"
+	ActionEditMessage  ActionType = "edit_message"
 	ActionVerifyMember ActionType = "verify_member"
 	ActionRevokeInvite ActionType = "revoke_invite"
 )

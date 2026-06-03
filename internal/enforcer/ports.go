@@ -39,6 +39,13 @@ type TelegramClient interface {
 		text string,
 		parseMode string,
 	) error
+	EditMessageText(
+		ctx context.Context,
+		chatID int64,
+		messageID int,
+		text string,
+		replyMarkup models.ReplyMarkup,
+	) error
 	GetChatMember(ctx context.Context, chatID, userID int64) (*models.ChatMember, error)
 	ApproveChatJoinRequest(ctx context.Context, chatID, userID int64) error
 	DeclineChatJoinRequest(ctx context.Context, chatID, userID int64) error

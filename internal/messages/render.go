@@ -47,6 +47,19 @@ func Italic(text string) string {
 	return "<i>" + text + "</i>"
 }
 
+// Blockquote groups already-rendered lines into a Telegram quote block, which
+// draws an accent bar and indent — the only "card" container HTML mode offers.
+func Blockquote(inner string) string {
+	return "<blockquote>" + inner + "</blockquote>"
+}
+
+// CustomEmoji renders a Telegram custom emoji with a plain-emoji fallback.
+// The fallback is shown wherever the custom emoji cannot be displayed (for
+// example when the sender loses Premium); id is a controlled numeric constant.
+func CustomEmoji(id, fallback string) string {
+	return `<tg-emoji emoji-id="` + escapeAttr(id) + `">` + fallback + "</tg-emoji>"
+}
+
 // SafeLink renders a clickable link only for URLs safe for Telegram HTML.
 func SafeLink(rawURL, label string) string {
 	escapedLabel := Escape(label)

@@ -30,6 +30,7 @@ const (
 	alertKindInviteMissing       = "invite_link_missing"
 	alertKindExternalJoin        = "external_join"
 	alertKindDirectStatusMissing = "direct_status_missing"
+	alertKindJoinDeclinedActive  = "join_declined_active_sub"
 )
 
 var errSharedInviteMissing = errors.New("active shared invite is missing")
@@ -109,10 +110,26 @@ func New(deps Deps, cfg Config, opts ...Option) *Handler {
 
 // AccessRequest is a /start, non-command DM, or retry callback.
 type AccessRequest struct {
-	User        domain.User
-	Snapshot    *engine.Snapshot
-	RateLimited bool
-	Trigger     string
+	User     domain.User
+	Snapshot *engine.Snapshot
+	Trigger  string
+
+	// EditChatID and EditMessageID, when both set, point at the existing
+	// message that triggered a retry callback. Reply DMs for this request
+	// then edit that message in place instead of sending a new one.
+	EditChatID    int64
+	EditMessageID int
+}
+
+// editTarget returns the in-place edit coordinates for the request and
+// whether they are usable. An inaccessible or missing message falls back
+// to sending a fresh DM.
+func (r AccessRequest) editTarget() (dmEditTarget, bool) {
+	if r.EditChatID == 0 || r.EditMessageID == 0 {
+		return dmEditTarget{}, false
+	}
+
+	return dmEditTarget{ChatID: r.EditChatID, MessageID: r.EditMessageID}, true
 }
 
 // HandleAccessRequest processes a user-initiated access request.
@@ -135,16 +152,7 @@ func (h *Handler) HandleAccessRequest(
 	}
 
 	if user.Banned {
-		return h.denyAccessRequest(ctx, user.TGID, messages.Banned(), "banned")
-	}
-
-	if req.RateLimited {
-		return h.enqueueDM(ctx, dmRequest{
-			TGID:        req.User.TGID,
-			Text:        messages.TryLater(),
-			RetryButton: true,
-			Marker:      h.rateLimitMarker(req.User.TGID),
-		})
+		return h.denyAccessRequest(ctx, req, messages.Banned(), "banned")
 	}
 
 	status, fallback, err := h.accessRequestStatus(ctx, req)
@@ -156,13 +164,13 @@ func (h *Handler) HandleAccessRequest(
 	case domain.StatusActive:
 		return h.grantAccess(ctx, req, fallback)
 	case domain.StatusInactive:
-		return h.denyAccessRequest(ctx, user.TGID, messages.MsgNoSub, "inactive")
+		return h.denyAccessRequest(ctx, req, messages.NoSub(), "inactive")
 	default:
 		if err := h.alertSourceUnknown(ctx, user.TGID, "access request"); err != nil {
 			return err
 		}
 
-		return h.denyAccessRequest(ctx, user.TGID, messages.TryLater(), "unknown")
+		return h.denyAccessRequest(ctx, req, messages.TryLater(), "unknown")
 	}
 }
 
@@ -220,7 +228,7 @@ func (h *Handler) HandleJoinRequest(ctx context.Context, req JoinRequest) error 
 			return err
 		}
 
-		return h.declineJoin(ctx, req, messages.TryLater(), "invite_unresolved")
+		return h.declineJoin(ctx, req, messages.InviteNotRecognized(), "invite_unresolved")
 	}
 
 	return h.handleResolvedJoin(ctx, req, resolution)
@@ -235,7 +243,7 @@ func (h *Handler) handleResolvedJoin(
 	case domain.StatusActive:
 		return h.approveJoin(ctx, req, resolution)
 	case domain.StatusInactive:
-		return h.declineJoin(ctx, req, messages.MsgNoSub, "inactive")
+		return h.declineJoin(ctx, req, messages.NoSub(), "inactive")
 	default:
 		if err := h.alertSourceUnknown(ctx, req.User.TGID, "join request"); err != nil {
 			return err
@@ -415,11 +423,11 @@ func (h *Handler) grantAccess(
 	}
 
 	if len(missing) == 0 {
-		return h.enqueueDM(ctx, dmRequest{
+		return h.enqueueDM(ctx, h.accessResultDM(req, dmRequest{
 			TGID:   req.User.TGID,
 			Text:   messages.AlreadyIn(),
 			Marker: h.accessMarker(req.User.TGID, "already-in"),
-		})
+		}))
 	}
 
 	switch h.cfg.InviteMode {
@@ -431,12 +439,12 @@ func (h *Handler) grantAccess(
 				return err
 			}
 
-			return h.enqueueDM(ctx, dmRequest{
+			return h.enqueueDM(ctx, h.accessResultDM(req, dmRequest{
 				TGID:        req.User.TGID,
 				Text:        messages.TryLater(),
 				RetryButton: true,
 				Marker:      h.accessMarker(req.User.TGID, "shared-missing"),
-			})
+			}))
 		}
 
 		if err != nil {
@@ -455,11 +463,11 @@ func (h *Handler) grantAccess(
 			return err
 		}
 
-		return h.enqueueDM(ctx, dmRequest{
+		return h.enqueueDM(ctx, h.accessResultDM(req, dmRequest{
 			TGID:   req.User.TGID,
 			Text:   messages.ActiveShared(links),
 			Marker: h.accessMarker(req.User.TGID, "active:shared"),
-		})
+		}))
 	case domain.InvitePersonalJoinRequest, domain.InviteDirect:
 		for _, resource := range missing {
 			pendingAt, err := h.deps.Grants.MarkPending(
@@ -485,33 +493,51 @@ func (h *Handler) grantAccess(
 			text = messages.ActiveDirect()
 		}
 
-		return h.enqueueDM(ctx, dmRequest{
+		return h.enqueueDM(ctx, h.accessResultDM(req, dmRequest{
 			TGID: req.User.TGID,
 			Text: text,
 			Marker: h.accessMarker(req.User.TGID,
 				fmt.Sprintf("active:%s", h.cfg.InviteMode)),
-		})
+		}))
 	default:
 		return fmt.Errorf("unsupported invite mode %q", h.cfg.InviteMode)
 	}
 }
 
+// accessResultDM redirects an access-request result reply to an in-place
+// message edit when the request carries an edit target (retry callback).
+// Access-granting side effects stay durable; only this user-facing reply
+// changes delivery shape.
+func (h *Handler) accessResultDM(req AccessRequest, dm dmRequest) dmRequest {
+	if target, ok := req.editTarget(); ok {
+		dm.Edit = &target
+	}
+
+	return dm
+}
+
 func (h *Handler) denyAccessRequest(
 	ctx context.Context,
-	tgID int64,
+	req AccessRequest,
 	text string,
 	reason string,
 ) error {
+	tgID := req.User.TGID
 	if err := h.audit(ctx, tgID, auditAccessDenied, "", reason); err != nil {
 		return err
 	}
 
-	return h.enqueueDM(ctx, dmRequest{
+	dm := dmRequest{
 		TGID:        tgID,
 		Text:        text,
-		RetryButton: reason == "unknown",
+		RetryButton: reason == "unknown" || reason == "inactive",
 		Marker:      h.accessMarker(tgID, "denied:"+reason),
-	})
+	}
+	if target, ok := req.editTarget(); ok {
+		dm.Edit = &target
+	}
+
+	return h.enqueueDM(ctx, dm)
 }
 
 func (h *Handler) declineJoin(
@@ -520,6 +546,10 @@ func (h *Handler) declineJoin(
 	text string,
 	reason string,
 ) error {
+	if err := h.alertDeclinedWithActiveSub(ctx, req, reason); err != nil {
+		return err
+	}
+
 	if err := h.enqueueDeclineJoin(ctx, req, reason); err != nil {
 		return err
 	}
@@ -774,6 +804,10 @@ func (h *Handler) engineStore() engine.Store {
 }
 
 func (h *Handler) enqueueDM(ctx context.Context, req dmRequest) error {
+	if req.Edit != nil {
+		return h.enqueueEditMessage(ctx, req)
+	}
+
 	payload, err := json.Marshal(sendDMPayload{
 		Text:        req.Text,
 		ParseMode:   messages.ParseModeHTML,
@@ -793,6 +827,31 @@ func (h *Handler) enqueueDM(ctx context.Context, req dmRequest) error {
 	})
 	if err != nil {
 		return fmt.Errorf("enqueue dm: %w", err)
+	}
+
+	return nil
+}
+
+func (h *Handler) enqueueEditMessage(ctx context.Context, req dmRequest) error {
+	payload, err := json.Marshal(editMessagePayload{
+		ChatID:      req.Edit.ChatID,
+		MessageID:   req.Edit.MessageID,
+		Text:        req.Text,
+		RetryButton: req.RetryButton,
+	})
+	if err != nil {
+		return fmt.Errorf("encode edit message payload: %w", err)
+	}
+
+	_, _, err = h.deps.Outbox.Enqueue(ctx, store.AccessActionInput{
+		Type: domain.ActionEditMessage,
+		TGID: &req.TGID,
+		IdempotencyKey: domain.AccessActionKey(
+			domain.ActionEditMessage, &req.TGID, nil, req.Marker),
+		PayloadJSON: payload,
+	})
+	if err != nil {
+		return fmt.Errorf("enqueue edit message: %w", err)
 	}
 
 	return nil
@@ -973,6 +1032,49 @@ func (h *Handler) alertSourceUnknown(
 	return err
 }
 
+// alertDeclinedWithActiveSub raises an admin alert when a join request is
+// declined for a user who still has an active subscription. That combination
+// is anomalous: an eligible user being turned away usually means a broken
+// invite link or a logic bug (this is how the recent silent redaction bug
+// went unnoticed). Normal "no subscription" declines (inactive) are expected
+// and never alert here.
+func (h *Handler) alertDeclinedWithActiveSub(
+	ctx context.Context,
+	req JoinRequest,
+	reason string,
+) error {
+	if h.deps.Alerts == nil {
+		return nil
+	}
+
+	if reason != "invite_unresolved" {
+		return nil
+	}
+
+	active, err := h.hasFreshActiveSubscription(ctx, req.User.TGID)
+	if err != nil {
+		return err
+	}
+
+	if !active {
+		return nil
+	}
+
+	tgID := req.User.TGID
+
+	_, _, err = h.deps.Alerts.CreateOpenIfMissing(ctx, store.AlertInput{
+		Severity: "warning",
+		Kind:     alertKindJoinDeclinedActive,
+		Title: fmt.Sprintf(
+			"join declined with active subscription %s/%d", req.Resource, tgID),
+		Detail: fmt.Sprintf("reason=%s resource=%s tg_id=%d",
+			reason, req.Resource, tgID),
+		TGID: &tgID,
+	})
+
+	return err
+}
+
 func (h *Handler) alertInviteMissing(
 	ctx context.Context,
 	resource domain.Resource,
@@ -1041,12 +1143,12 @@ func (h *Handler) joinMarker(req JoinRequest, suffix string) string {
 		req.Resource, req.User.TGID, date.Unix(), suffix)
 }
 
-func (h *Handler) rateLimitMarker(tgID int64) string {
-	return fmt.Sprintf("access:rate-limited:%d:%d", tgID, h.now().Unix()/30)
-}
-
 func (h *Handler) accessMarker(tgID int64, label string) string {
-	return fmt.Sprintf("access:%s:%d:%d", label, tgID, h.now().Unix()/30)
+	// Unique per call so every access request gets a reply. The old 30s
+	// time-bucket made repeated /start share one idempotency key, and the
+	// outbox silently swallowed the duplicates. Dedup here is dropped until
+	// the in-memory decision cache replaces it; action markers keep theirs.
+	return fmt.Sprintf("access:%s:%d:%d", label, tgID, h.now().UnixNano())
 }
 
 func snapshotStatus(snapshot *engine.Snapshot) domain.EffectiveStatus {
@@ -1063,6 +1165,16 @@ type dmRequest struct {
 	Text        string
 	RetryButton bool
 	Marker      string
+
+	// Edit, when set, redirects this reply to an in-place message edit
+	// instead of a fresh DM. Used for the retry-access callback so the
+	// result lands on the same message the button was attached to.
+	Edit *dmEditTarget
+}
+
+type dmEditTarget struct {
+	ChatID    int64
+	MessageID int
 }
 
 type sendDMPayload struct {
@@ -1070,5 +1182,12 @@ type sendDMPayload struct {
 	ParseMode   string `json:"parse_mode,omitempty"`
 	Plain       bool   `json:"plain,omitempty"`
 	ChatID      int64  `json:"chat_id,omitempty"`
+	RetryButton bool   `json:"retry_button,omitempty"`
+}
+
+type editMessagePayload struct {
+	ChatID      int64  `json:"chat_id"`
+	MessageID   int    `json:"message_id"`
+	Text        string `json:"text"`
 	RetryButton bool   `json:"retry_button,omitempty"`
 }

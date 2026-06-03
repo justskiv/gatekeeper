@@ -120,13 +120,19 @@ func (h *UserCommands) HandlePrivate(
 			return Result{}, err
 		}
 
-		return Result{Replies: []Reply{{
-			ChatID:    msg.Chat.ID,
-			TGID:      msg.From.ID,
-			Text:      messages.Welcome(),
-			ParseMode: messages.ParseModeHTML,
-			DM:        true,
-		}}}, nil
+		return dmTextReply(msg, messages.Welcome()), nil
+	case "boosty":
+		if err := h.rememberPrivateUser(ctx, *msg.From); err != nil {
+			return Result{}, err
+		}
+
+		return dmTextReply(msg, messages.Boosty()), nil
+	case "tribute":
+		if err := h.rememberPrivateUser(ctx, *msg.From); err != nil {
+			return Result{}, err
+		}
+
+		return dmTextReply(msg, messages.Tribute()), nil
 	default:
 		return Result{Ignored: true}, nil
 	}
@@ -260,6 +266,17 @@ func CommandName(text string) string {
 	}
 
 	return strings.ToLower(cmd)
+}
+
+// dmTextReply wraps a single private HTML reply to the message sender.
+func dmTextReply(msg *models.Message, text string) Result {
+	return Result{Replies: []Reply{{
+		ChatID:    msg.Chat.ID,
+		TGID:      msg.From.ID,
+		Text:      text,
+		ParseMode: messages.ParseModeHTML,
+		DM:        true,
+	}}}
 }
 
 func (h *UserCommands) statusDecision(

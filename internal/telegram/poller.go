@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/go-telegram/bot/models"
@@ -19,7 +18,6 @@ import (
 	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/messages"
 	"github.com/justskiv/gatekeeper/internal/notify"
-	"github.com/justskiv/gatekeeper/internal/redact"
 	"github.com/justskiv/gatekeeper/internal/source"
 	"github.com/justskiv/gatekeeper/internal/store"
 )
@@ -41,7 +39,6 @@ type Poller struct {
 	statusEngine   *engine.Engine
 	sourceChats    SourceChats
 	admissionCfg   admission.Config
-	rateLimiter    *admissionRateLimiter
 	chats          []HealthChat
 	ownerIDs       []int64
 	adminLogChatID *int64
@@ -107,15 +104,14 @@ func NewPoller(
 	}
 
 	poller := &Poller{
-		db:          db,
-		client:      client,
-		notifier:    notifier,
-		chats:       chats,
-		ownerIDs:    ownerIDs,
-		logger:      logger,
-		rateLimiter: newAdmissionRateLimiter(time.Now),
-		limit:       defaultPollLimit,
-		timeout:     defaultPollTimeout,
+		db:       db,
+		client:   client,
+		notifier: notifier,
+		chats:    chats,
+		ownerIDs: ownerIDs,
+		logger:   logger,
+		limit:    defaultPollLimit,
+		timeout:  defaultPollTimeout,
 	}
 	for _, opt := range opts {
 		opt(poller)
@@ -310,6 +306,8 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 		return p.markFailed(ctx, row.UpdateID, fmt.Errorf("decode update payload: %w", err))
 	}
 
+	p.acknowledgeRetryCallback(ctx, &update)
+
 	preflight, err := p.buildPreflight(ctx, &update)
 	if err != nil {
 		if isContextDone(ctx, err) {
@@ -395,6 +393,56 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 	return nil
 }
 
+// acknowledgeRetryCallback gives a retry-access tap instant feedback before
+// the slow subscription preflight runs: it clears the inline-button spinner
+// and changes the button to a "checking" label, leaving the body intact.
+// Both calls are best-effort; failures are logged and never abort the update.
+func (p *Poller) acknowledgeRetryCallback(ctx context.Context, update *models.Update) {
+	if p.client == nil || update.CallbackQuery == nil {
+		return
+	}
+
+	query := update.CallbackQuery
+	if query.Data != messages.RetryAccessCallbackData {
+		return
+	}
+
+	if err := p.client.AnswerCallbackQuery(ctx, query.ID); err != nil {
+		if isContextDone(ctx, err) {
+			return
+		}
+
+		p.logger.Warn("failed to answer retry callback",
+			slog.Int64("tg_id", query.From.ID),
+			slog.Any("error", err))
+	}
+
+	msg := query.Message.Message
+	if msg == nil {
+		return
+	}
+
+	checking := models.InlineKeyboardMarkup{
+		InlineKeyboard: [][]models.InlineKeyboardButton{{{
+			Text:         messages.CheckingSubscription(),
+			CallbackData: messages.RetryAccessCallbackData,
+		}}},
+	}
+
+	if err := p.client.EditMessageReplyMarkup(
+		ctx, msg.Chat.ID, msg.ID, checking,
+	); err != nil {
+		if isContextDone(ctx, err) {
+			return
+		}
+
+		p.logger.Warn("failed to show retry progress",
+			slog.Int64("chat_id", msg.Chat.ID),
+			slog.Int("message_id", msg.ID),
+			slog.Any("error", err))
+	}
+}
+
 func (p *Poller) buildPreflight(
 	ctx context.Context,
 	update *models.Update,
@@ -475,10 +523,6 @@ func (p *Poller) buildAdmissionPreflight(
 		return RoutePreflight{}, false, nil
 	}
 
-	if target.rateLimited {
-		return RoutePreflight{AdmissionRateLimited: true}, true, nil
-	}
-
 	banned, err := p.isKnownBanned(ctx, target.tgID)
 	if err != nil {
 		return RoutePreflight{}, true, err
@@ -497,9 +541,8 @@ func (p *Poller) buildAdmissionPreflight(
 }
 
 type admissionPreflightTarget struct {
-	tgID        int64
-	retries     int
-	rateLimited bool
+	tgID    int64
+	retries int
 }
 
 func (p *Poller) admissionPreflightTarget(
@@ -514,25 +557,11 @@ func (p *Poller) admissionPreflightTarget(
 			return admissionPreflightTarget{}, false
 		}
 
-		if !p.rateLimiter.Allow(msg.From.ID, 30*time.Second) {
-			return admissionPreflightTarget{
-				tgID:        msg.From.ID,
-				rateLimited: true,
-			}, true
-		}
-
 		return admissionPreflightTarget{tgID: msg.From.ID}, true
 	case update.CallbackQuery != nil:
 		query := update.CallbackQuery
 		if query.Data != messages.RetryAccessCallbackData {
 			return admissionPreflightTarget{}, false
-		}
-
-		if !p.rateLimiter.Allow(query.From.ID, 30*time.Second) {
-			return admissionPreflightTarget{
-				tgID:        query.From.ID,
-				rateLimited: true,
-			}, true
 		}
 
 		return admissionPreflightTarget{tgID: query.From.ID}, true
@@ -766,8 +795,6 @@ func buildUpdateBatch(
 			}
 		}
 
-		payload = redact.JSONPayload(payload)
-
 		if update.ID+1 > nextOffset {
 			nextOffset = update.ID + 1
 		}
@@ -839,37 +866,4 @@ func messageUserID(msg *models.Message) *int64 {
 
 func int64Ptr(v int64) *int64 {
 	return &v
-}
-
-type admissionRateLimiter struct {
-	mu   sync.Mutex
-	last map[int64]time.Time
-	now  func() time.Time
-}
-
-func newAdmissionRateLimiter(now func() time.Time) *admissionRateLimiter {
-	return &admissionRateLimiter{
-		last: make(map[int64]time.Time),
-		now:  now,
-	}
-}
-
-func (l *admissionRateLimiter) Allow(tgID int64, interval time.Duration) bool {
-	if l == nil || interval <= 0 {
-		return true
-	}
-
-	now := l.now()
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	last, ok := l.last[tgID]
-	if ok && now.Sub(last) < interval {
-		return false
-	}
-
-	l.last[tgID] = now
-
-	return true
 }

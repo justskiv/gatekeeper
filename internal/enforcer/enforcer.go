@@ -234,6 +234,8 @@ func (e *Enforcer) execute(ctx context.Context, action domain.AccessAction) erro
 		return e.unban(ctx, action)
 	case domain.ActionSendDM:
 		return e.sendDM(ctx, action)
+	case domain.ActionEditMessage:
+		return e.editMessage(ctx, action)
 	case domain.ActionVerifyMember:
 		return e.verifyMember(ctx, action)
 	case domain.ActionRevokeInvite:
@@ -536,6 +538,42 @@ func (e *Enforcer) sendPayloadMessage(
 	}
 
 	return e.tg.SendFormattedMessage(ctx, chatID, text, parseMode)
+}
+
+func (e *Enforcer) editMessage(
+	ctx context.Context,
+	action domain.AccessAction,
+) error {
+	var payload editMessagePayload
+	if err := decodePayload(action, &payload); err != nil {
+		return err
+	}
+
+	if payload.ChatID == 0 || payload.MessageID == 0 {
+		return errors.New("edit_message payload requires chat_id and message_id")
+	}
+
+	if payload.Text == "" {
+		return errors.New("edit_message payload text is required")
+	}
+
+	if err := e.wait(ctx, requestKindMessage, payload.ChatID); err != nil {
+		return err
+	}
+
+	// A non-retry result (e.g. access granted) clears the keyboard so the
+	// "checking" button does not linger. The empty inline keyboard must be a
+	// non-nil slice: a nil slice marshals to JSON null, which Telegram rejects
+	// with `field "inline_keyboard" must be of type Array`.
+	markup := models.ReplyMarkup(models.InlineKeyboardMarkup{
+		InlineKeyboard: [][]models.InlineKeyboardButton{},
+	})
+	if payload.RetryButton {
+		markup = retryKeyboard()
+	}
+
+	return e.tg.EditMessageText(
+		ctx, payload.ChatID, payload.MessageID, payload.Text, markup)
 }
 
 func (e *Enforcer) verifyMember(
@@ -1054,6 +1092,13 @@ type sendDMPayload struct {
 		Text         string `json:"text"`
 		CallbackData string `json:"callback_data"`
 	} `json:"buttons,omitempty"`
+}
+
+type editMessagePayload struct {
+	ChatID      int64  `json:"chat_id"`
+	MessageID   int    `json:"message_id"`
+	Text        string `json:"text"`
+	RetryButton bool   `json:"retry_button,omitempty"`
 }
 
 type sendInvitePayload struct {

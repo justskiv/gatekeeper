@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/justskiv/gatekeeper/internal/domain"
 )
@@ -13,6 +14,8 @@ import (
 const (
 	CommandStartDescription     = "начать работу"
 	CommandHelpDescription      = "справка"
+	CommandBoostyDescription    = "оформить подписку Boosty"
+	CommandTributeDescription   = "оформить подписку Tribute"
 	CommandHereDescription      = "показать ID чата"
 	CommandStatusDescription    = "показать статус подписки"
 	CommandWhoisDescription     = "показать карточку пользователя"
@@ -32,9 +35,18 @@ const (
 	AdminConfirmButtonText  = "Подтвердить"
 	AdminCancelButtonText   = "Отмена"
 
-	MsgNoSub = "<b>Активная подписка не найдена.</b>\n" +
-		"Оформите подписку и напишите боту с того же аккаунта Telegram. " +
-		"Если подписка уже есть, нажмите кнопку проверки ещё раз."
+	// Custom emoji ids from the Decoration_Pack set, used as minimalist
+	// status signals. Rendering requires the bot owner's Telegram Premium;
+	// the plain-emoji fallback covers any client that cannot display them.
+	emojiDotGreen    = "5215584915898243758"
+	emojiDotOrange   = "5215200271512117515"
+	emojiGopherHeart = "5294107689847119376"
+
+	// Subscription sign-up links shown to users without active access.
+	// Tribute has a separate entry point for euro-denominated billing.
+	urlBoosty      = "https://boosty.to/nikolay.tuzov/"
+	urlTribute     = "https://t.me/tribute/app?startapp=s3Q5"
+	urlTributeEuro = "https://t.me/tribute/app?startapp=s3Q6"
 )
 
 // InviteLinkLine is one managed resource link shown to a user.
@@ -113,13 +125,72 @@ type ChatRoleData struct {
 	ChatID int64
 }
 
+// subscribeOptions names the paid subscription offerings, each pointing at its
+// in-bot page command. Telegram makes /boosty and /tribute tappable, and a
+// distinct command (not a /start deep link) keeps the visible command honest:
+// the chat shows /boosty or /tribute, not a bare /start with a hidden payload.
+func subscribeOptions() string {
+	return "Boosty (/boosty) или Tribute (/tribute)"
+}
+
+// Boosty is the /boosty page: where to subscribe and the chat-membership
+// requirement the bot verifies against.
+func Boosty() string {
+	return strings.Join([]string{
+		"<b>Подписка Boosty</b>",
+		"",
+		"Оформи подписку: " + SafeLink(urlBoosty, "boosty.to/nikolay.tuzov"),
+		"",
+		"Для проверки доступа нужно состоять в чате Boosty — " +
+			"бот сверяет подписку через него.",
+		"",
+		"Оформил? Отправь /start — проверю доступ.",
+	}, "\n")
+}
+
+// Tribute is the /tribute page: ruble and euro options and the channel
+// subscription requirement the bot verifies against.
+func Tribute() string {
+	return strings.Join([]string{
+		"<b>Подписка Tribute</b>",
+		"",
+		"Оплата в рублях или евро:",
+		"",
+		"• " + SafeLink(urlTribute, "Рубли"),
+		"• " + SafeLink(urlTributeEuro, "Евро"),
+		"",
+		"После оформления подписки надо подписаться на Tribute-канал — " +
+			"тогда бот подтвердит доступ.",
+		"",
+		"Оформил? Отправь /start — проверю доступ.",
+	}, "\n")
+}
+
 // Welcome returns the /start greeting.
 func Welcome() string {
 	return strings.Join([]string{
-		"<b>Добро пожаловать.</b>",
-		"Я проверю подписку и помогу попасть в закрытые чат и канал.",
-		Italic("Важно: пишите с того же аккаунта Telegram, которым оформляли подписку."),
-		"Чтобы проверить доступ, нажмите /status или отправьте /start ещё раз.",
+		"<b>Привет</b>",
+		"",
+		"Я проверю твою подписку и помогу попасть в закрытые чат и канал.",
+		"",
+		Italic("Важно: пиши с того же аккаунта Telegram, которым оформлял подписку."),
+		"",
+		"Чтобы проверить доступ, нажми /status или отправь /start ещё раз.",
+	}, "\n")
+}
+
+// NoSub is the /start reply when the user has no active subscription.
+// It is rendered alongside the «Проверить ещё раз» inline button, so the
+// copy can reference it directly.
+func NoSub() string {
+	return strings.Join([]string{
+		statusDotOrange() + "<b>Активная подписка не найдена</b>",
+		"",
+		"Чтобы получить доступ к закрытым ресурсам, оформи подписку на " +
+			subscribeOptions() + ".",
+		"",
+		"После оплаты нажми «" + RetryAccessButtonText + "» — с того же " +
+			"аккаунта Telegram, которым оформлял подписку.",
 	}, "\n")
 }
 
@@ -127,17 +198,17 @@ func Welcome() string {
 func ActiveShared(links []InviteLinkLine) string {
 	var b strings.Builder
 
-	b.WriteString("✅ <b>Подписка активна.</b>\n")
-	b.WriteString("Вступите в клубные ресурсы по ссылкам:")
+	b.WriteString(statusDotGreen() + "<b>Подписка активна</b>")
+	b.WriteString("\n\nВступай в клубные ресурсы:\n")
 
 	for _, link := range links {
 		if link.URL == "" {
 			continue
 		}
 
-		fmt.Fprintf(&b, "\n• <b>%s</b> — %s",
-			Escape(resourceText(link.Resource)),
-			SafeLink(link.URL, "открыть ссылку"))
+		fmt.Fprintf(&b, "\n• %s — %s",
+			Escape(capitalizeFirst(resourceText(link.Resource))),
+			SafeLink(link.URL, "вступить"))
 	}
 
 	return b.String()
@@ -145,54 +216,84 @@ func ActiveShared(links []InviteLinkLine) string {
 
 // ActiveDirect returns the active response for direct-invite mode.
 func ActiveDirect() string {
-	return "⏳ <b>Подписка активна.</b>\n" +
-		"Готовлю персональные ссылки для входа. Пришлю их сюда, когда они будут готовы."
+	return statusDotGreen() + "<b>Подписка активна</b>" +
+		"\n\n" +
+		"Готовлю персональные ссылки для входа — пришлю их сюда, как только будут готовы."
 }
 
 // InviteSoon tells the user that personal links are being prepared.
 func InviteSoon() string {
-	return "⏳ <b>Подписка активна.</b>\n" +
-		"Сейчас отправлю персональные ссылки для входа в закрытые ресурсы."
+	return statusDotGreen() + "<b>Подписка активна</b>" +
+		"\n\n" +
+		"Сейчас отправлю тебе персональные ссылки для входа в закрытые ресурсы."
 }
 
 // Granted confirms that a join request was approved.
 func Granted() string {
-	return "✅ <b>Доступ подтверждён.</b>\n" +
-		"Заявка на вступление одобрена. Добро пожаловать."
+	return statusGopherHeart() + "<b>Доступ подтверждён</b>" +
+		"\n\n" +
+		"Заявка одобрена — добро пожаловать в клуб."
+}
+
+// CheckingSubscription is the inline-button label shown while a retry-access
+// request runs its slow subscription check; the message body stays as is.
+func CheckingSubscription() string {
+	return "⏳ Проверяем…"
 }
 
 // TryLater asks the user to retry after a temporary check failure.
 func TryLater() string {
-	return "⏳ <b>Не удалось проверить подписку.</b>\n" +
-		"Похоже, временно недоступна проверка на нашей стороне. Попробуйте чуть позже."
+	return statusDotOrange() + "<b>Не удалось проверить подписку</b>" +
+		"\n\n" +
+		"Похоже, проверка на нашей стороне временно недоступна. Попробуй чуть позже."
+}
+
+// InviteNotRecognized explains that a join request used an invite link the
+// bot can no longer match to the user. It is an invite problem, not a
+// subscription one, so the copy points the user back to /start for fresh links.
+func InviteNotRecognized() string {
+	return statusDotOrange() + "<b>Не удалось распознать ссылку</b>" +
+		"\n\n" +
+		"Эта ссылка-приглашение не подтверждается. Запроси доступ заново " +
+		"через /start — я выдам свежие ссылки."
 }
 
 // Banned explains a manual hard-ban.
 func Banned() string {
-	return "🚫 <b>Доступ заблокирован.</b>\n" +
-		"Если вы считаете, что это ошибка, напишите владельцу."
+	return statusDotOrange() + "<b>Доступ заблокирован</b>" +
+		"\n\n" +
+		"Если думаешь, что это ошибка, напиши владельцу."
 }
 
 // AlreadyIn tells the user that all managed resources are already joined.
 func AlreadyIn() string {
-	return "✅ <b>Доступ уже выдан.</b>\n" +
-		"Вы уже состоите во всех доступных клубных ресурсах."
+	return statusDotGreen() + "<b>Доступ уже выдан</b>" +
+		"\n\n" +
+		"Ты уже состоишь во всех доступных клубных ресурсах."
 }
 
 // PersonalInviteMisused explains that an invite belongs to another account.
 func PersonalInviteMisused() string {
-	return "🚫 <b>Ссылка не для вашего аккаунта.</b>\n" +
-		"Запросите доступ со своего Telegram-аккаунта."
+	return statusDotOrange() + "<b>Ссылка не для твоего аккаунта</b>" +
+		"\n\n" +
+		"Запроси доступ со своего Telegram-аккаунта."
 }
 
 // Help returns the /help text.
 func Help() string {
 	return strings.Join([]string{
 		"<b>Как это работает</b>",
-		"Бот проверяет подписку Boosty или Tribute и выдаёт доступ в закрытые чат и канал.",
-		"<b>Важно:</b> пишите с того же аккаунта Telegram, которым оформляли подписку.",
+		"",
+		"Бот проверяет твою подписку и выдаёт доступ в закрытые чат и канал.",
+		"",
+		"<b>Важно:</b> пиши с того же аккаунта Telegram, которым оформлял подписку.",
+		"",
+		"<b>Оформить подписку</b>",
+		"",
+		"Для доступа к закрытым ресурсам оформи подписку на " + subscribeOptions() + ".",
 		"",
 		"<b>Команды</b>",
+		"",
 		"/start — запросить доступ",
 		"/status — проверить подписку и членство",
 		"/help — открыть эту справку",
@@ -215,27 +316,30 @@ func Status(
 
 	switch decision.Status {
 	case domain.StatusActive:
-		b.WriteString("✅ <b>Доступ активен.</b>\n")
+		b.WriteString(statusDotGreen() + "<b>Доступ активен</b>")
 	case domain.StatusUnknown:
-		b.WriteString("❔ <b>Статус проверяется.</b>\n")
+		b.WriteString(statusDotOrange() + "<b>Проверяем доступ</b>")
 	default:
-		b.WriteString("🚫 <b>Активная подписка не найдена.</b>\n")
+		b.WriteString(statusDotOrange() + "<b>Активная подписка не найдена</b>")
 	}
+
+	b.WriteString("\n\n")
 
 	if len(subscriptions) == 0 {
 		switch decision.Status {
 		case domain.StatusActive:
-			b.WriteString("Доступ сейчас активен. Активная подписка в подключённых источниках не показана.\n")
+			b.WriteString("Доступ активен. Активная подписка в подключённых источниках не показана.")
 		case domain.StatusUnknown:
-			b.WriteString("Проверка временно недоступна. Попробуйте позже.\n")
+			b.WriteString("Проверка временно недоступна. Попробуй позже.")
 		default:
-			b.WriteString("Оформите подписку и напишите боту с того же аккаунта Telegram.\n")
+			b.WriteString("Для получения доступа к закрытым ресурсам оформи подписку на " +
+				subscribeOptions() + ". Подробнее: /help")
 		}
 	} else {
-		b.WriteString("<b>Подписки</b>\n")
+		b.WriteString("<b>Действующие подписки:</b>\n")
 
 		for _, sub := range subscriptions {
-			fmt.Fprintf(&b, "• %s", Escape(platformText(sub.Platform)))
+			fmt.Fprintf(&b, "\n• %s", Escape(platformText(sub.Platform)))
 
 			if sub.ExpiresAt != nil {
 				fmt.Fprintf(&b, " до %s", Escape(dateText(*sub.ExpiresAt)))
@@ -244,60 +348,55 @@ func Status(
 			if sub.Tier != "" {
 				fmt.Fprintf(&b, " (%s)", Escape(sub.Tier))
 			}
-
-			b.WriteByte('\n')
 		}
 	}
 
-	b.WriteString("<b>Клубные ресурсы</b>\n")
+	b.WriteString("\n\n<b>Клубные ресурсы:</b>\n")
 
 	if len(grants) == 0 {
-		b.WriteString("• доступ ещё не выдавался\n")
+		b.WriteString("\n• доступ ещё не выдавался")
 	} else {
 		for _, grant := range grants {
-			fmt.Fprintf(&b, "• %s — %s\n",
-				Escape(resourceText(grant.Resource)),
-				Escape(grantStateText(grant.State)))
+			fmt.Fprintf(&b, "\n• %s — %s",
+				Escape(capitalizeFirst(resourceText(grant.Resource))),
+				Escape(resourceMembershipText(grant.Resource, grant.State)))
 		}
 	}
 
-	switch decision.Status {
-	case domain.StatusActive:
-		b.WriteString("Если не видите чат или канал, отправьте /start для повторной выдачи доступа.")
-	case domain.StatusUnknown:
-		b.WriteString("Попробуйте /status позже или отправьте /start для повторной проверки.")
-	default:
-		b.WriteString("После оформления подписки отправьте /start, чтобы получить доступ.")
-	}
+	b.WriteString("\n\nДля получения доступа отправь команду /start")
 
 	return strings.TrimSpace(b.String())
 }
 
 // AccessKept returns the grace-period cancellation notification.
 func AccessKept() string {
-	return "✅ <b>Подписка снова активна.</b>\n" +
-		"Запланированный отзыв доступа отменён. Действие не требуется."
+	return statusGopherHeart() + "<b>Подписка снова активна</b>" +
+		"\n\n" +
+		"Запланированный отзыв доступа отменён — делать ничего не нужно."
 }
 
 // ExpiryWarning warns a user that access will be revoked after grace.
 func ExpiryWarning(until time.Time) string {
 	return fmt.Sprintf(
-		"⏳ <b>Активная подписка не найдена.</b>\n"+
-			"Доступ сохранён до %s. Продлите подписку, чтобы остаться в клубе.",
+		statusDotOrange()+"<b>Активная подписка не найдена</b>"+
+			"\n\n"+
+			"Доступ сохранён до %s. Продли подписку, чтобы остаться в клубе.",
 		Escape(dateTimeText(until)),
 	)
 }
 
 // ExpiredNotice informs a user about inactive access in notify-only mode.
 func ExpiredNotice() string {
-	return "⏳ <b>Активная подписка не найдена.</b>\n" +
-		"Доступ пока сохранён. Продлите подписку, чтобы остаться в клубе."
+	return statusDotOrange() + "<b>Активная подписка не найдена</b>" +
+		"\n\n" +
+		"Доступ пока сохранён. Продли подписку, чтобы остаться в клубе."
 }
 
 // Revoked informs a user that club access was revoked.
 func Revoked() string {
-	return "🚫 <b>Доступ в клуб отозван.</b>\n" +
-		"Чтобы вернуться, продлите подписку и отправьте /start."
+	return statusDotOrange() + "<b>Доступ в клуб отозван</b>" +
+		"\n\n" +
+		"Чтобы вернуться, продли подписку и отправь /start."
 }
 
 // AdminConfirm renders a compact owner confirmation prompt.
@@ -898,6 +997,57 @@ func grantStateText(state domain.GrantState) string {
 	default:
 		return string(state)
 	}
+}
+
+// resourceMembershipText phrases a user's membership with friendly,
+// second-person wording tailored to the resource type: a channel is something
+// you subscribe to, a chat is something you belong to. Only the joined state
+// counts as present; pending (link issued, no join yet) and left both read as
+// "not in".
+func resourceMembershipText(resource domain.Resource, state domain.GrantState) string {
+	joined := state == domain.GrantJoined
+
+	switch resource {
+	case domain.ResourceChannel:
+		if joined {
+			return "подписан"
+		}
+
+		return "не подписан"
+	case domain.ResourceChat:
+		if joined {
+			return "состоишь"
+		}
+
+		return "не состоишь"
+	default:
+		if joined {
+			return "доступ есть"
+		}
+
+		return "доступа нет"
+	}
+}
+
+// statusDotGreen and statusDotOrange render the minimalist status signals.
+func statusDotGreen() string  { return CustomEmoji(emojiDotGreen, "🟢") }
+func statusDotOrange() string { return CustomEmoji(emojiDotOrange, "🟠") }
+
+// statusGopherHeart renders the brand "welcome / thank you" accent, used only
+// in genuine join-approved and access-kept moments.
+func statusGopherHeart() string { return CustomEmoji(emojiGopherHeart, "❤️") }
+
+// capitalizeFirst upper-cases the first rune, polishing list items that start
+// a line (resource names are stored lower-case for inline owner views).
+func capitalizeFirst(s string) string {
+	if s == "" {
+		return s
+	}
+
+	r := []rune(s)
+	r[0] = unicode.ToUpper(r[0])
+
+	return string(r)
 }
 
 func dmStateText(state domain.DMState) string {

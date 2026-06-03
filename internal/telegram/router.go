@@ -100,8 +100,7 @@ type SourceChats struct {
 
 // RoutePreflight contains network reads performed before handleTx.
 type RoutePreflight struct {
-	Snapshot             *engine.Snapshot
-	AdmissionRateLimited bool
+	Snapshot *engine.Snapshot
 }
 
 // RouterOption configures optional routes.
@@ -218,7 +217,7 @@ func (r *Router) routeMessage(
 		r.canRunAdmission() &&
 		isAccessRequestMessage(msg) {
 		return r.routeAdmissionAccess(ctx, userFromTelegram(*msg.From, domain.DMOpen),
-			"message")
+			"message", accessEditTarget{})
 	}
 
 	commands := commandbot.NewCommands(commandbot.CommandDeps{
@@ -360,21 +359,49 @@ func (r *Router) routeCallback(
 		return ignored(), nil
 	}
 
+	var edit accessEditTarget
+	if chatID, messageID, ok := callbackMessageCoords(query); ok {
+		edit = accessEditTarget{chatID: chatID, messageID: messageID}
+	}
+
 	return r.routeAdmissionAccess(ctx,
-		userFromTelegram(query.From, domain.DMOpen), "callback")
+		userFromTelegram(query.From, domain.DMOpen), "callback", edit)
+}
+
+// accessEditTarget is the in-place edit destination for a retry callback.
+// A zero value means no accessible message, so the reply falls back to a
+// fresh DM.
+type accessEditTarget struct {
+	chatID    int64
+	messageID int
+}
+
+// callbackMessageCoords extracts the chat and message id of the message a
+// callback button is attached to. Telegram delivers it as a maybe
+// inaccessible message; only the accessible variant carries coordinates.
+func callbackMessageCoords(query *models.CallbackQuery) (int64, int, bool) {
+	if query.Message.Message == nil {
+		return 0, 0, false
+	}
+
+	msg := query.Message.Message
+
+	return msg.Chat.ID, msg.ID, true
 }
 
 func (r *Router) routeAdmissionAccess(
 	ctx context.Context,
 	user domain.User,
 	trigger string,
+	edit accessEditTarget,
 ) (RouteResult, error) {
 	handler := r.admissionHandler()
 	if err := handler.HandleAccessRequest(ctx, admission.AccessRequest{
-		User:        user,
-		Snapshot:    r.preflight.Snapshot,
-		RateLimited: r.preflight.AdmissionRateLimited,
-		Trigger:     trigger,
+		User:          user,
+		Snapshot:      r.preflight.Snapshot,
+		Trigger:       trigger,
+		EditChatID:    edit.chatID,
+		EditMessageID: edit.messageID,
 	}); err != nil {
 		return RouteResult{}, err
 	}

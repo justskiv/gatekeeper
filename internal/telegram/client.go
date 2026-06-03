@@ -210,6 +210,79 @@ func (c *Client) sendMessage(
 	return nil
 }
 
+// AnswerCallbackQuery acknowledges a callback query so the client clears
+// the inline-button spinner. No user-facing text is shown.
+func (c *Client) AnswerCallbackQuery(ctx context.Context, callbackQueryID string) error {
+	_, err := c.bot.AnswerCallbackQuery(ctx, &botapi.AnswerCallbackQueryParams{
+		CallbackQueryID: callbackQueryID,
+	})
+	if err != nil {
+		return NormalizeError("answerCallbackQuery", err)
+	}
+
+	return nil
+}
+
+// EditMessageText edits an existing message's text and inline keyboard in
+// place using HTML parse mode. A nil replyMarkup clears the keyboard.
+// Telegram's "message is not modified" response is treated as success
+// because the desired state already matches the message.
+func (c *Client) EditMessageText(
+	ctx context.Context,
+	chatID int64,
+	messageID int,
+	text string,
+	replyMarkup models.ReplyMarkup,
+) error {
+	params := &botapi.EditMessageTextParams{
+		ChatID:    chatID,
+		MessageID: messageID,
+		Text:      text,
+		ParseMode: models.ParseModeHTML,
+	}
+	if replyMarkup != nil {
+		params.ReplyMarkup = replyMarkup
+	}
+
+	if _, err := c.bot.EditMessageText(ctx, params); err != nil {
+		if isMessageNotModified(err) {
+			return nil
+		}
+
+		return NormalizeError("editMessageText", err)
+	}
+
+	return nil
+}
+
+// EditMessageReplyMarkup edits only an existing message's inline keyboard,
+// leaving the text intact. Used to swap the retry button to a progress label
+// without disturbing the message body.
+func (c *Client) EditMessageReplyMarkup(
+	ctx context.Context,
+	chatID int64,
+	messageID int,
+	replyMarkup models.ReplyMarkup,
+) error {
+	params := &botapi.EditMessageReplyMarkupParams{
+		ChatID:    chatID,
+		MessageID: messageID,
+	}
+	if replyMarkup != nil {
+		params.ReplyMarkup = replyMarkup
+	}
+
+	if _, err := c.bot.EditMessageReplyMarkup(ctx, params); err != nil {
+		if isMessageNotModified(err) {
+			return nil
+		}
+
+		return NormalizeError("editMessageReplyMarkup", err)
+	}
+
+	return nil
+}
+
 // CreateChatInviteLink creates a managed invite link.
 func (c *Client) CreateChatInviteLink(
 	ctx context.Context,
@@ -319,6 +392,8 @@ func (c *Client) SetMyCommands(ctx context.Context, ownerIDs []int64) error {
 		{Command: "start", Description: messages.CommandStartDescription},
 		{Command: "help", Description: messages.CommandHelpDescription},
 		{Command: "status", Description: messages.CommandStatusDescription},
+		{Command: "boosty", Description: messages.CommandBoostyDescription},
+		{Command: "tribute", Description: messages.CommandTributeDescription},
 	}
 	if _, err := c.bot.SetMyCommands(ctx, &botapi.SetMyCommandsParams{
 		Commands: userCommands,
@@ -683,6 +758,11 @@ func RetryAfter(err error) (time.Duration, bool) {
 	}
 
 	return time.Duration(apiErr.RetryAfter) * time.Second, true
+}
+
+func isMessageNotModified(err error) bool {
+	return strings.Contains(
+		strings.ToLower(err.Error()), "message is not modified")
 }
 
 func isPermanentRightsText(err error) bool {
