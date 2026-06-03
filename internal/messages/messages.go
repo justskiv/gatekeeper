@@ -3,6 +3,7 @@ package messages
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,8 +32,9 @@ const (
 	AdminConfirmButtonText  = "Подтвердить"
 	AdminCancelButtonText   = "Отмена"
 
-	MsgNoSub = "Подписка пока не найдена. " +
-		"Проверьте оформление подписки и напишите боту с того же аккаунта Telegram."
+	MsgNoSub = "<b>Активная подписка не найдена.</b>\n" +
+		"Оформите подписку и напишите боту с того же аккаунта Telegram. " +
+		"Если подписка уже есть, нажмите кнопку проверки ещё раз."
 )
 
 // InviteLinkLine is one managed resource link shown to a user.
@@ -113,22 +115,29 @@ type ChatRoleData struct {
 
 // Welcome returns the /start greeting.
 func Welcome() string {
-	return "Привет! Я помогу получить доступ в закрытое сообщество. " +
-		"Оформите подписку и пишите боту с того же аккаунта Telegram."
+	return strings.Join([]string{
+		"<b>Добро пожаловать.</b>",
+		"Я проверю подписку и помогу попасть в закрытые чат и канал.",
+		Italic("Важно: пишите с того же аккаунта Telegram, которым оформляли подписку."),
+		"Чтобы проверить доступ, нажмите /status или отправьте /start ещё раз.",
+	}, "\n")
 }
 
 // ActiveShared returns the active admission response with shared links.
 func ActiveShared(links []InviteLinkLine) string {
 	var b strings.Builder
 
-	b.WriteString("Подписка активна. Вступите в клубные ресурсы по ссылкам:")
+	b.WriteString("✅ <b>Подписка активна.</b>\n")
+	b.WriteString("Вступите в клубные ресурсы по ссылкам:")
 
 	for _, link := range links {
 		if link.URL == "" {
 			continue
 		}
 
-		fmt.Fprintf(&b, "\n- %s: %s", resourceText(link.Resource), link.URL)
+		fmt.Fprintf(&b, "\n• <b>%s</b> — %s",
+			Escape(resourceText(link.Resource)),
+			SafeLink(link.URL, "открыть ссылку"))
 	}
 
 	return b.String()
@@ -136,49 +145,64 @@ func ActiveShared(links []InviteLinkLine) string {
 
 // ActiveDirect returns the active response for direct-invite mode.
 func ActiveDirect() string {
-	return "Подписка активна. Сейчас подготовлю персональные ссылки для входа."
+	return "⏳ <b>Подписка активна.</b>\n" +
+		"Готовлю персональные ссылки для входа. Пришлю их сюда, когда они будут готовы."
 }
 
 // InviteSoon tells the user that personal links are being prepared.
 func InviteSoon() string {
-	return "Подписка активна. Сейчас отправлю персональные ссылки для входа."
+	return "⏳ <b>Подписка активна.</b>\n" +
+		"Сейчас отправлю персональные ссылки для входа в закрытые ресурсы."
 }
 
 // Granted confirms that a join request was approved.
 func Granted() string {
-	return "Доступ подтверждён. Заявка на вступление одобрена."
+	return "✅ <b>Доступ подтверждён.</b>\n" +
+		"Заявка на вступление одобрена. Добро пожаловать."
 }
 
 // TryLater asks the user to retry after a temporary check failure.
 func TryLater() string {
-	return "Не удалось надёжно проверить подписку. Попробуйте ещё раз чуть позже."
+	return "⏳ <b>Не удалось проверить подписку.</b>\n" +
+		"Похоже, временно недоступна проверка на нашей стороне. Попробуйте чуть позже."
 }
 
 // Banned explains a manual hard-ban.
 func Banned() string {
-	return "Доступ для этого аккаунта заблокирован. Если это ошибка, напишите владельцу."
+	return "🚫 <b>Доступ заблокирован.</b>\n" +
+		"Если вы считаете, что это ошибка, напишите владельцу."
 }
 
 // AlreadyIn tells the user that all managed resources are already joined.
 func AlreadyIn() string {
-	return "Доступ уже выдан: вы уже состоите в клубных ресурсах."
+	return "✅ <b>Доступ уже выдан.</b>\n" +
+		"Вы уже состоите во всех доступных клубных ресурсах."
 }
 
 // PersonalInviteMisused explains that an invite belongs to another account.
 func PersonalInviteMisused() string {
-	return "Эта ссылка выпущена для другого аккаунта. Запросите доступ через свой Telegram."
+	return "🚫 <b>Ссылка не для вашего аккаунта.</b>\n" +
+		"Запросите доступ со своего Telegram-аккаунта."
 }
 
 // Help returns the /help text.
 func Help() string {
-	return "Бот проверяет подписку Boosty или Tribute и выдаёт доступ " +
-		"в закрытые чат и канал. Важно: пишите с того же аккаунта Telegram, " +
-		"которым оформляли подписку."
+	return strings.Join([]string{
+		"<b>Как это работает</b>",
+		"Бот проверяет подписку Boosty или Tribute и выдаёт доступ в закрытые чат и канал.",
+		"<b>Важно:</b> пишите с того же аккаунта Telegram, которым оформляли подписку.",
+		"",
+		"<b>Команды</b>",
+		"/start — запросить доступ",
+		"/status — проверить подписку и членство",
+		"/help — открыть эту справку",
+	}, "\n")
 }
 
 // Here returns a chat discovery response for owners.
 func Here(chatID int64, chatType string) string {
-	return fmt.Sprintf("chat.id: %d\nchat.type: %s", chatID, chatType)
+	return fmt.Sprintf("<b>Этот чат</b>\nID: %s\nТип: %s",
+		Code(strconv.FormatInt(chatID, 10)), Code(chatType))
 }
 
 // Status returns the /status response.
@@ -188,44 +212,62 @@ func Status(
 	grants []domain.AccessGrant,
 ) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Статус доступа: %s\n", effectiveStatusText(decision.Status))
+
+	switch decision.Status {
+	case domain.StatusActive:
+		b.WriteString("✅ <b>Доступ активен.</b>\n")
+	case domain.StatusUnknown:
+		b.WriteString("❔ <b>Статус проверяется.</b>\n")
+	default:
+		b.WriteString("🚫 <b>Активная подписка не найдена.</b>\n")
+	}
 
 	if len(subscriptions) == 0 {
-		b.WriteString(MsgNoSub)
-		b.WriteByte('\n')
+		switch decision.Status {
+		case domain.StatusActive:
+			b.WriteString("Доступ сейчас активен. Активная подписка в подключённых источниках не показана.\n")
+		case domain.StatusUnknown:
+			b.WriteString("Проверка временно недоступна. Попробуйте позже.\n")
+		default:
+			b.WriteString("Оформите подписку и напишите боту с того же аккаунта Telegram.\n")
+		}
 	} else {
-		b.WriteString("Активные подписки:\n")
+		b.WriteString("<b>Подписки</b>\n")
 
 		for _, sub := range subscriptions {
-			fmt.Fprintf(&b, "- %s", platformText(sub.Platform))
+			fmt.Fprintf(&b, "• %s", Escape(platformText(sub.Platform)))
 
 			if sub.ExpiresAt != nil {
-				fmt.Fprintf(&b, " до %s", dateText(*sub.ExpiresAt))
+				fmt.Fprintf(&b, " до %s", Escape(dateText(*sub.ExpiresAt)))
 			}
 
 			if sub.Tier != "" {
-				fmt.Fprintf(&b, " (%s)", sub.Tier)
+				fmt.Fprintf(&b, " (%s)", Escape(sub.Tier))
 			}
 
 			b.WriteByte('\n')
 		}
 	}
-	// Access grants are populated by the later admit flow; live source
-	// membership is already visible through subscriptions and reasons.
-	b.WriteString("Клубные ресурсы:\n")
+
+	b.WriteString("<b>Клубные ресурсы</b>\n")
 
 	if len(grants) == 0 {
-		b.WriteString("- доступы в чат и канал ещё не выдавались\n")
+		b.WriteString("• доступ ещё не выдавался\n")
 	} else {
 		for _, grant := range grants {
-			fmt.Fprintf(&b, "- %s: %s\n",
-				resourceText(grant.Resource), grantStateText(grant.State))
+			fmt.Fprintf(&b, "• %s — %s\n",
+				Escape(resourceText(grant.Resource)),
+				Escape(grantStateText(grant.State)))
 		}
 	}
 
-	if len(decision.Reasons) > 0 {
-		b.WriteString("Проверка источников:\n")
-		appendReasons(&b, decision.Reasons)
+	switch decision.Status {
+	case domain.StatusActive:
+		b.WriteString("Если не видите чат или канал, отправьте /start для повторной выдачи доступа.")
+	case domain.StatusUnknown:
+		b.WriteString("Попробуйте /status позже или отправьте /start для повторной проверки.")
+	default:
+		b.WriteString("После оформления подписки отправьте /start, чтобы получить доступ.")
 	}
 
 	return strings.TrimSpace(b.String())
@@ -233,55 +275,59 @@ func Status(
 
 // AccessKept returns the grace-period cancellation notification.
 func AccessKept() string {
-	return "Подписка снова активна. Запланированный отзыв доступа отменён."
+	return "✅ <b>Подписка снова активна.</b>\n" +
+		"Запланированный отзыв доступа отменён. Действие не требуется."
 }
 
 // ExpiryWarning warns a user that access will be revoked after grace.
 func ExpiryWarning(until time.Time) string {
 	return fmt.Sprintf(
-		"Подписка не найдена. Доступ будет отозван после %s, если подписка не вернётся.",
-		dateTimeText(until),
+		"⏳ <b>Активная подписка не найдена.</b>\n"+
+			"Доступ сохранён до %s. Продлите подписку, чтобы остаться в клубе.",
+		Escape(dateTimeText(until)),
 	)
 }
 
 // ExpiredNotice informs a user about inactive access in notify-only mode.
 func ExpiredNotice() string {
-	return "Подписка не найдена. Доступ пока сохранён, но его нужно продлить."
+	return "⏳ <b>Активная подписка не найдена.</b>\n" +
+		"Доступ пока сохранён. Продлите подписку, чтобы остаться в клубе."
 }
 
 // Revoked informs a user that club access was revoked.
 func Revoked() string {
-	return "Подписка не активна. Доступ в клубные ресурсы отозван."
+	return "🚫 <b>Доступ в клуб отозван.</b>\n" +
+		"Чтобы вернуться, продлите подписку и отправьте /start."
 }
 
 // AdminConfirm renders a compact owner confirmation prompt.
 func AdminConfirm(summary string) string {
-	return "Подтвердите действие:\n" + summary
+	return "⚠️ <b>Подтвердите действие</b>\n" + summary
 }
 
 // AdminConfirmed renders a successful owner action result.
 func AdminConfirmed(summary string) string {
-	return "Готово.\n" + summary
+	return "✅ <b>Готово.</b>\n" + summary
 }
 
 // AdminCancelled reports a cancelled confirmation.
 func AdminCancelled() string {
-	return "Действие отменено."
+	return "<b>Действие отменено.</b>"
 }
 
 // AdminConfirmationExpired reports an expired confirmation.
 func AdminConfirmationExpired() string {
-	return "Действие устарело. Повторите команду."
+	return "⏳ <b>Действие устарело.</b>\nПодтверждение живёт 5 минут."
 }
 
 // AdminConfirmationInProgress reports a confirmation already being executed.
 func AdminConfirmationInProgress() string {
-	return "Действие уже выполняется."
+	return "⏳ <b>Действие уже выполняется.</b>"
 }
 
 // AdminSyncUnavailable reports a temporary missing sync dependency.
 func AdminSyncUnavailable() string {
-	return "Сверка сейчас недоступна."
+	return "❔ <b>Сверка сейчас недоступна.</b>"
 }
 
 // AdminActionAllUsers renders a full-sync action target.
@@ -289,56 +335,89 @@ func AdminActionAllUsers() string {
 	return "все пользователи"
 }
 
+// AdminActionTargetID renders one owner command target.
+func AdminActionTargetID(tgID int64) string {
+	return Code(strconv.FormatInt(tgID, 10))
+}
+
+// AdminActionSummary renders the stable confirmation summary header.
+func AdminActionSummary(kind, target string) string {
+	return fmt.Sprintf("Действие: %s\nЦель: %s",
+		Escape(adminActionKindText(kind)), target)
+}
+
 // AdminActionExpiryLine renders an admin action expiry summary line.
 func AdminActionExpiryLine(until time.Time) string {
-	return "Срок: " + until.Format(time.RFC3339)
+	return "Срок: " + Escape(dateTimeText(until))
 }
 
 // AdminActionReasonLine renders an admin action reason summary line.
 func AdminActionReasonLine(reason string) string {
-	return "Причина: " + reason
+	return "Причина: " + Code(reason)
+}
+
+func adminActionKindText(kind string) string {
+	switch kind {
+	case "grant":
+		return "выдать доступ"
+	case "revoke":
+		return "отозвать ручной доступ"
+	case "ban":
+		return "заблокировать пользователя"
+	case "unban":
+		return "снять блокировку"
+	case "sync":
+		return "запустить сверку"
+	default:
+		return kind
+	}
 }
 
 // AdminCommandUsage returns a short usage hint for owner commands.
 func AdminCommandUsage(command string) string {
 	switch command {
 	case "grant":
-		return "Используйте: /grant <tg_id|@username> [срок] [причина]"
+		return "Используйте: " + Code("/grant <tg_id|@username> [срок] [причина]")
 	case "revoke":
-		return "Используйте: /revoke <tg_id|@username> [причина]"
+		return "Используйте: " + Code("/revoke <tg_id|@username> [причина]")
 	case "ban":
-		return "Используйте: /ban <tg_id|@username> [причина]"
+		return "Используйте: " + Code("/ban <tg_id|@username> [причина]")
 	case "unban":
-		return "Используйте: /unban <tg_id|@username> [причина]"
+		return "Используйте: " + Code("/unban <tg_id|@username> [причина]")
 	case "sync":
-		return "Используйте: /sync [tg_id|@username]"
+		return "Используйте: " + Code("/sync [tg_id|@username]")
 	default:
-		return "Команда указана неверно."
+		return "<b>Команда указана неверно.</b>"
 	}
 }
 
 // AdminHelp returns the owner/admin command reference.
 func AdminHelp() string {
 	return strings.Join([]string{
-		"Команды владельца:",
-		"/here — показать chat.id текущего чата",
-		"/whois <tg_id|@username> — карточка пользователя",
-		"/grant <tg_id|@username> [срок] [причина] — выдать доступ",
-		"/revoke <tg_id|@username> [причина] — отозвать ручной доступ",
-		"/ban <tg_id|@username> [причина] — заблокировать доступ",
-		"/unban <tg_id|@username> [причина] — снять блокировку",
-		"/sync [tg_id|@username] — запустить сверку",
-		"/stats — сводка состояния",
-		"/alerts — открытые тревоги",
-		"/export — CSV users/subscriptions только в личке",
-		"/chats — настроенные роли чатов",
-		"/help_admin — эта справка",
+		"<b>Команды владельца</b>",
+		"",
+		"<b>Поиск</b>",
+		Code("/here") + " — показать ID текущего чата",
+		Code("/whois <tg_id|@username>") + " — карточка пользователя",
+		"",
+		"<b>Доступ</b>",
+		Code("/grant <tg_id|@username> [срок] [причина]") + " — выдать доступ",
+		Code("/revoke <tg_id|@username> [причина]") + " — отозвать ручной доступ",
+		Code("/ban <tg_id|@username> [причина]") + " — заблокировать доступ",
+		Code("/unban <tg_id|@username> [причина]") + " — снять блокировку",
+		"",
+		"<b>Операции</b>",
+		Code("/sync [tg_id|@username]") + " — запустить сверку",
+		Code("/stats") + " — сводка состояния",
+		Code("/alerts") + " — открытые тревоги",
+		Code("/chats") + " — настроенные роли чатов",
+		Code("/export") + " — CSV users/subscriptions только в личке",
 	}, "\n")
 }
 
 // OpsUnavailable reports missing read-model dependencies.
 func OpsUnavailable() string {
-	return "Операционная сводка сейчас недоступна."
+	return "❔ <b>Операционная сводка сейчас недоступна.</b>"
 }
 
 // OpsStats renders the owner-facing /stats summary.
@@ -346,44 +425,50 @@ func OpsUnavailable() string {
 //nolint:wsl_v5 // String-builder formatting is clearer without extra gaps.
 func OpsStats(data OpsStatsData) string {
 	var b strings.Builder
-	b.WriteString("Сводка состояния\n")
+	b.WriteString("<b>Сводка состояния</b>\n")
+	b.WriteString("Рутинный статус. Действие не требуется, если ниже нет ошибок.\n")
 
-	b.WriteString("Активные подписки:\n")
+	b.WriteString("\n<b>Подписки</b>\n")
 	if len(data.ActiveSubscriptions) == 0 {
-		b.WriteString("- нет\n")
+		b.WriteString("• нет активных записей\n")
 	} else {
 		for _, count := range data.ActiveSubscriptions {
-			fmt.Fprintf(&b, "- %s: %d\n", count.Name, count.Count)
+			fmt.Fprintf(&b, "• %s: %s\n",
+				Escape(count.Name), Code(strconv.Itoa(count.Count)))
 		}
 	}
 
-	b.WriteString("Доступы:\n")
+	b.WriteString("<b>Доступы</b>\n")
 	if len(data.Grants) == 0 {
-		b.WriteString("- нет\n")
+		b.WriteString("• нет\n")
 	} else {
 		for _, count := range data.Grants {
-			fmt.Fprintf(&b, "- %s/%s: %d\n",
-				count.Resource, count.State, count.Count)
+			fmt.Fprintf(&b, "• %s / %s: %s\n",
+				Escape(resourceText(domain.Resource(count.Resource))),
+				Escape(grantStateText(domain.GrantState(count.State))),
+				Code(strconv.Itoa(count.Count)))
 		}
 	}
 
-	fmt.Fprintf(&b, "Отзывы доступа: pending=%d due=%d\n",
-		data.PendingRevocations, data.DueRevocations)
+	fmt.Fprintf(&b, "<b>Отзывы доступа</b>\n• ожидают: %s\n• готовы: %s\n",
+		Code(strconv.Itoa(data.PendingRevocations)),
+		Code(strconv.Itoa(data.DueRevocations)))
 
-	b.WriteString("Health:\n")
+	b.WriteString("<b>Health</b>\n")
 	if len(data.Health) == 0 {
-		b.WriteString("- нет данных\n")
+		b.WriteString("• нет данных\n")
 	} else {
 		for _, health := range data.Health {
-			fmt.Fprintf(&b, "- %s: %s\n", health.Name, health.Value)
+			fmt.Fprintf(&b, "• %s: %s\n",
+				Escape(health.Name), Code(health.Value))
 		}
 	}
 
 	if data.ReconcileLastRunAt == nil {
-		b.WriteString("Последняя сверка: нет данных\n")
+		b.WriteString("<b>Последняя сверка</b>: нет данных\n")
 	} else {
-		fmt.Fprintf(&b, "Последняя сверка: %s\n",
-			data.ReconcileLastRunAt.UTC().Format(time.RFC3339))
+		fmt.Fprintf(&b, "<b>Последняя сверка</b>: %s\n",
+			Code(data.ReconcileLastRunAt.UTC().Format(time.RFC3339)))
 	}
 
 	pendingOutbox := 0
@@ -397,8 +482,9 @@ func OpsStats(data OpsStatsData) string {
 		}
 	}
 
-	fmt.Fprintf(&b, "Outbox: pending=%d dead=%d\n", pendingOutbox, deadOutbox)
-	fmt.Fprintf(&b, "Открытые тревоги: %d", data.OpenAlerts)
+	fmt.Fprintf(&b, "<b>Outbox</b>: pending=%s dead=%s\n",
+		Code(strconv.Itoa(pendingOutbox)), Code(strconv.Itoa(deadOutbox)))
+	fmt.Fprintf(&b, "<b>Открытые тревоги</b>: %s", Code(strconv.Itoa(data.OpenAlerts)))
 
 	return b.String()
 }
@@ -408,19 +494,17 @@ func OpsStats(data OpsStatsData) string {
 //nolint:wsl_v5 // String-builder formatting is clearer without extra gaps.
 func OpsAlerts(alerts []OpsAlertData) string {
 	if len(alerts) == 0 {
-		return "Открытых тревог нет."
+		return "✅ <b>Открытых тревог нет.</b>\nДействие не требуется."
 	}
 
 	var b strings.Builder
-	b.WriteString("Открытые тревоги\n")
+	fmt.Fprintf(&b, "<b>Открытые тревоги (%s)</b>\n", Code(strconv.Itoa(len(alerts))))
 	for _, alert := range alerts {
-		fmt.Fprintf(&b, "- #%d %s %s: %s (%s)\n",
-			alert.ID,
-			alert.Severity,
-			alert.Kind,
-			alert.Title,
-			alert.CreatedAt.UTC().Format(time.RFC3339),
-		)
+		fmt.Fprintf(&b, "%s %s\n", severityGlyph(alert.Severity), Escape(alert.Title))
+		fmt.Fprintf(&b, "• ID: %s\n", Code(strconv.FormatInt(alert.ID, 10)))
+		fmt.Fprintf(&b, "• Тип: %s\n", Code(alert.Kind))
+		fmt.Fprintf(&b, "• Создана: %s\n",
+			Code(alert.CreatedAt.UTC().Format(time.RFC3339)))
 	}
 
 	return strings.TrimSpace(b.String())
@@ -431,9 +515,10 @@ func OpsAlerts(alerts []OpsAlertData) string {
 //nolint:wsl_v5 // String-builder formatting is clearer without extra gaps.
 func OpsChats(roles []ChatRoleData) string {
 	var b strings.Builder
-	b.WriteString("Настроенные чаты\n")
+	b.WriteString("<b>Настроенные чаты</b>\n")
 	for _, role := range roles {
-		fmt.Fprintf(&b, "- %s: %d\n", role.Role, role.ChatID)
+		fmt.Fprintf(&b, "• %s: %s\n",
+			Escape(role.Role), Code(strconv.FormatInt(role.ChatID, 10)))
 	}
 
 	return strings.TrimSpace(b.String())
@@ -441,20 +526,32 @@ func OpsChats(roles []ChatRoleData) string {
 
 // SyncSummary renders owner-facing reconciliation result counters.
 func SyncSummary(processed, failed int) string {
-	return fmt.Sprintf("Сверка завершена. Обработано: %d. Ошибок: %d.",
-		processed, failed)
+	marker := "✅"
+	suffix := ""
+	if failed > 0 {
+		marker = "⚠️"
+		suffix = " с ошибками"
+	}
+
+	return fmt.Sprintf("%s <b>Сверка завершена%s.</b>\n• обработано: %s\n• ошибок: %s",
+		marker,
+		suffix,
+		Code(strconv.Itoa(processed)),
+		Code(strconv.Itoa(failed)))
 }
 
 // OperatorAlert renders a durable operator alert.
 func OperatorAlert(severity, kind, title, detail string) string {
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "Тревога: %s\n", title)
-	fmt.Fprintf(&b, "Уровень: %s\n", severity)
-	fmt.Fprintf(&b, "Тип: %s", kind)
+	fmt.Fprintf(&b, "%s <b>%s</b>\n", severityGlyph(severity), Escape(title))
+	b.WriteString("Влияние: требуется внимание владельца.\n")
+	b.WriteString("Действие: проверьте диагностику ниже и состояние /alerts.\n")
+	fmt.Fprintf(&b, "Диагностика:\n• Уровень: %s\n• Тип: %s",
+		Code(severity), Code(kind))
 
 	if detail != "" {
-		fmt.Fprintf(&b, "\nДетали: %s", detail)
+		fmt.Fprintf(&b, "\n• Детали: %s", Code(detail))
 	}
 
 	return b.String()
@@ -462,12 +559,12 @@ func OperatorAlert(severity, kind, title, detail string) string {
 
 // WhoisUsage returns the /whois usage hint.
 func WhoisUsage() string {
-	return "Используйте: /whois <tg_id|@username>"
+	return "Используйте: " + Code("/whois <tg_id|@username>")
 }
 
 // WhoisNotFound returns a local lookup miss message.
 func WhoisNotFound(query string) string {
-	return fmt.Sprintf("Пользователь %s не найден в локальной базе.", query)
+	return fmt.Sprintf("❔ <b>Пользователь %s не найден.</b>", Escape(query))
 }
 
 // Whois returns the owner-facing user card.
@@ -481,80 +578,88 @@ func Whois(data WhoisData) string {
 		name = "(без имени)"
 	}
 
-	fmt.Fprintf(&b, "Пользователь: %d", user.TGID)
+	fmt.Fprintf(&b, "<b>Пользователь %s</b>\n", Code(strconv.FormatInt(user.TGID, 10)))
 
 	if user.Username != "" {
-		fmt.Fprintf(&b, " (@%s)", user.Username)
+		fmt.Fprintf(&b, "Username: %s\n", Code("@"+user.Username))
 	}
 
-	fmt.Fprintf(&b, "\nИмя: %s\n", name)
-	fmt.Fprintf(&b, "Личка: %s\n", dmStateText(user.DMState))
-	fmt.Fprintf(&b, "Белый список: %s\n", yesNo(data.Whitelisted))
-	fmt.Fprintf(&b, "Бан: %s", yesNo(user.Banned))
+	fmt.Fprintf(&b, "Имя: %s\n", Escape(name))
+	fmt.Fprintf(&b, "Статус доступа: <b>%s</b>\n",
+		Escape(effectiveStatusText(data.Decision.Status)))
 
-	if user.BannedReason != "" {
-		fmt.Fprintf(&b, " (%s)", user.BannedReason)
-	}
-
-	b.WriteByte('\n')
-	fmt.Fprintf(&b, "Статус доступа: %s\n",
-		effectiveStatusText(data.Decision.Status))
-
-	b.WriteString("Подписки:\n")
-
-	if len(data.Subscriptions) == 0 {
-		b.WriteString("- нет записей\n")
+	b.WriteString("\n<b>Основание</b>\n")
+	if len(data.Subscriptions) == 0 && !data.Whitelisted {
+		b.WriteString("• активных подписок или ручного основания нет\n")
 	} else {
 		for _, sub := range data.Subscriptions {
-			fmt.Fprintf(&b, "- %s: %s",
-				platformText(sub.Platform), subscriptionStatusText(sub.Status))
+			fmt.Fprintf(&b, "• %s — %s",
+				Escape(platformText(sub.Platform)),
+				Escape(subscriptionStatusText(sub.Status)))
 
 			if sub.ExpiresAt != nil {
-				fmt.Fprintf(&b, " до %s", dateText(*sub.ExpiresAt))
+				fmt.Fprintf(&b, " до %s", Escape(dateText(*sub.ExpiresAt)))
 			}
 
 			if sub.EndedAt != nil {
-				fmt.Fprintf(&b, ", завершена %s", dateText(*sub.EndedAt))
+				fmt.Fprintf(&b, ", завершена %s", Escape(dateText(*sub.EndedAt)))
 			}
 
 			b.WriteByte('\n')
 		}
+
+		if data.Whitelisted {
+			b.WriteString("• ручное основание: активно\n")
+		}
 	}
 
-	b.WriteString("Доступы:\n")
-
+	b.WriteString("<b>Гранты</b>\n")
 	if len(data.Grants) == 0 {
-		b.WriteString("- нет записей\n")
+		b.WriteString("• нет записей\n")
 	} else {
 		for _, grant := range data.Grants {
-			fmt.Fprintf(&b, "- %s: %s\n",
-				resourceText(grant.Resource), grantStateText(grant.State))
+			fmt.Fprintf(&b, "• %s — %s\n",
+				Escape(resourceText(grant.Resource)),
+				Escape(grantStateText(grant.State)))
+		}
+	}
+
+	b.WriteString("<b>Профиль</b>\n")
+	fmt.Fprintf(&b, "• Личка: %s\n", Escape(dmStateText(user.DMState)))
+	fmt.Fprintf(&b, "• Белый список: %s\n", Escape(yesNo(data.Whitelisted)))
+	fmt.Fprintf(&b, "• Бан: %s", Escape(yesNo(user.Banned)))
+
+	if user.BannedReason != "" {
+		fmt.Fprintf(&b, " (%s)", Code(user.BannedReason))
+	}
+
+	b.WriteByte('\n')
+
+	b.WriteString("<b>Последние события</b>\n")
+
+	if len(data.Audit) == 0 {
+		b.WriteString("• нет записей\n")
+	} else {
+		for _, audit := range data.Audit {
+			fmt.Fprintf(&b, "• %s %s",
+				Escape(dateTimeText(audit.CreatedAt)),
+				Code(audit.Kind))
+
+			if audit.Source != "" {
+				fmt.Fprintf(&b, " [%s]", Code(audit.Source))
+			}
+
+			if audit.Detail != "" {
+				fmt.Fprintf(&b, ": %s", Code(audit.Detail))
+			}
+
+			b.WriteByte('\n')
 		}
 	}
 
 	if len(data.Decision.Reasons) > 0 {
-		b.WriteString("Причины:\n")
+		b.WriteString("<b>Диагностика</b>\n")
 		appendReasons(&b, data.Decision.Reasons)
-	}
-
-	b.WriteString("Последний аудит:\n")
-
-	if len(data.Audit) == 0 {
-		b.WriteString("- нет записей\n")
-	} else {
-		for _, audit := range data.Audit {
-			fmt.Fprintf(&b, "- %s %s", dateTimeText(audit.CreatedAt), audit.Kind)
-
-			if audit.Source != "" {
-				fmt.Fprintf(&b, " [%s]", audit.Source)
-			}
-
-			if audit.Detail != "" {
-				fmt.Fprintf(&b, ": %s", audit.Detail)
-			}
-
-			b.WriteByte('\n')
-		}
 	}
 
 	return strings.TrimSpace(b.String())
@@ -567,28 +672,34 @@ func UnknownChat(chatID int64, chatType, title string) string {
 	}
 
 	return fmt.Sprintf(
-		"Бот добавлен в новый чат.\nchat.id: %d\nchat.type: %s\nНазвание: %s",
-		chatID, chatType, title)
+		"⚠️ <b>Бот добавлен в новый чат.</b>\nНазвание: %s\nID: %s\nТип: %s\n%s",
+		Escape(title),
+		Code(strconv.FormatInt(chatID, 10)),
+		Code(chatType),
+		Italic("Проверьте, должен ли этот чат быть в конфигурации."))
 }
 
 // HealthFailure returns an owner DM for a degraded configured chat.
 func HealthFailure(chatName string, chatID int64, reason string) string {
 	return fmt.Sprintf(
-		"Проблема с правами бота в %s.\nchat.id: %d\nПричина: %s",
-		chatName, chatID, reason)
+		"⚠️ <b>Проблема с правами бота.</b>\nЧат: %s\nID: %s\nПричина: %s\nДействие: проверьте права бота в этом чате.",
+		Escape(chatName),
+		Code(strconv.FormatInt(chatID, 10)),
+		Code(reason))
 }
 
 // HealthRestored returns an owner DM for restored bot rights.
 func HealthRestored(chatName string, chatID int64) string {
 	return fmt.Sprintf(
-		"Права бота восстановлены в %s.\nchat.id: %d",
-		chatName, chatID)
+		"✅ <b>Права бота восстановлены.</b>\nЧат: %s\nID: %s\nДействие не требуется.",
+		Escape(chatName),
+		Code(strconv.FormatInt(chatID, 10)))
 }
 
 // WhoisUnavailable returns an owner-facing message when /whois was
 // created without the repositories needed to build a user card.
 func WhoisUnavailable() string {
-	return "Команда /whois сейчас недоступна: не хватает внутренних зависимостей."
+	return "❔ <b>Команда /whois сейчас недоступна.</b>\nНе хватает runtime-зависимостей для карточки."
 }
 
 // ReasonHardBan explains a manual hard-ban verdict.
@@ -683,18 +794,27 @@ func ReasonStatusNotComputed() string {
 
 func appendReasons(b *strings.Builder, reasons []domain.AccessReason) {
 	for _, reason := range reasons {
-		fmt.Fprintf(b, "- %s: %s",
-			platformText(reason.Source), verdictText(reason.Verdict))
+		fmt.Fprintf(b, "• %s: %s",
+			Code(platformText(reason.Source)), Code(verdictText(reason.Verdict)))
 
 		if reason.Detail != "" {
-			fmt.Fprintf(b, " — %s", reason.Detail)
+			fmt.Fprintf(b, " — %s", Code(reason.Detail))
 		}
 
 		if reason.Until != nil {
-			fmt.Fprintf(b, " до %s", dateText(*reason.Until))
+			fmt.Fprintf(b, " до %s", Code(dateText(*reason.Until)))
 		}
 
 		b.WriteByte('\n')
+	}
+}
+
+func severityGlyph(severity string) string {
+	switch strings.ToLower(severity) {
+	case "critical", "error", "warning":
+		return "⚠️"
+	default:
+		return "ℹ️"
 	}
 }
 

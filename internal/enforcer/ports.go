@@ -33,6 +33,12 @@ type OutboxStore interface {
 // TelegramClient is the consumer-side Telegram API surface.
 type TelegramClient interface {
 	SendMessage(ctx context.Context, chatID int64, text string) error
+	SendFormattedMessage(
+		ctx context.Context,
+		chatID int64,
+		text string,
+		parseMode string,
+	) error
 	GetChatMember(ctx context.Context, chatID, userID int64) (*models.ChatMember, error)
 	ApproveChatJoinRequest(ctx context.Context, chatID, userID int64) error
 	DeclineChatJoinRequest(ctx context.Context, chatID, userID int64) error

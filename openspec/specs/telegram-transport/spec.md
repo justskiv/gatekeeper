@@ -39,6 +39,14 @@
 `approveChatJoinRequest`, `declineChatJoinRequest`, `banChatMember` и
 `unbanChatMember`. Узкие интерфейсы объявляют пакеты-потребители у себя.
 
+`sendMessage` и `sendMessageWithReplyMarkup` MUST поддерживать выбранный
+parse mode для форматированных сообщений, созданных ботом. Telegram HTML
+parse mode (`models.ParseModeHTML`) MUST использоваться только для
+сообщений, созданных централизованным renderer'ом. Plain text сообщения
+MUST отправляться без parse mode, если они явно не отрендерены как
+форматированные. Plain export/CSV сообщения MUST отключать parse mode,
+когда форматирование может испортить данные.
+
 #### Scenario: Поверхность конкретного клиента
 - **WHEN** потребитель использует пакет `telegram`
 - **THEN** ему доступен конкретный `*Client` с методами `getMe`,
@@ -47,6 +55,103 @@
   `revokeChatInviteLink`, `approveChatJoinRequest`,
   `declineChatJoinRequest`, `banChatMember` и `unbanChatMember`
 - **AND** пакет `telegram` не экспортирует интерфейсов для этих методов
+
+#### Scenario: Форматированное сообщение выставляет HTML parse mode
+
+- **WHEN** клиент отправляет шаблонное сообщение бота
+- **THEN** Telegram `sendMessage` получает `parse_mode="HTML"`
+- **AND** тот же parse mode используется при отправке с reply markup
+
+#### Scenario: Plain message не получает parse mode
+
+- **WHEN** клиент отправляет сообщение, помеченное как plain text
+- **THEN** Telegram `sendMessage` не получает `parse_mode`
+- **AND** сырые `<`, `>` или `&` в таком plain text не трактуются как
+  Telegram HTML
+
+#### Scenario: Plain export отключает форматирование
+
+- **WHEN** owner export path отправляет plain CSV text
+- **THEN** transport отправляет его без parse mode
+- **AND** содержимое CSV не трактуется как Telegram formatting
+
+### Requirement: Telegram HTML rendering безопасен и централизован
+
+Форматированные сообщения бота SHALL использовать Telegram HTML parse
+mode через централизованный renderer, а не ad hoc HTML-конкатенацию в
+feature-коде. Динамические значения, вставляемые в HTML-сообщения, MUST
+экранироваться перед рендером, если это не явно безопасные renderer
+fragments, созданные пакетом `messages`.
+
+Renderer MUST экранировать как минимум `<`, `>` и `&` во всём
+динамическом тексте, включая значения внутри `<code>` или `<pre>`.
+Body-text escape helper MUST быть фиксированным replacer'ом на три
+символа, эквивалентным
+`strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")`.
+Renderer MUST NOT использовать `html.EscapeString` для body text,
+потому что он также заменяет кавычки (`"`/`'`) на numeric entities и
+портит видимый copy. Renderer также MUST NOT генерировать
+неподдержанные Telegram HTML tags. Поддержанное форматирование SHOULD
+ограничиваться небольшим стабильным subset: `<b>`, `<i>`, `<code>`,
+`<pre>` и `<a href="...">`, где нужно.
+
+Ссылки MUST рендериться безопасно. Link helpers MUST валидировать
+разрешённые URL schemes и отдельно экранировать `href` attributes и
+labels. Небезопасные URL вроде `javascript:` или значения с control
+characters MUST NOT рендериться как clickable HTML links. URL text,
+показанный пользователю, MAY быть raw link только если он пришёл из
+trusted invite-link storage; link labels, названия чатов, usernames,
+причины, audit details и alert details MUST экранироваться.
+
+MarkdownV2 SHALL NOT использоваться для основного renderer'а, потому
+что его escaping surface шире и хрупче для server-generated diagnostics.
+Legacy Markdown SHALL NOT использоваться для новых сообщений.
+
+Explicit Telegram entities MAY быть введены позже для узкого rich text,
+который безопаснее строить без parse-mode parsing, но любой такой
+builder MUST считать offsets в требуемых Telegram UTF-16 code units.
+
+#### Scenario: Имя пользователя не ломает HTML
+
+- **WHEN** динамический username или display name содержит `<`, `>`,
+  `&` или символы кавычек
+- **THEN** отрендеренный Telegram text остаётся валидным для HTML parse
+  mode
+- **AND** динамическое значение показывается как текст, а не как tag
+
+#### Scenario: Admin detail не внедряет markup
+
+- **WHEN** alert detail, audit detail или admin reason содержит HTML или
+  Telegram markup characters
+- **THEN** diagnostics рендерятся как escaped text
+- **AND** Telegram не отклоняет сообщение из-за malformed entities
+
+#### Scenario: Небезопасная ссылка не рендерится как HTML
+
+- **WHEN** динамический URL содержит unsupported scheme, missing host
+  или control characters
+- **THEN** renderer не выпускает для него ссылку `<a href="...">`
+- **AND** значение отклоняется или показывается как escaped plain text
+
+#### Scenario: Usage placeholder безопасен в HTML
+
+- **WHEN** command usage template содержит placeholder вроде
+  `<tg_id|@username>`
+- **THEN** placeholder рендерится как escaped text или safe code
+- **AND** Telegram не интерпретирует его как HTML tag
+
+#### Scenario: Неподдержанные tags не выпускаются
+
+- **WHEN** message templates рендерятся
+- **THEN** templates используют только разрешённый Telegram HTML subset
+- **AND** тесты падают, если template выпускает unsupported tag
+
+#### Scenario: Legacy Markdown не используется
+
+- **WHEN** кодовая база отправляет formatted Telegram text
+- **THEN** она не использует legacy Markdown parse mode
+- **AND** тесты или static checks ловят `models.ParseModeMarkdownV1` и
+  raw `"Markdown"` usage в send paths
 
 ### Requirement: Telegram API errors are normalized into typed categories
 
@@ -350,4 +455,3 @@ reports ready.
 - **WHEN** runtime starts with `TELEGRAM_MODE=polling`
 - **THEN** it does not rely on Telegram webhook delivery
 - **AND** long polling can consume updates through `getUpdates`
-

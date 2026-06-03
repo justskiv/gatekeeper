@@ -178,7 +178,7 @@ func recordHealthFailure(
 		slog.String("reason", reason))
 
 	if notifier != nil && created {
-		_ = notifier.SendOwners(ctx, ownerIDs,
+		_ = notifier.SendFormattedOwners(ctx, ownerIDs,
 			messages.HealthFailure(chat.Name, chat.ID, reason))
 	}
 
@@ -391,9 +391,10 @@ func ownerEffects(ownerIDs []int64, text string) []OutboundMessage {
 	effects := make([]OutboundMessage, 0, len(ownerIDs))
 	for _, ownerID := range ownerIDs {
 		effects = append(effects, OutboundMessage{
-			Kind: OutboundDM,
-			TGID: ownerID,
-			Text: text,
+			Kind:      OutboundDM,
+			TGID:      ownerID,
+			Text:      text,
+			ParseMode: messages.ParseModeHTML,
 		})
 	}
 

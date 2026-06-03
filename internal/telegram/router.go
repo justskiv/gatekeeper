@@ -30,11 +30,13 @@ const (
 
 // OutboundMessage is a Telegram call to make after handleTx commits.
 type OutboundMessage struct {
-	Kind    OutboundKind
-	ChatID  int64
-	TGID    int64
-	Text    string
-	Buttons [][]commandbot.Button
+	Kind      OutboundKind
+	ChatID    int64
+	TGID      int64
+	Text      string
+	ParseMode string
+	Plain     bool
+	Buttons   [][]commandbot.Button
 }
 
 // RouteResult describes how an update reached a terminal state.
@@ -582,9 +584,11 @@ func fromEngineEffects(effects []engine.Effect) []OutboundMessage {
 	out := make([]OutboundMessage, 0, len(effects))
 	for _, effect := range effects {
 		out = append(out, OutboundMessage{
-			Kind: OutboundDM,
-			TGID: effect.TGID,
-			Text: effect.Text,
+			Kind:      OutboundDM,
+			TGID:      effect.TGID,
+			Text:      effect.Text,
+			ParseMode: effect.ParseMode,
+			Plain:     effect.Plain,
 		})
 	}
 
@@ -607,11 +611,13 @@ func (r *Router) fromCommandResult(
 		}
 
 		effects = append(effects, OutboundMessage{
-			Kind:    kind,
-			ChatID:  reply.ChatID,
-			TGID:    reply.TGID,
-			Text:    reply.Text,
-			Buttons: reply.Buttons,
+			Kind:      kind,
+			ChatID:    reply.ChatID,
+			TGID:      reply.TGID,
+			Text:      reply.Text,
+			ParseMode: reply.ParseMode,
+			Plain:     reply.Plain,
+			Buttons:   reply.Buttons,
 		})
 	}
 
@@ -712,9 +718,14 @@ func (r *Router) durableDMEffects(
 			continue
 		}
 
-		if err := notifier.SendDurableDM(
-			ctx, effect.TGID, effect.Text, marker,
-		); err != nil {
+		var err error
+		if effect.ParseMode != "" && !effect.Plain {
+			err = notifier.SendFormattedDurableDM(
+				ctx, effect.TGID, effect.Text, effect.ParseMode, marker)
+		} else {
+			err = notifier.SendDurableDM(ctx, effect.TGID, effect.Text, marker)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -728,11 +739,15 @@ func (r *Router) enqueueDMEffect(
 	marker string,
 ) error {
 	payload, err := json.Marshal(struct {
-		Text    string                `json:"text"`
-		Buttons [][]commandbot.Button `json:"buttons,omitempty"`
+		Text      string                `json:"text"`
+		ParseMode string                `json:"parse_mode,omitempty"`
+		Plain     bool                  `json:"plain,omitempty"`
+		Buttons   [][]commandbot.Button `json:"buttons,omitempty"`
 	}{
-		Text:    effect.Text,
-		Buttons: effect.Buttons,
+		Text:      effect.Text,
+		ParseMode: effect.ParseMode,
+		Plain:     effect.Plain,
+		Buttons:   effect.Buttons,
 	})
 	if err != nil {
 		return fmt.Errorf("encode dm effect: %w", err)

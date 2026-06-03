@@ -16,6 +16,7 @@ import (
 	"github.com/justskiv/gatekeeper/internal/domain"
 	"github.com/justskiv/gatekeeper/internal/engine"
 	"github.com/justskiv/gatekeeper/internal/invite"
+	"github.com/justskiv/gatekeeper/internal/messages"
 	"github.com/justskiv/gatekeeper/internal/store"
 	"github.com/justskiv/gatekeeper/internal/telegram"
 )
@@ -80,12 +81,28 @@ type fakeTelegram struct {
 	memberErr      error
 	approveErr     error
 	calls          []string
+	parseMode      string
 	onlyIfBanned   bool
 	networkInLease *bool
 }
 
 func (t *fakeTelegram) SendMessage(context.Context, int64, string) error {
 	t.calls = append(t.calls, "sendMessage")
+	if t.networkInLease != nil && *t.networkInLease {
+		return errors.New("network called while lease was active")
+	}
+
+	return t.sendErr
+}
+
+func (t *fakeTelegram) SendFormattedMessage(
+	_ context.Context,
+	_ int64,
+	_ string,
+	parseMode string,
+) error {
+	t.calls = append(t.calls, "sendFormattedMessage")
+	t.parseMode = parseMode
 	if t.networkInLease != nil && *t.networkInLease {
 		return errors.New("network called while lease was active")
 	}
@@ -100,6 +117,19 @@ func (t *fakeTelegram) SendMessageWithReplyMarkup(
 	models.ReplyMarkup,
 ) error {
 	t.calls = append(t.calls, "sendMessageWithReplyMarkup")
+
+	return t.sendErr
+}
+
+func (t *fakeTelegram) SendFormattedMessageWithReplyMarkup(
+	_ context.Context,
+	_ int64,
+	_ string,
+	parseMode string,
+	_ models.ReplyMarkup,
+) error {
+	t.calls = append(t.calls, "sendFormattedMessageWithReplyMarkup")
+	t.parseMode = parseMode
 
 	return t.sendErr
 }
@@ -307,6 +337,107 @@ func TestEnforcerSendDMRetryButtonUsesReplyMarkup(t *testing.T) {
 
 	if len(tg.calls) != 1 || tg.calls[0] != "sendMessageWithReplyMarkup" {
 		t.Fatalf("calls=%v, want reply markup send", tg.calls)
+	}
+}
+
+func TestEnforcerFormattedDMPreservesParseMode(t *testing.T) {
+	tgID := int64(59)
+	outbox := &fakeOutbox{action: domain.AccessAction{
+		ID:             1,
+		Type:           domain.ActionSendDM,
+		TGID:           &tgID,
+		IdempotencyKey: "send-dm-formatted",
+		PayloadJSON: []byte(
+			`{"text":"<b>hello</b>","parse_mode":"HTML"}`),
+		MaxAttempts: 8,
+	}}
+	tg := &fakeTelegram{}
+	e := newTestEnforcer(outbox, tg, &fakeUsers{}, &fakeAlerts{})
+
+	if _, err := e.runOnce(context.Background()); err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+
+	if len(tg.calls) != 1 || tg.calls[0] != "sendFormattedMessage" ||
+		tg.parseMode != messages.ParseModeHTML {
+		t.Fatalf("calls=%v parse_mode=%q, want formatted HTML send",
+			tg.calls, tg.parseMode)
+	}
+}
+
+func TestEnforcerFormattedDMRetryButtonPreservesParseMode(t *testing.T) {
+	tgID := int64(60)
+	outbox := &fakeOutbox{action: domain.AccessAction{
+		ID:             1,
+		Type:           domain.ActionSendDM,
+		TGID:           &tgID,
+		IdempotencyKey: "send-dm-formatted-retry",
+		PayloadJSON: []byte(
+			`{"text":"<b>try later</b>","parse_mode":"HTML","retry_button":true}`),
+		MaxAttempts: 8,
+	}}
+	tg := &fakeTelegram{}
+	e := newTestEnforcer(outbox, tg, &fakeUsers{}, &fakeAlerts{})
+
+	if _, err := e.runOnce(context.Background()); err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+
+	if len(tg.calls) != 1 ||
+		tg.calls[0] != "sendFormattedMessageWithReplyMarkup" ||
+		tg.parseMode != messages.ParseModeHTML {
+		t.Fatalf("calls=%v parse_mode=%q, want formatted reply-markup send",
+			tg.calls, tg.parseMode)
+	}
+}
+
+func TestEnforcerLegacyDMPayloadWithoutParseModeStaysPlain(t *testing.T) {
+	tgID := int64(61)
+	outbox := &fakeOutbox{action: domain.AccessAction{
+		ID:             1,
+		Type:           domain.ActionSendDM,
+		TGID:           &tgID,
+		IdempotencyKey: "send-dm-legacy",
+		PayloadJSON:    []byte(`{"text":"Use /whois <tg_id|@username>"}`),
+		MaxAttempts:    8,
+	}}
+	tg := &fakeTelegram{}
+	e := newTestEnforcer(outbox, tg, &fakeUsers{}, &fakeAlerts{})
+
+	if _, err := e.runOnce(context.Background()); err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+
+	if len(tg.calls) != 1 || tg.calls[0] != "sendMessage" || tg.parseMode != "" {
+		t.Fatalf("calls=%v parse_mode=%q, want plain legacy send",
+			tg.calls, tg.parseMode)
+	}
+}
+
+func TestEnforcerFormattedInvitePreservesParseMode(t *testing.T) {
+	tgID := int64(62)
+	action := resourceAction(domain.ActionSendInvite, tgID)
+	action.PayloadJSON = []byte(`{"text":"<b>invite</b>","parse_mode":"HTML"}`)
+	outbox := &fakeOutbox{action: action}
+	tg := &fakeTelegram{}
+	invites := &fakeInvites{}
+	e := New(Stores{
+		Outbox: outbox,
+		Users:  &fakeUsers{},
+		Alerts: &fakeAlerts{},
+	}, tg, invites, Config{
+		ClubChatID:    -1001,
+		ClubChannelID: -1002,
+	}, WithRateLimiter(noopLimiter{}))
+
+	if _, err := e.runOnce(context.Background()); err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+
+	if len(tg.calls) != 1 || tg.calls[0] != "sendFormattedMessage" ||
+		tg.parseMode != messages.ParseModeHTML {
+		t.Fatalf("calls=%v parse_mode=%q, want formatted invite send",
+			tg.calls, tg.parseMode)
 	}
 }
 

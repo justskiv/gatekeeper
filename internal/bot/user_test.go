@@ -156,13 +156,14 @@ func TestStatusEnsuresUserAndAppliesPreflight(t *testing.T) {
 		t.Fatalf("result = %+v, want one status reply", result)
 	}
 
-	if !strings.Contains(result.Replies[0].Text, "Статус доступа") {
+	if !strings.Contains(result.Replies[0].Text, "Доступ активен") {
 		t.Fatalf("reply = %q, want status text", result.Replies[0].Text)
 	}
 
-	if !strings.Contains(result.Replies[0].Text, "Проверка источников") ||
-		!strings.Contains(result.Replies[0].Text, "активно") {
-		t.Fatalf("reply = %q, want localized source reasons", result.Replies[0].Text)
+	if strings.Contains(result.Replies[0].Text, "Проверка источников") ||
+		strings.Contains(result.Replies[0].Text, messages.ReasonMembershipInChat(-1001)) {
+		t.Fatalf("reply = %q, want user status without source reasons",
+			result.Replies[0].Text)
 	}
 
 	user, err := store.NewUsers(db).Get(ctx, 55)
@@ -216,9 +217,83 @@ func TestStatusFallsBackToPersistedDecision(t *testing.T) {
 		t.Fatalf("result = %+v, want one status reply", result)
 	}
 
-	if !strings.Contains(result.Replies[0].Text, "Статус доступа: активен") ||
-		!strings.Contains(result.Replies[0].Text, "белый список") {
+	if !strings.Contains(result.Replies[0].Text, "Доступ активен") {
 		t.Fatalf("reply = %q, want persisted active decision", result.Replies[0].Text)
+	}
+
+	if strings.Contains(result.Replies[0].Text, "белый список") {
+		t.Fatalf("reply = %q, want user status without internal basis",
+			result.Replies[0].Text)
+	}
+}
+
+func TestUserStatusHidesInternalDiagnostics(t *testing.T) {
+	text := messages.Status(domain.AccessDecision{
+		Status: domain.StatusInactive,
+		Reasons: []domain.AccessReason{{
+			Source:  domain.Platform("system"),
+			Verdict: domain.VerdictUnknown,
+			Detail:  "whitelist chat_id=-1001 reason=local database failed",
+		}},
+	}, nil, nil)
+
+	for _, forbidden := range []string{
+		"whitelist",
+		"system",
+		"chat_id",
+		"reason=",
+		"local",
+		"database",
+		"Проверка источников",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("status text = %q, contains forbidden %q", text, forbidden)
+		}
+	}
+}
+
+func TestFormattedReplySplitKeepsTagsOnLineBoundaries(t *testing.T) {
+	text := strings.Join([]string{
+		"<b>Заголовок</b>",
+		"строка с <code>safe&amp;value</code>",
+		"ещё строка",
+	}, "\n")
+
+	parts := splitFormattedReply(text, len("<b>Заголовок</b>\n")+1)
+	if len(parts) < 2 {
+		t.Fatalf("parts = %q, want split", parts)
+	}
+
+	for _, part := range parts {
+		if strings.Contains(part, "<code>") && !strings.Contains(part, "</code>") {
+			t.Fatalf("part = %q, split inside code tag", part)
+		}
+		if strings.Contains(part, "&amp") && !strings.Contains(part, "&amp;") {
+			t.Fatalf("part = %q, split inside entity", part)
+		}
+	}
+}
+
+func TestOwnerReplySplitsLongFormattedDiagnostics(t *testing.T) {
+	handler := NewCommands(CommandDeps{}, []int64{100})
+	line := "<code>" + strings.Repeat("x", 80) + "</code>\n"
+	text := "<b>Диагностика</b>\n" + strings.Repeat(line, 80)
+
+	result := handler.ownerReply(privateMessage(1, 100, "/whois 42"), text)
+	if len(result.Replies) < 2 {
+		t.Fatalf("replies = %d, want split long diagnostics", len(result.Replies))
+	}
+
+	for _, reply := range result.Replies {
+		if len(reply.Text) > replyChunkSize {
+			t.Fatalf("reply length = %d, want <= %d", len(reply.Text), replyChunkSize)
+		}
+		if reply.ParseMode != messages.ParseModeHTML {
+			t.Fatalf("parse_mode = %q, want HTML", reply.ParseMode)
+		}
+		if strings.Count(reply.Text, "<code>") != strings.Count(reply.Text, "</code>") {
+			t.Fatalf("reply = %q, unbalanced code tags", reply.Text)
+		}
 	}
 }
 
@@ -286,11 +361,12 @@ func TestWhoisOwnerByIDAndUsername(t *testing.T) {
 			t.Fatalf("result for %q = %+v, want one reply", text, result)
 		}
 
-		if !strings.Contains(result.Replies[0].Text, "Пользователь: 77") {
+		if !strings.Contains(result.Replies[0].Text, "<code>77</code>") {
 			t.Fatalf("reply for %q = %q, want user card", text, result.Replies[0].Text)
 		}
 
-		if !strings.Contains(result.Replies[0].Text, "Tribute: активно") {
+		if !strings.Contains(result.Replies[0].Text, "<b>Диагностика</b>") ||
+			!strings.Contains(result.Replies[0].Text, "<code>Tribute</code>") {
 			t.Fatalf("reply for %q = %q, want localized reasons", text,
 				result.Replies[0].Text)
 		}

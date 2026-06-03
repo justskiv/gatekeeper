@@ -154,12 +154,19 @@ func (h *UserCommands) hasWhoisDeps() bool {
 }
 
 func (h *UserCommands) ownerReply(msg *models.Message, text string) Result {
-	return Result{Replies: []Reply{{
-		ChatID: msg.Chat.ID,
-		TGID:   msg.From.ID,
-		Text:   text,
-		DM:     true,
-	}}}
+	parts := splitFormattedReply(text, replyChunkSize)
+	replies := make([]Reply, 0, len(parts))
+	for _, part := range parts {
+		replies = append(replies, Reply{
+			ChatID:    msg.Chat.ID,
+			TGID:      msg.From.ID,
+			Text:      part,
+			ParseMode: messages.ParseModeHTML,
+			DM:        true,
+		})
+	}
+
+	return Result{Replies: replies}
 }
 
 func commandArg(text string) string {

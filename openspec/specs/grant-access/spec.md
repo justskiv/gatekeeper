@@ -18,31 +18,42 @@ MUST вызвать `recomputeAccess`, определить club resources, гд
 записать `access_grants.state='pending'`, audit и нужные outbox actions.
 
 При `shared_join_request` handler MUST использовать активные shared
-ссылки из `invite_links` и ставить `send_dm` с `MSG_ACTIVE`. При
-`personal_join_request` или `direct` handler MUST ставить
-`send_invite`, а немедленный ответ пользователю MUST быть
-`MSG_INVITE_SOON`. При `inactive` handler MUST отправить `MSG_NO_SUB` и
-не создавать grants. При `unknown` handler MUST использовать только
-свежую active-подписку из БД как fallback в пределах
+ссылки из `invite_links` и ставить `send_dm` с финальным сообщением об
+активном доступе. При `personal_join_request` или `direct` handler MUST
+ставить `send_invite`, а немедленный ответ пользователю MUST быть
+финальным сообщением об ожидании или подготовке invite. При `inactive`
+handler MUST отправить финальное сообщение об отсутствии активной
+подписки и не создавать grants. При `unknown` handler MUST использовать
+только свежую active-подписку из БД как fallback в пределах
 `ADMISSION_FALLBACK_MAX_AGE`; без такого fallback он MUST отправить
-`MSG_TRY_LATER` и создать `admin_alert`.
+сообщение о временной проблеме проверки и создать `admin_alert`.
 
 Повторный запрос MUST быть идемпотентным: он не создаёт дубли grants,
 не плодит одинаковые invite actions и сообщает уже joined resources как
 уже доступные. `recomputeAccess` MUST оставаться без `inactive`-ветки
 отзыва, soft-kick и revocation actions до Фазы 06.
 
+Все пользовательские admission-сообщения MUST быть продуктовыми. Они
+MUST NOT раскрывать verdict'ы источников, fallback markers, alert
+kinds, внутреннюю механику invite resolution, сырые chat IDs или сырые
+ошибки. Временные проблемы источников MUST описываться как временная
+проблема проверки и MUST давать путь повтора, когда он существует.
+
 #### Scenario: Активный пользователь получает shared join-request ссылки
 - **WHEN** пользователь с живым статусом `active` отправляет `/start` в
   `shared_join_request` режиме
 - **THEN** для club chat и club channel, где пользователь ещё не
   `joined`, создаются или обновляются `pending` grants
-- **AND** в outbox ставится `send_dm` с `MSG_ACTIVE` и ссылками из
-  активных shared rows `invite_links`
+- **AND** в outbox ставится `send_dm` с финальным сообщением об
+  активном доступе и ссылками из активных shared rows `invite_links`
+- **AND** текст не раскрывает внутренние детали admission
 
 #### Scenario: Неактивный пользователь получает сообщение об отсутствии подписки
 - **WHEN** пользователь с живым статусом `inactive` отправляет `/start`
-- **THEN** бот ставит `send_dm` с `MSG_NO_SUB`
+- **THEN** бот ставит `send_dm` с финальным сообщением об отсутствии
+  активной подписки
+- **AND** сообщение даёт следующее действие для подписки или повторной
+  проверки
 - **AND** `access_grants` и invite actions для пользователя не создаются
 
 #### Scenario: Unknown-статус использует свежую active-подписку
@@ -50,18 +61,25 @@ MUST вызвать `recomputeAccess`, определить club resources, гд
   подписка пользователя
 - **THEN** grant-access flow продолжает обработку как `active`
 - **AND** audit сохраняет, что выдача была основана на fallback
+- **AND** пользовательский текст не раскрывает fallback как внутреннюю
+  причину
 
 #### Scenario: Unknown-статус без fallback просит повторить позже
 - **WHEN** live-проверка вернула `unknown` и свежей active-подписки в БД
   нет
-- **THEN** бот ставит `send_dm` с `MSG_TRY_LATER`
+- **THEN** бот ставит `send_dm` с финальным сообщением о временной
+  проблеме проверки
+- **AND** сообщение содержит путь повтора
 - **AND** создаётся `admin_alert` о недоступности источника
 - **AND** pending grants не создаются
 
 #### Scenario: Забаненный пользователь не может запросить доступ
 - **WHEN** пользователь с `users.banned=1` отправляет `/start`
-- **THEN** бот ставит `send_dm` с `MSG_BANNED`
+- **THEN** бот ставит `send_dm` с финальным сообщением о блокировке
+  аккаунта
 - **AND** источники подписки не дают пользователю доступ
+- **AND** сообщение не раскрывает admin ban reason, если продуктовый
+  copy явно не разрешает безопасную публичную причину
 
 #### Scenario: Повторный start идемпотентен
 - **WHEN** eligible пользователь повторяет `/start` в пределах уже
@@ -86,10 +104,11 @@ handler MUST повторить живую проверку согласно
 Только финальный `active` статус MUST поставить `approve_join`,
 перевести grant в `joined` с `admitted_by='bot'`, пометить personal
 invite как `used`, записать `audit_log(join_approved)` и поставить
-`MSG_GRANTED`. Финальный `inactive`, hard-ban или unresolved personal
-misuse MUST поставить `decline_join`, записать audit и поставить DM
-пользователю. Устойчивый `unknown` после ретраев MUST fail-closed:
-`decline_join` и `MSG_TRY_LATER`.
+финальное сообщение о выдаче доступа. Финальный `inactive`, hard-ban
+или unresolved personal misuse MUST поставить `decline_join`, записать
+audit и поставить DM пользователю. Устойчивый `unknown` после ретраев
+MUST fail-closed: `decline_join` и финальное сообщение о временной
+проблеме проверки.
 
 `user_chat_id` из Telegram MUST использоваться для DM-ответов, когда он
 доступен, чтобы пользователь, который раньше не запускал бота, всё
@@ -97,22 +116,30 @@ misuse MUST поставить `decline_join`, записать audit и пос�
 включать resource, tg_id и дату/идентификатор join-request (§13.2),
 чтобы новая заявка после выхода считалась новым действием.
 
+Пользовательские сообщения join-request MUST NOT раскрывать invite
+resolution status, resource chat IDs, сырые source verdicts или
+внутренние причины decline.
+
 #### Scenario: Активная join-request одобряется
 - **WHEN** active пользователь создаёт join-request в managed resource
 - **THEN** handler ставит `approve_join` для этого resource и tg_id
 - **AND** grant становится `joined` с `admitted_by='bot'`
-- **AND** пользователю ставится DM с `MSG_GRANTED`
+- **AND** пользователю ставится DM с финальным сообщением о выдаче
+  доступа
 
 #### Scenario: Неактивная join-request отклоняется
 - **WHEN** пользователь без активного основания создаёт join-request
 - **THEN** handler ставит `decline_join`
 - **AND** grant не становится `joined`
-- **AND** пользователю ставится DM с `MSG_NO_SUB`
+- **AND** пользователю ставится DM с финальным сообщением об отсутствии
+  активной подписки
+- **AND** сообщение не раскрывает внутреннюю причину decline
 
 #### Scenario: Устойчивый unknown отклоняется
 - **WHEN** live-проверка join-request остаётся `unknown` после ретраев
 - **THEN** handler ставит `decline_join`
-- **AND** пользователю ставится DM с `MSG_TRY_LATER`
+- **AND** пользователю ставится DM с финальным сообщением о временной
+  проблеме проверки
 
 #### Scenario: Personal invite, использованный другим пользователем, отклоняется
 - **WHEN** `personal_join_request` ссылка принадлежит tg_id A, но
@@ -120,6 +147,8 @@ misuse MUST поставить `decline_join`, записать audit и пос�
 - **THEN** handler ставит `decline_join` для tg_id B
 - **AND** invite row помечается `used_by_other` с `attempted_by=B`
 - **AND** пишется audit о misuse personal-ссылки
+- **AND** пользователь получает безопасное продуктовое сообщение о
+  misuse personal-ссылки
 
 #### Scenario: Отсутствующий invite_link не блокирует active shared request
 - **WHEN** Telegram прислал join-request без поля `invite_link` в

@@ -56,6 +56,9 @@ func TestAccessRequestActiveSharedCreatesPendingGrantsAndDM(t *testing.T) {
 		!strings.Contains(payload.Text, "https://t.me/+channel") {
 		t.Fatalf("dm payload = %+v, want shared links", payload)
 	}
+	if payload.ParseMode != messages.ParseModeHTML {
+		t.Fatalf("parse_mode = %q, want HTML", payload.ParseMode)
+	}
 
 	if got := countActions(t, db, domain.ActionSendInvite); got != 0 {
 		t.Fatalf("send_invite actions = %d, want 0 in shared mode", got)

@@ -3,6 +3,7 @@ package notify
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/pressly/goose/v3"
 
 	"github.com/justskiv/gatekeeper/internal/domain"
+	"github.com/justskiv/gatekeeper/internal/messages"
 	"github.com/justskiv/gatekeeper/internal/store"
 )
 
@@ -101,6 +103,39 @@ func TestDurableSendDMEnqueuesInsteadOfSending(t *testing.T) {
 	if outbox.input.Type != domain.ActionSendDM || outbox.input.TGID == nil ||
 		*outbox.input.TGID != tgID {
 		t.Fatalf("outbox input = %+v, want send_dm for user", outbox.input)
+	}
+}
+
+func TestDurableFormattedDMEnqueuesParseMode(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tgID := int64(12)
+
+	users := store.NewUsers(db)
+	if err := users.Upsert(ctx, domain.User{
+		TGID:    tgID,
+		DMState: domain.DMOpen,
+	}); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+
+	outbox := &fakeOutbox{}
+	if err := NewDurable(users, outbox, nil).SendFormattedDurableDM(
+		ctx, tgID, "<b>hello</b>", messages.ParseModeHTML, "update:1:1",
+	); err != nil {
+		t.Fatalf("SendFormattedDurableDM: %v", err)
+	}
+
+	var payload struct {
+		Text      string `json:"text"`
+		ParseMode string `json:"parse_mode"`
+	}
+	if err := json.Unmarshal(outbox.input.PayloadJSON, &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+
+	if payload.Text != "<b>hello</b>" || payload.ParseMode != messages.ParseModeHTML {
+		t.Fatalf("payload = %+v, want formatted HTML", payload)
 	}
 }
 

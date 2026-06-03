@@ -78,10 +78,11 @@ func (h *UserCommands) handleAdminAction(
 	adminConfirmations.Unlock()
 
 	return Result{Replies: []Reply{{
-		ChatID: msg.Chat.ID,
-		TGID:   msg.From.ID,
-		Text:   messages.AdminConfirm(actionSummary(*action)),
-		DM:     true,
+		ChatID:    msg.Chat.ID,
+		TGID:      msg.From.ID,
+		Text:      messages.AdminConfirm(actionSummary(*action)),
+		ParseMode: messages.ParseModeHTML,
+		DM:        true,
 		Buttons: [][]Button{{
 			{
 				Text:         messages.AdminConfirmButtonText,
@@ -490,8 +491,9 @@ func (h *UserCommands) enqueueUserDM(
 	marker string,
 ) error {
 	payload, err := json.Marshal(struct {
-		Text string `json:"text"`
-	}{Text: text})
+		Text      string `json:"text"`
+		ParseMode string `json:"parse_mode,omitempty"`
+	}{Text: text, ParseMode: messages.ParseModeHTML})
 	if err != nil {
 		return err
 	}
@@ -542,21 +544,22 @@ func (h *UserCommands) callbackReply(query *models.CallbackQuery, text string) R
 	}
 
 	return Result{Replies: []Reply{{
-		ChatID: chatID,
-		TGID:   query.From.ID,
-		Text:   text,
-		DM:     true,
+		ChatID:    chatID,
+		TGID:      query.From.ID,
+		Text:      text,
+		ParseMode: messages.ParseModeHTML,
+		DM:        true,
 	}}}
 }
 
 func actionSummary(action adminAction) string {
 	target := messages.AdminActionAllUsers()
 	if action.TargetID != nil {
-		target = strconv.FormatInt(*action.TargetID, 10)
+		target = messages.AdminActionTargetID(*action.TargetID)
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s %s", action.Kind, target)
+	b.WriteString(messages.AdminActionSummary(action.Kind, target))
 
 	if action.ExpiresAt != nil {
 		fmt.Fprintf(&b, "\n%s", messages.AdminActionExpiryLine(*action.ExpiresAt))

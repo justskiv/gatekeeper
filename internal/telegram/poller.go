@@ -716,13 +716,22 @@ func (p *Poller) deliverEffects(ctx context.Context, effects []OutboundMessage) 
 				continue
 			}
 
-			err = p.notifier.SendDM(ctx, effect.TGID, effect.Text)
+			if effect.ParseMode != "" && !effect.Plain {
+				err = p.notifier.SendFormattedDM(ctx, effect.TGID, effect.Text)
+			} else {
+				err = p.notifier.SendDM(ctx, effect.TGID, effect.Text)
+			}
 		case OutboundChatMessage:
 			if p.client == nil {
 				continue
 			}
 
-			err = p.client.SendMessage(ctx, effect.ChatID, effect.Text)
+			if effect.ParseMode != "" && !effect.Plain {
+				err = p.client.SendFormattedMessage(
+					ctx, effect.ChatID, effect.Text, effect.ParseMode)
+			} else {
+				err = p.client.SendMessage(ctx, effect.ChatID, effect.Text)
+			}
 		}
 
 		if err != nil {

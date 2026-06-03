@@ -671,12 +671,17 @@ func (e *Engine) notifyUser(
 	marker string,
 ) ([]Effect, error) {
 	if repos.Outbox == nil {
-		return []Effect{{TGID: tgID, Text: text}}, nil
+		return []Effect{{
+			TGID:      tgID,
+			Text:      text,
+			ParseMode: messages.ParseModeHTML,
+		}}, nil
 	}
 
 	payload, err := json.Marshal(struct {
-		Text string `json:"text"`
-	}{Text: text})
+		Text      string `json:"text"`
+		ParseMode string `json:"parse_mode,omitempty"`
+	}{Text: text, ParseMode: messages.ParseModeHTML})
 	if err != nil {
 		return nil, fmt.Errorf("encode user notification: %w", err)
 	}

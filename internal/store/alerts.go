@@ -203,9 +203,10 @@ func (r *Alerts) enqueueAlertDM(
 	}
 
 	payload, err := json.Marshal(struct {
-		Text   string `json:"text"`
-		ChatID int64  `json:"chat_id,omitempty"`
-	}{Text: text, ChatID: chatID})
+		Text      string `json:"text"`
+		ParseMode string `json:"parse_mode,omitempty"`
+		ChatID    int64  `json:"chat_id,omitempty"`
+	}{Text: text, ParseMode: messages.ParseModeHTML, ChatID: chatID})
 	if err != nil {
 		return fmt.Errorf("encode alert delivery: %w", err)
 	}

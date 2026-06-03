@@ -308,13 +308,15 @@ func (e *Enforcer) sendInvite(
 	text := payload.Text
 	if text == "" {
 		text = link.InviteLink
+		payload.ParseMode = ""
+		payload.Plain = true
 	}
 
 	if err := e.wait(ctx, requestKindMessage, tgID); err != nil {
 		return err
 	}
 
-	if err := e.tg.SendMessage(ctx, tgID, text); err != nil {
+	if err := e.sendPayloadMessage(ctx, tgID, text, payload.ParseMode, payload.Plain, nil); err != nil {
 		return err
 	}
 
@@ -496,19 +498,44 @@ func (e *Enforcer) sendDM(
 
 	if payload.RetryButton {
 		if sender, ok := e.tg.(replyMarkupSender); ok {
-			return sender.SendMessageWithReplyMarkup(
-				ctx, chatID, payload.Text, retryKeyboard())
+			return e.sendPayloadMessage(
+				ctx, chatID, payload.Text, payload.ParseMode, payload.Plain,
+				retryKeyboardWithSender(sender))
 		}
 	}
 
 	if len(payload.Buttons) > 0 {
 		if sender, ok := e.tg.(replyMarkupSender); ok {
-			return sender.SendMessageWithReplyMarkup(
-				ctx, chatID, payload.Text, inlineKeyboard(payload.Buttons))
+			return e.sendPayloadMessage(
+				ctx, chatID, payload.Text, payload.ParseMode, payload.Plain,
+				keyboardWithSender(sender, inlineKeyboard(payload.Buttons)))
 		}
 	}
 
-	return e.tg.SendMessage(ctx, chatID, payload.Text)
+	return e.sendPayloadMessage(ctx, chatID, payload.Text, payload.ParseMode, payload.Plain, nil)
+}
+
+func (e *Enforcer) sendPayloadMessage(
+	ctx context.Context,
+	chatID int64,
+	text string,
+	parseMode string,
+	plain bool,
+	replyMarkup replyMarkupSend,
+) error {
+	if parseMode == "" || plain {
+		if replyMarkup != nil {
+			return replyMarkup.SendPlain(ctx, chatID, text)
+		}
+
+		return e.tg.SendMessage(ctx, chatID, text)
+	}
+
+	if replyMarkup != nil {
+		return replyMarkup.SendFormatted(ctx, chatID, text, parseMode)
+	}
+
+	return e.tg.SendFormattedMessage(ctx, chatID, text, parseMode)
 }
 
 func (e *Enforcer) verifyMember(
@@ -1019,6 +1046,8 @@ func (e expectedNoopError) Unwrap() error {
 
 type sendDMPayload struct {
 	Text        string `json:"text"`
+	ParseMode   string `json:"parse_mode,omitempty"`
+	Plain       bool   `json:"plain,omitempty"`
 	ChatID      int64  `json:"chat_id,omitempty"`
 	RetryButton bool   `json:"retry_button,omitempty"`
 	Buttons     [][]struct {
@@ -1028,7 +1057,9 @@ type sendDMPayload struct {
 }
 
 type sendInvitePayload struct {
-	Text string `json:"text"`
+	Text      string `json:"text"`
+	ParseMode string `json:"parse_mode,omitempty"`
+	Plain     bool   `json:"plain,omitempty"`
 }
 
 type revokeInvitePayload struct {
@@ -1050,6 +1081,52 @@ type replyMarkupSender interface {
 		text string,
 		replyMarkup models.ReplyMarkup,
 	) error
+	SendFormattedMessageWithReplyMarkup(
+		ctx context.Context,
+		chatID int64,
+		text string,
+		parseMode string,
+		replyMarkup models.ReplyMarkup,
+	) error
+}
+
+type replyMarkupSend interface {
+	SendPlain(ctx context.Context, chatID int64, text string) error
+	SendFormatted(ctx context.Context, chatID int64, text string, parseMode string) error
+}
+
+type replyMarkupDelivery struct {
+	sender      replyMarkupSender
+	replyMarkup models.ReplyMarkup
+}
+
+func retryKeyboardWithSender(sender replyMarkupSender) replyMarkupSend {
+	return keyboardWithSender(sender, retryKeyboard())
+}
+
+func keyboardWithSender(
+	sender replyMarkupSender,
+	replyMarkup models.ReplyMarkup,
+) replyMarkupSend {
+	return replyMarkupDelivery{sender: sender, replyMarkup: replyMarkup}
+}
+
+func (d replyMarkupDelivery) SendPlain(
+	ctx context.Context,
+	chatID int64,
+	text string,
+) error {
+	return d.sender.SendMessageWithReplyMarkup(ctx, chatID, text, d.replyMarkup)
+}
+
+func (d replyMarkupDelivery) SendFormatted(
+	ctx context.Context,
+	chatID int64,
+	text string,
+	parseMode string,
+) error {
+	return d.sender.SendFormattedMessageWithReplyMarkup(
+		ctx, chatID, text, parseMode, d.replyMarkup)
 }
 
 func retryKeyboard() models.InlineKeyboardMarkup {

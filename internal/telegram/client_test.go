@@ -12,6 +12,9 @@ import (
 	"time"
 
 	botapi "github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
+
+	"github.com/justskiv/gatekeeper/internal/messages"
 )
 
 func TestNormalizeErrorCategories(t *testing.T) {
@@ -83,6 +86,50 @@ func TestSendMessageClassifiesForbiddenByTarget(t *testing.T) {
 	if !errors.As(groupErr, &apiErr) ||
 		apiErr.Category != ErrorCategoryForbidden {
 		t.Fatalf("group send error = %#v, want forbidden", groupErr)
+	}
+}
+
+func TestSendMessageSerializesParseModeOnlyForFormattedMessages(t *testing.T) {
+	var captured []map[string]string
+
+	client := newBotAPITestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if methodName(r.URL.Path) != "sendMessage" {
+			t.Fatalf("unexpected method %s", methodName(r.URL.Path))
+		}
+
+		captured = append(captured, decodeSendMessageRequest(t, r))
+
+		writeTelegramResult(w, map[string]any{"message_id": 1})
+	})
+
+	if err := client.SendFormattedMessage(
+		context.Background(), 42, "<b>hello</b>", messages.ParseModeHTML,
+	); err != nil {
+		t.Fatalf("SendFormattedMessage: %v", err)
+	}
+
+	if err := client.SendMessage(context.Background(), 42, "<b>plain</b>"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+
+	if err := client.SendFormattedMessageWithReplyMarkup(
+		context.Background(),
+		42,
+		"<b>retry</b>",
+		messages.ParseModeHTML,
+		models.InlineKeyboardMarkup{},
+	); err != nil {
+		t.Fatalf("SendFormattedMessageWithReplyMarkup: %v", err)
+	}
+
+	if captured[0]["parse_mode"] != messages.ParseModeHTML {
+		t.Fatalf("formatted body = %#v, want HTML parse mode", captured[0])
+	}
+	if captured[1]["parse_mode"] != "" {
+		t.Fatalf("plain body = %#v, want no parse_mode", captured[1])
+	}
+	if captured[2]["parse_mode"] != messages.ParseModeHTML {
+		t.Fatalf("reply markup body = %#v, want HTML parse mode", captured[2])
 	}
 }
 
@@ -298,6 +345,33 @@ func commandSet(commands []struct {
 	}
 
 	return out
+}
+
+func decodeSendMessageRequest(t *testing.T, r *http.Request) map[string]string {
+	t.Helper()
+
+	contentType := r.Header.Get("Content-Type")
+	if strings.HasPrefix(contentType, "application/json") {
+		var req map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode sendMessage: %v", err)
+		}
+
+		return req
+	}
+
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("parse sendMessage multipart request: %v", err)
+		}
+	} else if err := r.ParseForm(); err != nil {
+		t.Fatalf("parse sendMessage form request: %v", err)
+	}
+
+	return map[string]string{
+		"text":       r.FormValue("text"),
+		"parse_mode": r.FormValue("parse_mode"),
+	}
 }
 
 func decodeSetMyCommandsRequest(t *testing.T, r *http.Request) commandsRequest {

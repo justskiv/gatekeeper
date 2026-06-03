@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -215,6 +216,11 @@ func TestRouterEnqueuesCommandDMInOutbox(t *testing.T) {
 
 	if got := countSendDMActions(t, db); got != 1 {
 		t.Fatalf("send_dm actions = %d, want 1", got)
+	}
+
+	payload := firstRouterDMPayload(t, db)
+	if payload.ParseMode != messages.ParseModeHTML {
+		t.Fatalf("parse_mode = %q, want HTML", payload.ParseMode)
 	}
 }
 
@@ -714,6 +720,32 @@ func countRouterAlerts(t *testing.T, db *sql.DB, kind string) int {
 	}
 
 	return n
+}
+
+type routerDMPayload struct {
+	Text      string `json:"text"`
+	ParseMode string `json:"parse_mode"`
+}
+
+func firstRouterDMPayload(t *testing.T, db *sql.DB) routerDMPayload {
+	t.Helper()
+
+	var raw string
+	if err := db.QueryRowContext(context.Background(), `
+		SELECT payload_json
+		FROM access_actions
+		WHERE action_type = ?
+		ORDER BY id
+		LIMIT 1`, string(domain.ActionSendDM)).Scan(&raw); err != nil {
+		t.Fatalf("read action payload: %v", err)
+	}
+
+	var payload routerDMPayload
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatalf("decode action payload: %v", err)
+	}
+
+	return payload
 }
 
 func routerInviteHash(link string) string {

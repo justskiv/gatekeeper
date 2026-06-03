@@ -102,8 +102,10 @@ type Store struct {
 
 // Effect is a post-commit side effect prepared by the engine.
 type Effect struct {
-	TGID int64
-	Text string
+	TGID      int64
+	Text      string
+	ParseMode string
+	Plain     bool
 }
 
 // Snapshot is a live, pre-transaction status snapshot.

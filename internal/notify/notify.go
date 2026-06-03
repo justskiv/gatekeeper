@@ -11,11 +11,21 @@ import (
 	"time"
 
 	"github.com/justskiv/gatekeeper/internal/domain"
+	"github.com/justskiv/gatekeeper/internal/messages"
 	"github.com/justskiv/gatekeeper/internal/store"
 )
 
 type messageSender interface {
 	SendMessage(ctx context.Context, chatID int64, text string) error
+}
+
+type formattedMessageSender interface {
+	SendFormattedMessage(
+		ctx context.Context,
+		chatID int64,
+		text string,
+		parseMode string,
+	) error
 }
 
 type outboxEnqueuer interface {
@@ -56,12 +66,40 @@ func (n *Notifier) SendDM(ctx context.Context, tgID int64, text string) error {
 	return n.SendDurableDM(ctx, tgID, text, "")
 }
 
+// SendFormattedDM sends a formatted direct message unless the user is known as
+// blocked.
+func (n *Notifier) SendFormattedDM(ctx context.Context, tgID int64, text string) error {
+	return n.SendFormattedDurableDM(ctx, tgID, text, messages.ParseModeHTML, "")
+}
+
 // SendDurableDM enqueues a direct message when the notifier was
 // constructed with NewDurable; marker participates in idempotency.
 func (n *Notifier) SendDurableDM(
 	ctx context.Context,
 	tgID int64,
 	text string,
+	marker string,
+) error {
+	return n.sendDM(ctx, tgID, text, "", true, marker)
+}
+
+// SendFormattedDurableDM enqueues or sends a formatted direct message.
+func (n *Notifier) SendFormattedDurableDM(
+	ctx context.Context,
+	tgID int64,
+	text string,
+	parseMode string,
+	marker string,
+) error {
+	return n.sendDM(ctx, tgID, text, parseMode, false, marker)
+}
+
+func (n *Notifier) sendDM(
+	ctx context.Context,
+	tgID int64,
+	text string,
+	parseMode string,
+	plain bool,
 	marker string,
 ) error {
 	user, err := n.users.Get(ctx, tgID)
@@ -82,14 +120,22 @@ func (n *Notifier) SendDurableDM(
 	}
 
 	if n.outbox != nil {
-		return n.enqueueDM(ctx, tgID, text, marker)
+		return n.enqueueDM(ctx, tgID, text, parseMode, plain, marker)
 	}
 
 	if n.sender == nil {
 		return nil
 	}
 
-	err = n.sender.SendMessage(ctx, tgID, text)
+	if parseMode != "" {
+		if sender, ok := n.sender.(formattedMessageSender); ok {
+			err = sender.SendFormattedMessage(ctx, tgID, text, parseMode)
+		} else {
+			err = n.sender.SendMessage(ctx, tgID, text)
+		}
+	} else {
+		err = n.sender.SendMessage(ctx, tgID, text)
+	}
 	if err == nil {
 		return nil
 	}
@@ -120,11 +166,15 @@ func (n *Notifier) enqueueDM(
 	ctx context.Context,
 	tgID int64,
 	text string,
+	parseMode string,
+	plain bool,
 	marker string,
 ) error {
 	payload, err := json.Marshal(struct {
-		Text string `json:"text"`
-	}{Text: text})
+		Text      string `json:"text"`
+		ParseMode string `json:"parse_mode,omitempty"`
+		Plain     bool   `json:"plain,omitempty"`
+	}{Text: text, ParseMode: parseMode, Plain: plain})
 	if err != nil {
 		return fmt.Errorf("encode dm payload for %d: %w", tgID, err)
 	}
@@ -150,10 +200,28 @@ func (n *Notifier) enqueueDM(
 func (n *Notifier) SendOwners(
 	ctx context.Context, ownerIDs []int64, text string,
 ) error {
+	return n.sendOwners(ctx, ownerIDs, text, "", true)
+}
+
+// SendFormattedOwners sends the same formatted direct message to every owner.
+func (n *Notifier) SendFormattedOwners(
+	ctx context.Context, ownerIDs []int64, text string,
+) error {
+	return n.sendOwners(ctx, ownerIDs, text, messages.ParseModeHTML, false)
+}
+
+func (n *Notifier) sendOwners(
+	ctx context.Context,
+	ownerIDs []int64,
+	text string,
+	parseMode string,
+	plain bool,
+) error {
 	var firstErr error
 
 	for _, ownerID := range ownerIDs {
-		if err := n.SendDM(ctx, ownerID, text); err != nil {
+		err := n.sendDM(ctx, ownerID, text, parseMode, plain, "")
+		if err != nil {
 			n.logger.Warn("failed to send owner dm",
 				slog.Int64("owner_tg_id", ownerID),
 				slog.Any("error", err))

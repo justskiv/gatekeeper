@@ -74,6 +74,18 @@ Telegram. Он MUST читать `access_actions`, декодировать `pay
 `revoke_invite`. Ожидаемые no-op ошибки в контексте конкретного action
 MUST считаться успешным исполнением и логироваться на уровне `warn`.
 
+`send_dm` и `send_invite` MUST сохранять контракт форматированного
+сообщения от durable payload до Telegram API call. Если payload содержит
+HTML-текст, созданный renderer'ом, или reply markup, Enforcer MUST
+отправить его с выбранным parse mode. Если payload явно plain text,
+Enforcer MUST отправить его без parse mode. Payload без объявленного
+parse mode (включая сообщения, поставленные в очередь до HTML cutover)
+MUST трактоваться как plain и отправляться без parse mode; включение
+HTML MUST NOT задним числом переинтерпретировать такие queued тексты как
+HTML и вызывать `can't parse entities`, отравляя outbox постоянными
+ретраями. Inline keyboard button labels и callback data MUST оставаться
+plain reply-markup fields, а не HTML-rendered content.
+
 #### Scenario: soft_kick выполняет ban и unban
 - **WHEN** Enforcer исполняет `soft_kick` для resource и пользователя
 - **THEN** он проверяет, что пользователь не creator/admin
@@ -96,6 +108,35 @@ MUST считаться успешным исполнением и логиро�
 - **WHEN** `send_dm` получает Telegram `403`
 - **THEN** пользователь помечается `dm_state='blocked'`
 - **AND** action завершается без retry
+
+#### Scenario: Durable DM сохраняет parse mode
+
+- **WHEN** Enforcer выполняет форматированный `send_dm` action
+- **THEN** Telegram `sendMessage` получает текст сообщения с
+  `parse_mode="HTML"`
+- **AND** тот же parse mode сохраняется при отправке с inline reply
+  markup
+
+#### Scenario: Plain durable DM остаётся plain
+
+- **WHEN** Enforcer выполняет явно plain `send_dm` action
+- **THEN** Telegram `sendMessage` не получает parse mode
+- **AND** raw CSV или diagnostic text не парсится как HTML
+
+#### Scenario: Pre-cutover plain DM не переинтерпретируется как HTML
+
+- **WHEN** `send_dm` payload не содержит объявленный parse mode
+  (поставлен в очередь до HTML cutover)
+- **THEN** Enforcer отправляет его без parse mode
+- **AND** literal `<` в таком legacy text не вызывает Telegram-ошибку
+  `can't parse entities`
+
+#### Scenario: Invite message сохраняет форматирование
+
+- **WHEN** Enforcer выполняет `send_invite` с форматированным текстом
+- **THEN** Telegram получает текст с выбранным parse mode
+- **AND** fallback raw invite URL остаётся отправляемым, если
+  форматированный текст не передан
 
 ### Requirement: Enforcer retries, throttles and raises dead-action alerts
 

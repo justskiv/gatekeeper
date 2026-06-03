@@ -209,27 +209,47 @@ alerts MUST также жить в `messages`.
 ### Requirement: `/status` показывает пользователю его подписки и членство
 
 `/status` MUST работать в личке и отвечать пользователю его текущим
-статусом: активные источники подписок с `expires_at`, если он известен,
-и членство в клубных чате и канале. Как любое сообщение в личку,
-команда MUST обеспечить строку пользователя (`ensureUser`) и выставить
-`dm_state='open'` (пользователь нам написал — личка открыта). Команда
-MUST NOT выдавать или отзывать доступ. Живой вердикт источников (включая
-`unknown` при потере ботом прав) MUST считаться **вне `handleTx`**, чтобы не
-нарушать инвариант I2. Текст MUST строиться из пакета `messages`
-(`MSG_STATUS`; при отсутствии активной подписки — `MSG_NO_SUB`).
+статусом: активен ли доступ, какие активные источники подписки
+известны пользователю, `expires_at`, если он известен, состояние
+клубных чата и канала, и следующее действие. Как любое сообщение в
+личку, команда MUST обеспечить строку пользователя (`ensureUser`) и
+выставить `dm_state='open'` (пользователь нам написал — личка открыта).
+Команда MUST NOT выдавать или отзывать доступ.
+
+Живой вердикт источников (включая `unknown` при потере ботом прав) MUST
+считаться **вне `handleTx`**, чтобы не нарушать инвариант I2. Текст MUST
+строиться из пакета `messages` (`MSG_STATUS`; при отсутствии активной
+подписки — финальный текст об отсутствии активной подписки).
+
+Ответ `/status` для обычного пользователя MUST NOT показывать
+`AccessDecision.Reasons`, сырые verdict'ы источников, `whitelist`,
+`system`, локальную БД, сырые chat IDs или diagnostics. Эти детали
+доступны только владельцу/админу через `/whois` или alerts.
 
 #### Scenario: Пользователь видит активные подписки
 - **WHEN** пользователь с активной подпиской отправляет `/status`
-- **THEN** бот отвечает списком активных источников и (если известно)
-  датами `expires_at`, а также членством в клубных ресурсах
+- **THEN** бот отвечает человекочитаемым статусом доступа
+- **AND** ответ показывает активные источники и (если известно) даты
+  `expires_at`
+- **AND** ответ показывает состояние клубных ресурсов без сырых chat IDs
 
 #### Scenario: Нет активных подписок
 - **WHEN** `/status` отправляет пользователь без активных подписок
-- **THEN** ответ сообщает, что активных подписок нет, без выдачи доступа
+- **THEN** ответ сообщает, что активная подписка не найдена
+- **AND** ответ даёт следующее действие для оформления или повторной
+  проверки
+- **AND** доступ не выдаётся
 
 #### Scenario: Status открывает личку
 - **WHEN** пользователь впервые пишет `/status`
 - **THEN** строка `users` существует и `dm_state='open'`
+
+#### Scenario: Пользовательский status скрывает internal reasons
+
+- **WHEN** `AccessDecision` содержит internal `Reasons`
+- **THEN** `/status` не включает эти reasons в пользовательский текст
+- **AND** ответ не содержит сырые имена внутренних источников, raw
+  `chat_id` или формулировки локального хранилища
 
 ### Requirement: `/whois` объясняет владельцу статус пользователя
 
@@ -242,10 +262,18 @@ MUST работать только если пользователь уже из
 `/whois` не от владельца MUST игнорироваться так же, как прочий
 не-командный текст.
 
+Карточка MUST начинаться с summary: сначала имя/username/TG ID, общий
+статус доступа, источник или основание доступа, сроки и состояние
+клубных ресурсов; затем последние события; затем отдельный diagnostics
+block с raw reasons, provider/internal details и technical IDs. Сырые
+enum-like values MUST переводиться в стабильные русские labels в
+основном summary.
+
 #### Scenario: Владелец получает объяснимую карточку
 - **WHEN** владелец отправляет `/whois <tg_id>` по известному пользователю
 - **THEN** бот отвечает профилем, подписками, доступами и
   `AccessDecision` с `Reasons`
+- **AND** человеческое summary идёт до diagnostics
 
 #### Scenario: Поиск по username вне БД
 - **WHEN** владелец указывает `@username`, которого нет в БД
@@ -254,6 +282,12 @@ MUST работать только если пользователь уже из
 #### Scenario: /whois не от владельца игнорируется
 - **WHEN** `/whois` отправляет идентификатор не из `OWNER_TG_IDS`
 - **THEN** команда игнорируется как обычный текст, данные не раскрываются
+
+#### Scenario: Whois группирует diagnostics
+
+- **WHEN** `/whois` включает raw reason details, audit detail или IDs
+- **THEN** эти значения появляются только после основного status summary
+- **AND** владелец всё ещё видит достаточно diagnostics для отладки доступа
 
 ### Requirement: Owner access commands manage manual access and bans
 
@@ -364,48 +398,59 @@ Alert delivery MUST respect idempotency: повторное создание т�
 
 ### Requirement: Owner ops commands expose runtime state without side effects
 
-Owner commands `/stats`, `/alerts`, `/chats` and `/help_admin` MUST work
-only for `OWNER_TG_IDS`. Requests from non-owners MUST be ignored like
-other non-owner admin commands and MUST NOT disclose operational data.
-The commands MUST NOT change subscriptions, grants, revocations or
-outbox state except for durable delivery of their own response.
+Owner commands `/stats`, `/alerts`, `/chats` и `/help_admin` MUST
+работать только для `OWNER_TG_IDS`. Запросы от non-owner MUST
+игнорироваться как другие non-owner admin commands и MUST NOT раскрывать
+операционные данные. Команды MUST NOT менять subscriptions, grants,
+revocations или outbox state, кроме durable delivery собственного
+ответа.
 
-`/stats` MUST summarize active subscriptions, club resource membership
-or grant counts, pending revocations, health of the four configured
-chats, last reconciliation time, outbox size and dead action count, and
-open alert count.
+`/stats` MUST суммировать active subscriptions, club resource membership
+или grant counts, pending revocations, health четырёх настроенных чатов,
+время последней reconciliation, outbox size, dead action count и open
+alert count. Ответ MUST быть оформлен так, чтобы сначала шло
+человекочитаемое summary, затем компактные counters; raw diagnostics
+опускаются, если они не полезны.
 
-`/alerts` MUST list open `admin_alerts` with id, severity, kind, title,
-created time and whether each is resolved/open. If there are no open
-alerts, it MUST say so.
+`/alerts` MUST перечислять open `admin_alerts` с id, severity, kind,
+title, created time и признаком resolved/open. Если open alerts нет,
+ответ MUST сказать об этом. Alerts MUST группироваться или сортироваться
+по severity и MUST показывать проблему и влияние до raw kind/detail
+fields.
 
-`/chats` MUST show known configured chat IDs and their roles: Boosty
-group, Tribute channel, club chat, club channel and optional
-`ADMIN_LOG_CHAT_ID`.
+`/chats` MUST показывать известные configured chat IDs и их roles:
+Boosty group, Tribute channel, club chat, club channel и optional
+`ADMIN_LOG_CHAT_ID`. Человекочитаемая role/status MUST идти перед raw
+chat ID.
 
-`/help_admin` MUST list owner/admin commands and their short purpose.
+`/help_admin` MUST перечислять owner/admin commands и их короткое
+назначение, сгруппированное по task area, где это практично.
 
-#### Scenario: Owner sees stats summary
-- **WHEN** owner sends `/stats`
-- **THEN** bot returns a durable message with subscription, grant,
-  revocation, health, reconcile, outbox and alert summary
-- **AND** no domain access state changes
+#### Scenario: Владелец видит stats summary
+- **WHEN** владелец отправляет `/stats`
+- **THEN** бот возвращает durable message со сводкой subscriptions,
+  grants, revocations, health, reconcile, outbox и alerts
+- **AND** сообщение начинается с читаемого state summary
+- **AND** domain access state не меняется
 
-#### Scenario: Non-owner cannot read stats
-- **WHEN** a non-owner sends `/stats`
-- **THEN** command is ignored and operational data is not disclosed
+#### Scenario: Non-owner не читает stats
+- **WHEN** non-owner отправляет `/stats`
+- **THEN** команда игнорируется и operational data не раскрываются
 
-#### Scenario: Alerts command lists open alerts
-- **WHEN** owner sends `/alerts` and open alerts exist
-- **THEN** bot returns their id, severity, kind, title and created time
+#### Scenario: Alerts command перечисляет open alerts
+- **WHEN** владелец отправляет `/alerts`, и open alerts существуют
+- **THEN** бот возвращает их id, severity, kind, title и created time
+- **AND** problem summary идёт до raw alert diagnostics
 
-#### Scenario: Chats command shows configured roles
-- **WHEN** owner sends `/chats`
-- **THEN** bot returns configured chat IDs grouped by operational role
+#### Scenario: Chats command показывает configured roles
+- **WHEN** владелец отправляет `/chats`
+- **THEN** бот возвращает configured chat IDs, сгруппированные по
+  operational role
+- **AND** chat IDs не являются leading content каждой строки
 
-#### Scenario: Admin help lists admin commands
-- **WHEN** owner sends `/help_admin`
-- **THEN** bot returns the admin command list from `messages`
+#### Scenario: Admin help перечисляет admin commands
+- **WHEN** владелец отправляет `/help_admin`
+- **THEN** бот возвращает список admin commands из `messages`
 
 ### Requirement: Owner export command sends CSV with users and subscriptions
 
@@ -435,20 +480,49 @@ owner-only and private-chat-only.
 - **WHEN** a non-owner sends `/export`
 - **THEN** command is ignored and no CSV is produced
 
-### Requirement: User and admin texts include final help entries
+### Requirement: Пользовательская и admin-справка содержит финальные entries
 
-The `messages` package MUST include final user help and admin help text.
-`/help` MUST describe the bot, subscription links and the requirement to
-write from the same Telegram account. `/help_admin` MUST describe owner
-commands without exposing secrets or raw operational data.
+Пакет `messages` MUST включать финальный user help и admin help text.
+`/help` MUST описывать бота, subscription flow и требование писать с
+того же Telegram account. Он MUST перечислять только user commands и
+MUST NOT раскрывать owner/admin commands, raw operational data или
+внутренние implementation details.
 
-#### Scenario: User help mentions same Telegram account
-- **WHEN** user sends `/help`
-- **THEN** response explains how to subscribe and says to write from the
-  same Telegram account
+`/help_admin` MUST описывать owner commands без раскрытия secrets или
+raw operational data. Он MUST быть структурирован для сканирования по
+задачам: lookup, access management, reconciliation, runtime state и
+export.
 
-#### Scenario: Admin help is sourced from messages
-- **WHEN** owner sends `/help_admin`
-- **THEN** response text comes from `messages`, not inline handler
+#### Scenario: User help упоминает тот же Telegram account
+- **WHEN** пользователь отправляет `/help`
+- **THEN** ответ объясняет, как оформить подписку, и говорит писать с
+  того же Telegram account
+- **AND** ответ перечисляет только user commands
+
+#### Scenario: Admin help берётся из messages
+- **WHEN** владелец отправляет `/help_admin`
+- **THEN** текст ответа приходит из `messages`, а не из inline handler
   literals
+- **AND** owner commands сгруппированы по operational purpose
 
+### Requirement: Ответы владельцу укладываются в лимиты Telegram без поломки форматирования
+
+Длинные владельческие ответы MUST укладываться в лимит сообщения
+Telegram (`/whois`, `/export` и любой ответ, способный его превысить) —
+через ограничение объёма (потолок строк) или разбиение. Разбиение MUST
+происходить только по границам строк и MUST NOT разрывать HTML-тег или
+сущность; форматирование MUST оставаться сбалансированным в каждом
+фрагменте, поэтому теги держатся в пределах одной строки. CSV `/export`
+отправляется как plain (без `parse_mode`), поэтому его построчное
+разбиение безопасно.
+
+#### Scenario: Длинный ответ разбивается без поломки тегов
+
+- **WHEN** владельческий ответ превышает лимит сообщения
+- **THEN** он разбивается по границам строк
+- **AND** ни один фрагмент не содержит незакрытого тега или сущности
+
+#### Scenario: CSV export отправляется без parse_mode
+
+- **WHEN** владелец запрашивает `/export`
+- **THEN** CSV-чанки отправляются как plain без `parse_mode`

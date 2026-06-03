@@ -122,6 +122,7 @@ func (h *UserCommands) handleExport(
 			ChatID: msg.Chat.ID,
 			TGID:   msg.From.ID,
 			Text:   part,
+			Plain:  true,
 			DM:     true,
 		})
 	}
@@ -267,6 +268,39 @@ func splitReply(text string, limit int) []string {
 
 	if text != "" {
 		parts = append(parts, text)
+	}
+
+	return parts
+}
+
+func splitFormattedReply(text string, limit int) []string {
+	if limit <= 0 || len(text) <= limit {
+		return []string{text}
+	}
+
+	lines := strings.SplitAfter(text, "\n")
+	parts := make([]string, 0, len(lines))
+	var current strings.Builder
+
+	for _, line := range lines {
+		if current.Len() > 0 && current.Len()+len(line) > limit {
+			parts = append(parts, strings.TrimSuffix(current.String(), "\n"))
+			current.Reset()
+		}
+
+		if len(line) > limit {
+			// Keep one logical formatted line intact. Templates keep dynamic
+			// fields on bounded lines; hard-cutting here could break HTML.
+			parts = append(parts, strings.TrimSuffix(line, "\n"))
+
+			continue
+		}
+
+		current.WriteString(line)
+	}
+
+	if current.Len() > 0 {
+		parts = append(parts, strings.TrimSuffix(current.String(), "\n"))
 	}
 
 	return parts

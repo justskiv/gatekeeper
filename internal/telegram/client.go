@@ -146,19 +146,17 @@ func (c *Client) GetChatMember(
 
 // SendMessage sends a plain text message.
 func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) error {
-	_, err := c.bot.SendMessage(ctx, &botapi.SendMessageParams{
-		ChatID: chatID,
-		Text:   text,
-	})
-	if err != nil {
-		if chatID > 0 {
-			return NormalizeError("sendMessage", err)
-		}
+	return c.sendMessage(ctx, chatID, text, "", nil)
+}
 
-		return NormalizeError("sendChatMessage", err)
-	}
-
-	return nil
+// SendFormattedMessage sends a renderer-produced formatted message.
+func (c *Client) SendFormattedMessage(
+	ctx context.Context,
+	chatID int64,
+	text string,
+	parseMode string,
+) error {
+	return c.sendMessage(ctx, chatID, text, parseMode, nil)
 }
 
 // SendMessageWithReplyMarkup sends a plain text message with reply markup.
@@ -168,11 +166,39 @@ func (c *Client) SendMessageWithReplyMarkup(
 	text string,
 	replyMarkup models.ReplyMarkup,
 ) error {
-	_, err := c.bot.SendMessage(ctx, &botapi.SendMessageParams{
-		ChatID:      chatID,
-		Text:        text,
-		ReplyMarkup: replyMarkup,
-	})
+	return c.sendMessage(ctx, chatID, text, "", replyMarkup)
+}
+
+// SendFormattedMessageWithReplyMarkup sends formatted text with reply markup.
+func (c *Client) SendFormattedMessageWithReplyMarkup(
+	ctx context.Context,
+	chatID int64,
+	text string,
+	parseMode string,
+	replyMarkup models.ReplyMarkup,
+) error {
+	return c.sendMessage(ctx, chatID, text, parseMode, replyMarkup)
+}
+
+func (c *Client) sendMessage(
+	ctx context.Context,
+	chatID int64,
+	text string,
+	parseMode string,
+	replyMarkup models.ReplyMarkup,
+) error {
+	params := &botapi.SendMessageParams{
+		ChatID: chatID,
+		Text:   text,
+	}
+	if parseMode != "" {
+		params.ParseMode = models.ParseMode(parseMode)
+	}
+	if replyMarkup != nil {
+		params.ReplyMarkup = replyMarkup
+	}
+
+	_, err := c.bot.SendMessage(ctx, params)
 	if err != nil {
 		if chatID > 0 {
 			return NormalizeError("sendMessage", err)

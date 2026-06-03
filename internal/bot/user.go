@@ -17,11 +17,13 @@ import (
 
 // Reply is a post-commit Telegram message effect.
 type Reply struct {
-	ChatID  int64
-	TGID    int64
-	Text    string
-	DM      bool
-	Buttons [][]Button
+	ChatID    int64
+	TGID      int64
+	Text      string
+	ParseMode string
+	Plain     bool
+	DM        bool
+	Buttons   [][]Button
 }
 
 // Result is the durable command handling result.
@@ -91,10 +93,11 @@ func (h *UserCommands) HandlePrivate(
 		}
 
 		return Result{Replies: []Reply{{
-			ChatID: msg.Chat.ID,
-			TGID:   msg.From.ID,
-			Text:   messages.Help(),
-			DM:     true,
+			ChatID:    msg.Chat.ID,
+			TGID:      msg.From.ID,
+			Text:      messages.Help(),
+			ParseMode: messages.ParseModeHTML,
+			DM:        true,
 		}}}, nil
 	case "status":
 		return h.handleStatus(ctx, msg)
@@ -118,10 +121,11 @@ func (h *UserCommands) HandlePrivate(
 		}
 
 		return Result{Replies: []Reply{{
-			ChatID: msg.Chat.ID,
-			TGID:   msg.From.ID,
-			Text:   messages.Welcome(),
-			DM:     true,
+			ChatID:    msg.Chat.ID,
+			TGID:      msg.From.ID,
+			Text:      messages.Welcome(),
+			ParseMode: messages.ParseModeHTML,
+			DM:        true,
 		}}}, nil
 	default:
 		return Result{Ignored: true}, nil
@@ -193,10 +197,11 @@ func (h *UserCommands) handleStatus(
 	}
 
 	return Result{Replies: []Reply{{
-		ChatID: msg.Chat.ID,
-		TGID:   tgID,
-		Text:   messages.Status(decision, subs, grants),
-		DM:     true,
+		ChatID:    msg.Chat.ID,
+		TGID:      tgID,
+		Text:      messages.Status(decision, subs, grants),
+		ParseMode: messages.ParseModeHTML,
+		DM:        true,
 	}}}, nil
 }
 
@@ -211,9 +216,10 @@ func (h *UserCommands) HandleHere(msg *models.Message) Result {
 	}
 
 	return Result{Replies: []Reply{{
-		ChatID: msg.Chat.ID,
-		TGID:   msg.From.ID,
-		Text:   messages.Here(msg.Chat.ID, string(msg.Chat.Type)),
+		ChatID:    msg.Chat.ID,
+		TGID:      msg.From.ID,
+		Text:      messages.Here(msg.Chat.ID, string(msg.Chat.Type)),
+		ParseMode: messages.ParseModeHTML,
 	}}}
 }
 

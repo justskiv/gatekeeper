@@ -776,6 +776,7 @@ func (h *Handler) engineStore() engine.Store {
 func (h *Handler) enqueueDM(ctx context.Context, req dmRequest) error {
 	payload, err := json.Marshal(sendDMPayload{
 		Text:        req.Text,
+		ParseMode:   messages.ParseModeHTML,
 		ChatID:      req.ChatID,
 		RetryButton: req.RetryButton,
 	})
@@ -1066,6 +1067,8 @@ type dmRequest struct {
 
 type sendDMPayload struct {
 	Text        string `json:"text"`
+	ParseMode   string `json:"parse_mode,omitempty"`
+	Plain       bool   `json:"plain,omitempty"`
 	ChatID      int64  `json:"chat_id,omitempty"`
 	RetryButton bool   `json:"retry_button,omitempty"`
 }
