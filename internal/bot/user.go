@@ -62,6 +62,10 @@ type CommandDeps struct {
 	Preflight     *engine.Snapshot
 	AdminSync     AdminSyncFunc
 
+	// SubscribeLinks carries the deployment-specific subscription URLs the
+	// /boosty and /tribute pages render. Sourced from config via the router.
+	SubscribeLinks messages.SubscribeLinks
+
 	// OperatorLog, when set, receives durable operator events emitted in the
 	// command transaction. Optional: a nil writer disables the feed.
 	OperatorLog *operatorlog.Writer
@@ -137,13 +141,13 @@ func (h *UserCommands) HandlePrivate(
 			return Result{}, err
 		}
 
-		return dmTextReply(msg, messages.Boosty()), nil
+		return dmTextReply(msg, messages.Boosty(h.deps.SubscribeLinks)), nil
 	case "tribute":
 		if err := h.rememberPrivateUser(ctx, *msg.From); err != nil {
 			return Result{}, err
 		}
 
-		return dmTextReply(msg, messages.Tribute()), nil
+		return dmTextReply(msg, messages.Tribute(h.deps.SubscribeLinks)), nil
 	default:
 		return Result{Ignored: true}, nil
 	}

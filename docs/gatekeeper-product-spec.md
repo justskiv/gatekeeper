@@ -1881,7 +1881,7 @@ Health-проверка — шаг 3 Reconciler'а плюс реакция на 
 | `/status` | Показывает: какие источники активны (и `expires_at`, если известно), состоит ли в клубных чате/канале. |
 | `/help` | Краткая справка: что делает бот, как оформить подписку, как привязать Telegram к Boosty, важное замечание «писать с того же аккаунта». |
 | Кнопка «🔄 Проверить ещё раз» | `callback_query`: повторяет `effectiveStatus`; при появлении подписки сразу выдаёт ссылки. Rate-limit — 1 раз в 30 с на пользователя. |
-| Кнопки «Оформить Boosty» / «Оформить Tribute» | URL-кнопки на `BOOSTY_SUBSCRIBE_URL` / `TRIBUTE_SUBSCRIBE_URL`. |
+| Кнопки «Оформить Boosty» / «Оформить Tribute» | URL-кнопки на `BOOSTY_SUBSCRIBE_URL` / `TRIBUTE_SUBSCRIBE_URL_RUB`. |
 
 Любой другой текст в личке от обычного пользователя → обрабатывается как
 `/start` (прощающий UX).
@@ -2245,7 +2245,7 @@ respond 200
 | `CLUB_CHANNEL_ID` | да | — | ID клубного канала. |
 | `ADMIN_LOG_CHAT_ID` | нет | — | Чат для дублирования тревог; иначе — в личку владельцам. |
 | `BOOSTY_SUBSCRIBE_URL` | да | — | Ссылка на оформление подписки Boosty. |
-| `TRIBUTE_SUBSCRIBE_URL` | да | — | Ссылка на оформление подписки Tribute. |
+| `TRIBUTE_SUBSCRIBE_URL_RUB` | да | — | Ссылка на оформление подписки Tribute. |
 | `INVITE_MODE` | нет | `shared_join_request` | `shared_join_request`, `personal_join_request` или `direct` (§13.1). |
 | `INVITE_TTL` | нет | `24h` | TTL персональных ссылок; для `direct` фактически не больше 1 часа. |
 | `ALLOW_DIRECT_INVITES` | нет | `false` | Предохранитель: `INVITE_MODE=direct` разрешён только при `true`. |
@@ -2291,7 +2291,7 @@ CLUB_CHANNEL_ID=-1004444444444
 
 # --- Ссылки на оформление подписки ---
 BOOSTY_SUBSCRIBE_URL=https://boosty.to/<author>
-TRIBUTE_SUBSCRIBE_URL=https://t.me/tribute/app?startapp=<id>
+TRIBUTE_SUBSCRIBE_URL_RUB=https://t.me/tribute/app?startapp=<id>
 
 # --- Выдача доступа ---
 INVITE_MODE=shared_join_request

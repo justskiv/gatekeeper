@@ -72,6 +72,7 @@ type Router struct {
 	chatInfo       commandbot.ChatTitleResolver
 	members        engine.MemberChecker
 	operatorLog    *operatorlog.Writer
+	subscribeLinks messages.SubscribeLinks
 	logger         *slog.Logger
 }
 
@@ -92,6 +93,7 @@ type RouterDeps struct {
 	UpdateID       int64
 	AdminLogChatID *int64
 	ChatRoles      []commandbot.ChatRole
+	SubscribeLinks messages.SubscribeLinks
 }
 
 // SourceChats identifies configured subscription source chats.
@@ -187,6 +189,7 @@ func NewRouter(
 		updateID:       deps.UpdateID,
 		adminLogChatID: deps.AdminLogChatID,
 		chatRoles:      append([]commandbot.ChatRole(nil), deps.ChatRoles...),
+		subscribeLinks: deps.SubscribeLinks,
 		chats:          chats,
 		ownerIDs:       ownerIDs,
 		logger:         logger,
@@ -239,22 +242,23 @@ func (r *Router) routeMessage(
 	}
 
 	commands := commandbot.NewCommands(commandbot.CommandDeps{
-		Users:         r.users,
-		Subscriptions: r.subscriptions,
-		Grants:        r.grants,
-		Audit:         r.audit,
-		Whitelist:     r.whitelist,
-		Revocations:   r.revocations,
-		Outbox:        r.outbox,
-		Alerts:        r.alerts,
-		Ops:           r.ops,
-		ChatRoles:     r.chatRoles,
-		ChatInfo:      r.chatInfo,
-		StatusEngine:  r.statusEngine,
-		Members:       r.members,
-		Preflight:     r.preflight.Snapshot,
-		AdminSync:     r.adminSync,
-		OperatorLog:   r.operatorLog,
+		Users:          r.users,
+		Subscriptions:  r.subscriptions,
+		Grants:         r.grants,
+		Audit:          r.audit,
+		Whitelist:      r.whitelist,
+		Revocations:    r.revocations,
+		Outbox:         r.outbox,
+		Alerts:         r.alerts,
+		Ops:            r.ops,
+		ChatRoles:      r.chatRoles,
+		ChatInfo:       r.chatInfo,
+		StatusEngine:   r.statusEngine,
+		Members:        r.members,
+		Preflight:      r.preflight.Snapshot,
+		AdminSync:      r.adminSync,
+		OperatorLog:    r.operatorLog,
+		SubscribeLinks: r.subscribeLinks,
 	}, r.ownerIDs)
 	if msg.Chat.Type == models.ChatTypePrivate {
 		result, err := commands.HandlePrivate(ctx, msg)
@@ -353,20 +357,21 @@ func (r *Router) routeCallback(
 
 	if commandbot.IsAdminCallback(query.Data) {
 		commands := commandbot.NewCommands(commandbot.CommandDeps{
-			Users:         r.users,
-			Subscriptions: r.subscriptions,
-			Grants:        r.grants,
-			Audit:         r.audit,
-			Whitelist:     r.whitelist,
-			Revocations:   r.revocations,
-			Outbox:        r.outbox,
-			Alerts:        r.alerts,
-			Ops:           r.ops,
-			ChatRoles:     r.chatRoles,
-			StatusEngine:  r.statusEngine,
-			Members:       r.members,
-			AdminSync:     r.adminSync,
-			OperatorLog:   r.operatorLog,
+			Users:          r.users,
+			Subscriptions:  r.subscriptions,
+			Grants:         r.grants,
+			Audit:          r.audit,
+			Whitelist:      r.whitelist,
+			Revocations:    r.revocations,
+			Outbox:         r.outbox,
+			Alerts:         r.alerts,
+			Ops:            r.ops,
+			ChatRoles:      r.chatRoles,
+			StatusEngine:   r.statusEngine,
+			Members:        r.members,
+			AdminSync:      r.adminSync,
+			OperatorLog:    r.operatorLog,
+			SubscribeLinks: r.subscribeLinks,
 		}, r.ownerIDs)
 
 		result, err := commands.HandleCallback(ctx, query)

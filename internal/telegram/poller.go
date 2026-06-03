@@ -44,6 +44,7 @@ type Poller struct {
 	ownerIDs       []int64
 	adminLogChatID *int64
 	chatRoles      []commandbot.ChatRole
+	subscribeLinks messages.SubscribeLinks
 	operatorLog    *operatorlog.Writer
 	logger         *slog.Logger
 
@@ -96,6 +97,14 @@ func WithPollerOperatorLog(writer *operatorlog.Writer) PollerOption {
 func WithPollerChatRoles(roles []commandbot.ChatRole) PollerOption {
 	return func(p *Poller) {
 		p.chatRoles = append([]commandbot.ChatRole(nil), roles...)
+	}
+}
+
+// WithPollerSubscribeLinks attaches the deployment subscription URLs forwarded
+// to each per-update router for the /boosty and /tribute pages.
+func WithPollerSubscribeLinks(links messages.SubscribeLinks) PollerOption {
+	return func(p *Poller) {
+		p.subscribeLinks = links
 	}
 }
 
@@ -359,6 +368,7 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 		UpdateID:       row.UpdateID,
 		AdminLogChatID: p.adminLogChatID,
 		ChatRoles:      p.chatRoles,
+		SubscribeLinks: p.subscribeLinks,
 	}, p.chats, p.ownerIDs, p.logger,
 		WithStatusEngine(p.statusEngine),
 		WithSourceChats(p.sourceChats),

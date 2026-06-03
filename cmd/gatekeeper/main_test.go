@@ -192,7 +192,7 @@ func validEnv(dbPath string) map[string]string {
 		"ADMIN_LOG_CHAT_ID":           "",
 		"EVENT_LOG_CHAT_ID":           "-1006666666666",
 		"BOOSTY_SUBSCRIBE_URL":        "https://boosty.to/author",
-		"TRIBUTE_SUBSCRIBE_URL":       "https://t.me/tribute/app",
+		"TRIBUTE_SUBSCRIBE_URL_RUB":   "https://t.me/tribute/app",
 		"INVITE_MODE":                 "shared_join_request",
 		"INVITE_TTL":                  "24h",
 		"ALLOW_DIRECT_INVITES":        "false",

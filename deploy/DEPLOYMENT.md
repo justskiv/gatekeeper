@@ -44,7 +44,8 @@ Gatekeeper развёртывается одним контуром (тольк�
 | `OWNER_TG_IDS` | владельцы (через запятую) |
 | `BOOSTY_GROUP_ID`, `TRIBUTE_CHANNEL_ID` | наблюдаемые источники |
 | `CLUB_CHAT_ID`, `CLUB_CHANNEL_ID` | управляемые клубные ресурсы |
-| `BOOSTY_SUBSCRIBE_URL`, `TRIBUTE_SUBSCRIBE_URL` | ссылки на подписку |
+| `BOOSTY_SUBSCRIBE_URL`, `TRIBUTE_SUBSCRIBE_URL_RUB` | ссылки на подписку |
+| `TRIBUTE_SUBSCRIBE_URL_EUR` | опц.: евро-вход Tribute (пусто — скрыть) |
 | `TIMEZONE` | таймзона (напр. `Europe/Moscow`) |
 
 Завести их можно из CLI: `gh variable set OWNER_TG_IDS --env Prod --body "…"`. Полный список ключей и их назначение — в `deploy/config.production.env.example`. Build-workflow дополнительных секретов не требует (пушит в GHCR через `GITHUB_TOKEN`).

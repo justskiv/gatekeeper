@@ -147,7 +147,12 @@ func run() error {
 		telegram.WithPollerAdmissionConfig(admissionConfig(cfg)),
 		telegram.WithPollerAdminLogChatID(cfg.AdminLogChatID),
 		telegram.WithPollerOperatorLog(operatorWriter),
-		telegram.WithPollerChatRoles(chatRolesFromConfig(cfg)))
+		telegram.WithPollerChatRoles(chatRolesFromConfig(cfg)),
+		telegram.WithPollerSubscribeLinks(messages.SubscribeLinks{
+			Boosty:     cfg.BoostySubscribeURL,
+			TributeRUB: cfg.TributeSubscribeURLRub,
+			TributeEUR: cfg.TributeSubscribeURLEur,
+		}))
 
 	var telegramWebhookRegistered atomic.Bool
 	if shouldStartHTTPServer(cfg) {

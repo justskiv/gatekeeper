@@ -45,7 +45,7 @@ Required baseline variables:
 - `CLUB_CHAT_ID`
 - `CLUB_CHANNEL_ID`
 - `BOOSTY_SUBSCRIBE_URL`
-- `TRIBUTE_SUBSCRIBE_URL`
+- `TRIBUTE_SUBSCRIBE_URL_RUB`
 
 Common optional variables:
 

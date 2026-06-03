@@ -39,8 +39,9 @@ type Config struct {
 	EventLogChatID int64
 
 	// Subscribe links
-	BoostySubscribeURL  string
-	TributeSubscribeURL string
+	BoostySubscribeURL     string
+	TributeSubscribeURLRub string
+	TributeSubscribeURLEur string
 
 	// Access granting
 	InviteMode                  string
@@ -108,7 +109,8 @@ func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 	cfg.EventLogChatID = l.chatID("EVENT_LOG_CHAT_ID")
 
 	cfg.BoostySubscribeURL = l.required("BOOSTY_SUBSCRIBE_URL")
-	cfg.TributeSubscribeURL = l.required("TRIBUTE_SUBSCRIBE_URL")
+	cfg.TributeSubscribeURLRub = l.required("TRIBUTE_SUBSCRIBE_URL_RUB")
+	cfg.TributeSubscribeURLEur = l.str("TRIBUTE_SUBSCRIBE_URL_EUR", "")
 
 	cfg.InviteMode = l.enum("INVITE_MODE", "shared_join_request",
 		"shared_join_request", "personal_join_request", "direct")
@@ -462,7 +464,8 @@ func (l *loader) validate(cfg *Config) {
 	}
 
 	l.httpURL("BOOSTY_SUBSCRIBE_URL", cfg.BoostySubscribeURL)
-	l.httpURL("TRIBUTE_SUBSCRIBE_URL", cfg.TributeSubscribeURL)
+	l.httpURL("TRIBUTE_SUBSCRIBE_URL_RUB", cfg.TributeSubscribeURLRub)
+	l.httpURL("TRIBUTE_SUBSCRIBE_URL_EUR", cfg.TributeSubscribeURLEur)
 	l.httpURL("TELEGRAM_WEBHOOK_PUBLIC_URL", cfg.TelegramWebhookPublicURL)
 
 	// Webhook paths are used as HTTP routes; a missing leading slash

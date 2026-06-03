@@ -42,13 +42,17 @@ const (
 	emojiDotGreen    = "5215584915898243758"
 	emojiDotOrange   = "5215200271512117515"
 	emojiGopherHeart = "5294107689847119376"
-
-	// Subscription sign-up links shown to users without active access.
-	// Tribute has a separate entry point for euro-denominated billing.
-	urlBoosty      = "https://boosty.to/nikolay.tuzov/"
-	urlTribute     = "https://t.me/tribute/app?startapp=s3Q5"
-	urlTributeEuro = "https://t.me/tribute/app?startapp=s3Q6"
 )
+
+// SubscribeLinks carries the deployment-specific sign-up URLs shown to users
+// without active access. They flow in from configuration so the personal links
+// are not hardcoded. TributeEUR is optional: an empty value omits the euro
+// billing entry point.
+type SubscribeLinks struct {
+	Boosty     string
+	TributeRUB string
+	TributeEUR string
+}
 
 // InviteLinkLine is one managed resource row shown to a user. A resource the
 // user must still join carries its join URL; one already joined is marked with
@@ -148,11 +152,11 @@ func renewOptions() string {
 
 // Boosty is the /boosty page: where to subscribe and the chat-membership
 // requirement the bot verifies against.
-func Boosty() string {
+func Boosty(links SubscribeLinks) string {
 	return strings.Join([]string{
 		"<b>Подписка Boosty</b>",
 		"",
-		"Оформи подписку: " + SafeLink(urlBoosty, "boosty.to/nikolay.tuzov"),
+		"Оформи подписку: " + SafeLink(links.Boosty, "Boosty"),
 		"",
 		"Для проверки доступа нужно состоять в чате Boosty — " +
 			"бот сверяет подписку через него.",
@@ -163,20 +167,33 @@ func Boosty() string {
 
 // Tribute is the /tribute page: ruble and euro options and the channel
 // subscription requirement the bot verifies against.
-func Tribute() string {
-	return strings.Join([]string{
+func Tribute(links SubscribeLinks) string {
+	intro := "Оплата в рублях:"
+	if links.TributeEUR != "" {
+		intro = "Оплата в рублях или евро:"
+	}
+
+	lines := []string{
 		"<b>Подписка Tribute</b>",
 		"",
-		"Оплата в рублях или евро:",
+		intro,
 		"",
-		"• " + SafeLink(urlTribute, "Рубли"),
-		"• " + SafeLink(urlTributeEuro, "Евро"),
+		"• " + SafeLink(links.TributeRUB, "Рубли"),
+	}
+
+	if links.TributeEUR != "" {
+		lines = append(lines, "• "+SafeLink(links.TributeEUR, "Евро"))
+	}
+
+	lines = append(lines,
 		"",
-		"После оформления подписки надо подписаться на Tribute-канал — " +
+		"После оформления подписки надо подписаться на Tribute-канал — "+
 			"тогда бот подтвердит доступ.",
 		"",
 		"Оформил? Отправь /start — проверю доступ.",
-	}, "\n")
+	)
+
+	return strings.Join(lines, "\n")
 }
 
 // Welcome returns the /start greeting.
