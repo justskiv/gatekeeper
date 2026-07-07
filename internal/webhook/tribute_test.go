@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -311,8 +312,12 @@ func TestTributeWebhookLedgerAllowsStartGrantAccess(t *testing.T) {
 		Engine: engine.New(nil),
 	}
 
+	// Relative dates keep the subscription active at test time (avoids a
+	// calendar time-bomb): started yesterday, expires in 30 days.
+	now := time.Now().UTC()
 	raw := tributeSubscriptionPayload("new_subscription",
-		"2026-06-02T10:00:00Z", "2026-07-02T10:00:00Z")
+		now.Add(-24*time.Hour).Format(time.RFC3339),
+		now.Add(30*24*time.Hour).Format(time.RFC3339))
 	resp := postTribute(t, handler, raw, signTribute(raw))
 	require.Equal(t, http.StatusOK, resp.Code, "webhook status")
 
