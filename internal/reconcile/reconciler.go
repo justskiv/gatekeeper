@@ -60,7 +60,11 @@ type InviteMaintainer interface {
 
 // Reconciler executes idempotent consistency passes.
 type Reconciler struct {
-	db      store.DBTX
+	// db is the connection pool. The reconciler is pool-bound and always owns
+	// its own short transactions (via store.WithTx); it must never be nested
+	// inside a caller's transaction — that would deadlock the single SQLite
+	// connection during the live decide phase.
+	db      *sql.DB
 	engine  *engine.Engine
 	invites InviteMaintainer
 	cfg     Config
@@ -111,9 +115,10 @@ func WithOperatorLog(writer *operatorlog.Writer) Option {
 	}
 }
 
-// New returns a Reconciler.
+// New returns a Reconciler. db must be the connection pool (*sql.DB): the
+// reconciler owns its own transactions and must not run inside a caller's tx.
 func New(
-	db store.DBTX,
+	db *sql.DB,
 	statusEngine *engine.Engine,
 	invites InviteMaintainer,
 	cfg Config,
@@ -247,33 +252,25 @@ func (r *Reconciler) revokeDue(
 	ctx context.Context,
 	pending domain.PendingRevocation,
 ) error {
-	starter, ok := r.db.(interface {
-		BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+	// Hold the per-user lock across BOTH phases so a concurrent event can't
+	// interleave between decide and apply (see engine.WithUserLock).
+	return r.engine.WithUserLock(pending.TGID, func() error {
+		// DECIDE on the pool: live sources + Telegram protection, NO tx open.
+		plan, err := r.engine.RevocationDecision(
+			ctx, r.liveStore(), pending.TGID, pending.Reason)
+		if err != nil {
+			return err
+		}
+
+		// APPLY inside a short tx with tx-scoped repos and Members == nil, so
+		// the write critical section performs no live/pool/network I/O.
+		return store.WithTx(ctx, r.db, func(tx store.DBTX) error {
+			_, err := r.engine.ApplyRevocation(
+				ctx, r.txStore(tx), pending.TGID, plan)
+
+			return err
+		})
 	})
-	if !ok {
-		_, err := r.engine.RevokeNow(ctx, r.engineStore(r.db), pending.TGID,
-			pending.Reason)
-
-		return err
-	}
-
-	tx, err := starter.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin revocation tx: %w", err)
-	}
-
-	if _, err := r.engine.RevokeNow(ctx, r.engineStore(tx), pending.TGID,
-		pending.Reason); err != nil {
-		_ = tx.Rollback()
-
-		return err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit revocation tx: %w", err)
-	}
-
-	return nil
 }
 
 func (r *Reconciler) createHealthFailureAlert(ctx context.Context, err error) error {
@@ -350,7 +347,9 @@ func (r *Reconciler) RunUser(ctx context.Context, tgID int64) (Summary, error) {
 	return summary, nil
 }
 
-func (r *Reconciler) engineStore(db store.DBTX) engine.Store {
+func (r *Reconciler) engineStore(
+	db store.DBTX, members engine.MemberChecker,
+) engine.Store {
 	outbox := store.NewOutbox(db)
 
 	return engine.Store{
@@ -363,9 +362,21 @@ func (r *Reconciler) engineStore(db store.DBTX) engine.Store {
 		Outbox:        outbox,
 		Alerts: store.NewAlertsWithDelivery(
 			db, outbox, r.cfg.OwnerIDs, r.cfg.AdminLogChatID),
-		Members:     r.members,
+		Members:     members,
 		OperatorLog: r.opLog,
 	}
+}
+
+// liveStore is bound to the pool and carries the live member checker. Use it
+// only for the DECIDE phase (RevocationDecision) — never inside a transaction.
+func (r *Reconciler) liveStore() engine.Store {
+	return r.engineStore(r.db, r.members)
+}
+
+// txStore is bound to a transaction and carries NO member checker, so the
+// APPLY phase (ApplyRevocation) performs only tx-scoped DB writes.
+func (r *Reconciler) txStore(tx store.DBTX) engine.Store {
+	return r.engineStore(tx, nil)
 }
 
 func (r *Reconciler) enqueueVerifyCandidates(

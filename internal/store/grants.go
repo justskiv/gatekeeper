@@ -245,7 +245,7 @@ func (r *Grants) Get(
 ) (domain.AccessGrant, error) {
 	row := r.db.QueryRowContext(ctx, `
 		SELECT id, tg_id, resource, state, admitted_by,
-		       joined_at, revoked_at, revoked_reason
+		       joined_at, revoked_at, revoked_reason, updated_at
 		FROM access_grants
 		WHERE tg_id = ? AND resource = ?`,
 		tgID, string(resource))
@@ -269,7 +269,7 @@ func (r *Grants) ListByUser(
 ) ([]domain.AccessGrant, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, tg_id, resource, state, admitted_by,
-		       joined_at, revoked_at, revoked_reason
+		       joined_at, revoked_at, revoked_reason, updated_at
 		FROM access_grants
 		WHERE tg_id = ?
 		ORDER BY resource`, tgID)
@@ -303,7 +303,7 @@ func (r *Grants) ListEligibleForRevoke(
 ) ([]domain.AccessGrant, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, tg_id, resource, state, admitted_by,
-		       joined_at, revoked_at, revoked_reason
+		       joined_at, revoked_at, revoked_reason, updated_at
 		FROM access_grants
 		WHERE tg_id = ?
 		  AND state IN ('joined', 'pending')
@@ -412,10 +412,11 @@ func scanGrant(scanner grantScanner) (domain.AccessGrant, error) {
 		g                     domain.AccessGrant
 		resourceStr, stateStr string
 		joinedAt, revokedAt   sql.NullString
+		updatedAt             string
 	)
 
 	err := scanner.Scan(&g.ID, &g.TGID, &resourceStr, &stateStr, &g.AdmittedBy,
-		&joinedAt, &revokedAt, &g.RevokedReason)
+		&joinedAt, &revokedAt, &g.RevokedReason, &updatedAt)
 	if err != nil {
 		return domain.AccessGrant{}, err
 	}
@@ -429,6 +430,10 @@ func scanGrant(scanner grantScanner) (domain.AccessGrant, error) {
 
 	if g.RevokedAt, err = parseNullTime(revokedAt); err != nil {
 		return domain.AccessGrant{}, fmt.Errorf("parse grant revoked_at: %w", err)
+	}
+
+	if g.UpdatedAt, err = parseTime(updatedAt); err != nil {
+		return domain.AccessGrant{}, fmt.Errorf("parse grant updated_at: %w", err)
 	}
 
 	return g, nil

@@ -31,6 +31,36 @@ type txStarter interface {
 	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
 }
 
+// WithTx runs fn inside a single transaction when db can start one (a *sql.DB),
+// committing on success and rolling back on error. When db cannot start a
+// transaction (already a *sql.Tx, or a test double), fn runs directly against
+// db. The DBTX handed to fn is tx-scoped, so repositories built from it use the
+// transaction's connection rather than the pool. It centralizes the BeginTx
+// type assertion so callers do not hand-roll it.
+func WithTx(ctx context.Context, db DBTX, fn func(q DBTX) error) error {
+	starter, ok := db.(txStarter)
+	if !ok {
+		return fn(db)
+	}
+
+	tx, err := starter.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
+	}
+
+	return nil
+}
+
 // ErrNotFound is returned by repository getters when no row matches.
 var ErrNotFound = errors.New("store: record not found")
 

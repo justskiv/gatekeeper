@@ -119,3 +119,30 @@ type Snapshot struct {
 	Verdicts []domain.SourceVerdict
 	Decision domain.AccessDecision
 }
+
+// RevocationPlan is the output of the DECIDE phase of a revocation. It carries
+// no live/pool/network handles, so ApplyRevocation can consume it inside a
+// transaction. Produced by RevocationDecision (outside any tx, on the pool),
+// applied by ApplyRevocation (inside a tx, tx-scoped repos only). The caller
+// holds WithUserLock across both phases.
+type RevocationPlan struct {
+	TGID     int64
+	Reason   string
+	Decision domain.AccessDecision
+	Verdicts []domain.SourceVerdict
+
+	// Revokes is the per-grant revocation plan captured at decide time: for each
+	// eligible grant, its resource, an identity token (UpdatedAt) proving which
+	// grant instance was evaluated, and the live protection verdict. Apply
+	// revokes a grant only when a currently-eligible grant matches this identity
+	// and is unprotected; any grant that changed or appeared since decide is
+	// skipped and the pending revocation is retried next pass.
+	Revokes []PlannedRevoke
+}
+
+// PlannedRevoke is one revoke-eligible grant resolved during the decide phase.
+type PlannedRevoke struct {
+	Resource  domain.Resource
+	UpdatedAt time.Time // identity token: the grant's updated_at at decide time
+	Protected bool      // live isProtected verdict (creator/administrator)
+}

@@ -19,6 +19,7 @@ import (
 	"github.com/justskiv/gatekeeper/internal/messages"
 	"github.com/justskiv/gatekeeper/internal/notify"
 	"github.com/justskiv/gatekeeper/internal/operatorlog"
+	"github.com/justskiv/gatekeeper/internal/reconcile"
 	"github.com/justskiv/gatekeeper/internal/source"
 	"github.com/justskiv/gatekeeper/internal/store"
 )
@@ -412,7 +413,65 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 
 	p.deliverEffects(ctx, result.Effects)
 
+	// Run a /sync-requested reconcile pass AFTER the update transaction has
+	// committed, on the pool. Doing it inside the tx above would deadlock the
+	// single SQLite connection during the reconcile's live decide phase.
+	if result.PostCommitSync != nil {
+		p.runPostCommitSync(ctx, result.PostCommitSync)
+	}
+
 	return nil
+}
+
+// runPostCommitSync executes a deferred owner /sync reconcile pass on the pool
+// and reports the summary to the admin log chat when configured. It is
+// best-effort: failures are logged, never surfaced to the update loop.
+func (p *Poller) runPostCommitSync(ctx context.Context, job *SyncJob) {
+	runner := reconcile.New(
+		p.db,
+		p.statusEngine,
+		nil,
+		job.Config,
+		p.logger,
+		reconcile.WithMemberChecker(NewClubMemberChecker(
+			p.client, p.admissionCfg.ClubChatID, p.admissionCfg.ClubChannelID)),
+		reconcile.WithOperatorLog(p.operatorLog),
+	)
+
+	var (
+		summary reconcile.Summary
+		err     error
+	)
+
+	if job.Target != nil {
+		summary, err = runner.RunUser(ctx, *job.Target)
+	} else {
+		summary, err = runner.RunOnce(ctx)
+	}
+
+	if err != nil {
+		if isContextDone(ctx, err) {
+			return
+		}
+
+		p.logger.Warn("post-commit sync failed", slog.Any("error", err))
+
+		return
+	}
+
+	processed := summary.DueRevocations + summary.VerifyActions + summary.InviteActions
+	p.logger.Info("post-commit sync completed",
+		slog.Int("processed", processed),
+		slog.Int("failed", summary.Failed))
+
+	if job.Config.AdminLogChatID != nil {
+		p.deliverEffects(ctx, []OutboundMessage{{
+			Kind:      OutboundChatMessage,
+			ChatID:    *job.Config.AdminLogChatID,
+			Text:      messages.SyncSummary(processed, summary.Failed),
+			ParseMode: messages.ParseModeHTML,
+		}})
+	}
 }
 
 // chatTitleResolver adapts the live Telegram client to a ChatTitleResolver for

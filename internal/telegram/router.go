@@ -44,12 +44,26 @@ type OutboundMessage struct {
 type RouteResult struct {
 	Status  store.TelegramUpdateStatus
 	Effects []OutboundMessage
+
+	// PostCommitSync, when set, is a reconcile pass the poller must run on the
+	// pool AFTER this update's transaction commits. Running reconcile inside the
+	// update transaction would deadlock the single SQLite connection during the
+	// live decide phase (see adminSync).
+	PostCommitSync *SyncJob
+}
+
+// SyncJob is a deferred reconcile pass requested by an owner /sync command. It
+// is executed post-commit, on the pool, by the poller.
+type SyncJob struct {
+	Config reconcile.Config
+	Target *int64 // nil => full RunOnce; non-nil => RunUser(*Target)
 }
 
 // Router dispatches persisted updates to phase-specific handlers.
 type Router struct {
 	users          *store.Users
 	db             store.DBTX
+	pendingSync    *SyncJob
 	subscriptions  *store.Subscriptions
 	grants         *store.Grants
 	meta           *store.Meta
@@ -700,19 +714,26 @@ func (r *Router) processedEffects(
 		return RouteResult{}, err
 	}
 
-	return processed(direct), nil
+	result := processed(direct)
+	// Carry any deferred reconcile requested during this update (adminSync).
+	// nil for every update except an owner /sync. The poller runs it on the
+	// pool after this update's transaction commits.
+	result.PostCommitSync = r.pendingSync
+
+	return result, nil
 }
 
-func (r *Router) adminSync(ctx context.Context, tgID *int64) (string, error) {
-	if r.statusEngine == nil || r.db == nil {
+// adminSync records a deferred reconcile pass instead of running it inline. The
+// pass MUST run on the pool after this update's transaction commits: running it
+// here would deadlock the single SQLite connection during the live decide
+// phase. The poller executes the recorded SyncJob post-commit.
+func (r *Router) adminSync(_ context.Context, tgID *int64) (string, error) {
+	if r.statusEngine == nil {
 		return messages.SyncSummary(0, 1), nil
 	}
 
-	runner := reconcile.New(
-		r.db,
-		r.statusEngine,
-		nil,
-		reconcile.Config{
+	r.pendingSync = &SyncJob{
+		Config: reconcile.Config{
 			InviteMode: r.admissionCfg.InviteMode,
 			Sources: []reconcile.SourceChat{
 				{
@@ -733,30 +754,10 @@ func (r *Router) adminSync(ctx context.Context, tgID *int64) (string, error) {
 			OwnerIDs:       r.ownerIDs,
 			AdminLogChatID: r.adminLogChatID,
 		},
-		r.logger,
-		reconcile.WithMemberChecker(r.members),
-		reconcile.WithOperatorLog(r.operatorLog),
-	)
-
-	var (
-		summary reconcile.Summary
-		err     error
-	)
-
-	if tgID != nil {
-		summary, err = runner.RunUser(ctx, *tgID)
-	} else {
-		summary, err = runner.RunOnce(ctx)
+		Target: tgID,
 	}
 
-	if err != nil {
-		return "", err
-	}
-
-	return messages.SyncSummary(
-		summary.DueRevocations+summary.VerifyActions+summary.InviteActions,
-		summary.Failed,
-	), nil
+	return messages.SyncStarted(), nil
 }
 
 func (r *Router) durableDMEffects(

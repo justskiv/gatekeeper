@@ -128,6 +128,7 @@ type AccessGrant struct {
 	JoinedAt      *time.Time
 	RevokedAt     *time.Time
 	RevokedReason string
+	UpdatedAt     time.Time
 }
 
 // InviteLink is a link created by the bot to grant access.

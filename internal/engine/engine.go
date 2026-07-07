@@ -497,18 +497,113 @@ func (e *Engine) revokeNow(
 	}
 
 	if finalCheck {
-		decision, err := e.revocationDecision(ctx, repos, tgID)
+		// Combined path (pool callers, e.g. direct RevokeNow): decide and apply
+		// on the same repos. Safe when repos is the pool. Callers that split the
+		// phases across a transaction boundary must use RevocationDecision +
+		// ApplyRevocation instead (see reconcile.revokeDue).
+		plan, err := e.RevocationDecision(ctx, repos, tgID, reason)
 		if err != nil {
 			return nil, err
 		}
 
-		switch decision.Status {
-		case domain.StatusActive:
-			return e.cancelRevocation(ctx, repos, tgID, decision)
-		case domain.StatusUnknown:
-			return nil, e.alertUnsafeRevocation(ctx, repos, tgID, reason)
-		case domain.StatusInactive:
+		return e.applyRevocation(ctx, repos, tgID, plan)
+	}
+
+	// Immediate mode (handleInactive, EXPIRY_MODE=immediate): no live final
+	// decision. Resolve grant protection, then apply. Phase 2 will split this
+	// path across a transaction boundary too; today it runs only in immediate
+	// mode.
+	revokes, err := e.grantPlan(ctx, repos, tgID)
+	if err != nil {
+		return nil, err
+	}
+
+	plan := RevocationPlan{
+		TGID:     tgID,
+		Reason:   reason,
+		Decision: domain.AccessDecision{Status: domain.StatusInactive},
+		Revokes:  revokes,
+	}
+
+	return e.applyRevokes(ctx, repos, tgID, plan, false)
+}
+
+// WithUserLock runs fn while holding the per-user serialization lock.
+//
+// The lock is the same non-reentrant KeyedMutex used by RevokeNow,
+// RecomputeAccess, ApplyObservations, and HandleEvent. Callers that split a
+// revocation across a transaction boundary (decide on the pool, apply in a tx)
+// must hold it across BOTH phases.
+//
+// Non-reentrant contract: fn MUST NOT call RevokeNow, RecomputeAccess,
+// ApplyObservations, or HandleEvent — they take this same lock and would
+// deadlock. Inside fn use only the non-locking primitives RevocationDecision
+// and ApplyRevocation.
+func (e *Engine) WithUserLock(tgID int64, fn func() error) error {
+	unlock := e.locks.Lock(tgID)
+	defer unlock()
+
+	return fn()
+}
+
+// RevocationDecision runs the DECIDE phase of a revocation: it probes live
+// sources (LiveSnapshot) and, when the aggregated status is inactive, the live
+// Telegram protection status of each eligible grant. It runs entirely on the
+// pool with NO open transaction and performs NO writes. It does NOT take the
+// per-user lock — the caller must already hold WithUserLock(tgID). Feed the
+// returned plan to ApplyRevocation inside a transaction.
+func (e *Engine) RevocationDecision(
+	ctx context.Context,
+	repos Store,
+	tgID int64,
+	reason string,
+) (RevocationPlan, error) {
+	if reason == "" {
+		reason = "inactive"
+	}
+
+	plan := RevocationPlan{TGID: tgID, Reason: reason}
+
+	if len(e.sources) == 0 {
+		decision, err := e.persistedDecision(ctx, repos, tgID)
+		if err != nil {
+			return RevocationPlan{}, err
 		}
+
+		plan.Decision = decision
+	} else {
+		snapshot, err := e.LiveSnapshot(ctx, repos, tgID)
+		if err != nil {
+			return RevocationPlan{}, err
+		}
+
+		plan.Decision = snapshot.Decision
+		plan.Verdicts = snapshot.Verdicts
+	}
+
+	if plan.Decision.Status == domain.StatusInactive {
+		revokes, err := e.grantPlan(ctx, repos, tgID)
+		if err != nil {
+			return RevocationPlan{}, err
+		}
+
+		plan.Revokes = revokes
+	}
+
+	return plan, nil
+}
+
+// grantPlan reads the eligible grants and resolves, for each, its identity
+// token (updated_at) and live protection status. It is the ONLY place
+// isProtected (Members.GetChatMember, a Telegram call) runs on the revocation
+// path, so it must run in the decide phase, outside any transaction.
+func (e *Engine) grantPlan(
+	ctx context.Context,
+	repos Store,
+	tgID int64,
+) ([]PlannedRevoke, error) {
+	if repos.Grants == nil {
+		return nil, nil
 	}
 
 	grants, err := repos.Grants.ListEligibleForRevoke(ctx, tgID)
@@ -516,63 +611,166 @@ func (e *Engine) revokeNow(
 		return nil, err
 	}
 
-	revokedResources := make([]domain.Resource, 0, len(grants))
-
+	plan := make([]PlannedRevoke, 0, len(grants))
 	for _, grant := range grants {
-		ok, err := e.revokeGrant(ctx, repos, grant, reason)
+		protected, err := e.isProtected(ctx, repos, grant)
 		if err != nil {
 			return nil, err
 		}
 
-		if ok {
+		plan = append(plan, PlannedRevoke{
+			Resource:  grant.Resource,
+			UpdatedAt: grant.UpdatedAt,
+			Protected: protected,
+		})
+	}
+
+	return plan, nil
+}
+
+// ApplyRevocation runs the APPLY phase of a revocation inside the caller's
+// transaction, using tx-scoped repos only. It performs NO live source,
+// Telegram, or pool access — repos.Members MUST be nil. It persists the
+// observations captured at decide time (atomic with the revoke), then acts on
+// the plan's decision. The caller must hold the same WithUserLock(tgID) that
+// spanned RevocationDecision.
+func (e *Engine) ApplyRevocation(
+	ctx context.Context,
+	repos Store,
+	tgID int64,
+	plan RevocationPlan,
+) ([]Effect, error) {
+	if plan.TGID != tgID {
+		return nil, fmt.Errorf(
+			"revocation plan tgID mismatch: %d != %d", plan.TGID, tgID)
+	}
+
+	return e.applyRevocation(ctx, repos, tgID, plan)
+}
+
+func (e *Engine) applyRevocation(
+	ctx context.Context,
+	repos Store,
+	tgID int64,
+	plan RevocationPlan,
+) ([]Effect, error) {
+	if len(plan.Verdicts) > 0 {
+		if err := e.applyObservations(ctx, repos, tgID, plan.Verdicts); err != nil {
+			return nil, err
+		}
+	}
+
+	switch plan.Decision.Status {
+	case domain.StatusActive:
+		return e.cancelRevocation(ctx, repos, tgID, plan.Decision)
+	case domain.StatusUnknown:
+		return nil, e.alertUnsafeRevocation(ctx, repos, tgID, plan.Reason)
+	case domain.StatusInactive:
+		return e.applyRevokes(ctx, repos, tgID, plan, true)
+	}
+
+	return nil, nil
+}
+
+// applyRevokes performs the pure-DB revoke writes for a decided plan. It
+// re-reads the eligible grants through the caller's tx and revokes only a grant
+// that still matches the decide snapshot by identity (updated_at) and was
+// resolved as unprotected. A grant that changed or appeared since decide is
+// skipped, and the pending revocation is kept so the next reconcile re-evaluates
+// it live — even when other grants were revoked in this pass.
+func (e *Engine) applyRevokes(
+	ctx context.Context,
+	repos Store,
+	tgID int64,
+	plan RevocationPlan,
+	finalCheck bool,
+) ([]Effect, error) {
+	grants, err := repos.Grants.ListEligibleForRevoke(ctx, tgID)
+	if err != nil {
+		return nil, err
+	}
+
+	planned := make(map[domain.Resource]PlannedRevoke, len(plan.Revokes))
+	for _, pr := range plan.Revokes {
+		planned[pr.Resource] = pr
+	}
+
+	revokedResources := make([]domain.Resource, 0, len(grants))
+	skipped := false
+
+	for _, grant := range grants {
+		pr, ok := planned[grant.Resource]
+		if !ok || !pr.UpdatedAt.Equal(grant.UpdatedAt) {
+			// The grant appeared or changed since the decide snapshot, so its
+			// live protection verdict is absent or stale. Skip it and keep the
+			// pending revocation so the next reconcile re-evaluates it live.
+			skipped = true
+
+			continue
+		}
+
+		if pr.Protected {
+			if err := e.alertProtected(ctx, repos, grant); err != nil {
+				return nil, err
+			}
+
+			continue
+		}
+
+		revokedOne, err := e.applyRevokeGrant(ctx, repos, grant, plan.Reason)
+		if err != nil {
+			return nil, err
+		}
+
+		if revokedOne {
 			revokedResources = append(revokedResources, grant.Resource)
 		}
 	}
 
-	if len(revokedResources) == 0 {
+	if len(revokedResources) > 0 {
+		if err := e.emitAccessLost(ctx, repos, tgID, revokedResources,
+			plan.Reason, e.lossMode(finalCheck)); err != nil {
+			return nil, err
+		}
+	}
+
+	// Clear the pending revocation only when every eligible grant was resolved
+	// (revoked or protected). If any grant was skipped — it appeared or changed
+	// since decide — keep the pending so the next pass retries, even when other
+	// grants were revoked here.
+	if !skipped {
 		if err := repos.Revocations.Delete(ctx, tgID); err != nil {
 			return nil, err
 		}
 
-		if err := repos.Audit.Append(ctx, store.AuditEntry{
-			TGID:   &tgID,
-			Kind:   "access_revoke_noop",
-			Actor:  "system",
-			Detail: reason,
-		}); err != nil {
-			return nil, err
+		if len(revokedResources) == 0 {
+			if err := repos.Audit.Append(ctx, store.AuditEntry{
+				TGID:   &tgID,
+				Kind:   "access_revoke_noop",
+				Actor:  "system",
+				Detail: plan.Reason,
+			}); err != nil {
+				return nil, err
+			}
 		}
-
-		return nil, nil
 	}
 
-	if err := repos.Revocations.Delete(ctx, tgID); err != nil {
-		return nil, err
+	if len(revokedResources) > 0 {
+		return e.notifyUser(ctx, repos, tgID, messages.Revoked(),
+			"revoked:"+plan.Reason)
 	}
 
-	if err := e.emitAccessLost(ctx, repos, tgID, revokedResources, reason,
-		e.lossMode(finalCheck)); err != nil {
-		return nil, err
-	}
-
-	return e.notifyUser(ctx, repos, tgID, messages.Revoked(), "revoked:"+reason)
+	return nil, nil
 }
 
-func (e *Engine) revokeGrant(
+// applyRevokeGrant is the pure-DB revoke of one grant, using the protection
+// verdict already computed in the decide phase (no live Members call here).
+func (e *Engine) applyRevokeGrant(
 	ctx context.Context,
 	repos Store,
 	grant domain.AccessGrant,
 	reason string,
 ) (bool, error) {
-	protected, err := e.isProtected(ctx, repos, grant)
-	if err != nil {
-		return false, err
-	}
-
-	if protected {
-		return false, e.alertProtected(ctx, repos, grant)
-	}
-
 	ok, err := repos.Grants.Revoke(ctx, grant.TGID, grant.Resource, reason)
 	if err != nil || !ok {
 		return false, err
@@ -645,27 +843,6 @@ func (e *Engine) alertUnsafeRevocation(
 	})
 
 	return err
-}
-
-func (e *Engine) revocationDecision(
-	ctx context.Context,
-	repos Store,
-	tgID int64,
-) (domain.AccessDecision, error) {
-	if len(e.sources) == 0 {
-		return e.persistedDecision(ctx, repos, tgID)
-	}
-
-	snapshot, err := e.LiveSnapshot(ctx, repos, tgID)
-	if err != nil {
-		return domain.AccessDecision{}, err
-	}
-
-	if err := e.applyObservations(ctx, repos, tgID, snapshot.Verdicts); err != nil {
-		return domain.AccessDecision{}, err
-	}
-
-	return snapshot.Decision, nil
 }
 
 func (e *Engine) isProtected(

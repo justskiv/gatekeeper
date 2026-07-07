@@ -763,6 +763,14 @@ func SyncSummary(processed, failed int) string {
 		Code(strconv.Itoa(failed)))
 }
 
+// SyncStarted tells an owner that a /sync reconcile pass was queued. The pass
+// runs after the current update commits; its result is reported to the admin
+// log chat (when configured).
+func SyncStarted() string {
+	return statusDotGreen() +
+		"<b>Сверка запущена</b>\n\nРезультат придёт в админ-лог по завершении."
+}
+
 // OperatorAlert renders a durable operator alert.
 func OperatorAlert(severity, kind, title, detail string) string {
 	var b strings.Builder
