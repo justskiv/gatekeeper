@@ -360,7 +360,11 @@ revocation. `/unban <tg_id>` MUST снять hard-ban; доступ после u
 
 `/sync [tg_id]` MUST запускать reconciliation после owner confirmation:
 для одного пользователя, если аргумент указан, или полный pass, если
-аргумента нет.
+аргумента нет. Reconciliation MUST выполняться асинхронно после commit
+update-транзакции (на пуле), а не синхронно внутри неё: reconcile внутри
+update-транзакции дедлочит единственное SQLite-соединение на своей live
+decide-фазе. Немедленный ответ владельцу MUST подтверждать запуск; итоговая
+сводка MUST приходить отдельным сообщением (admin log, когда задан).
 
 #### Scenario: Grant создаёт stub user по числовому tg_id
 - **WHEN** owner выполняет `/grant 12345` для неизвестного пользователя
@@ -383,6 +387,13 @@ revocation. `/unban <tg_id>` MUST снять hard-ban; доступ после u
 - **THEN** Reconciler проверяет только указанного пользователя и
   связанные resources
 - **AND** full reconciliation pass не запускается
+
+#### Scenario: Sync выполняется вне update-транзакции
+- **WHEN** owner подтверждает `/sync`
+- **THEN** reconcile не исполняется внутри update-транзакции
+- **AND** reconcile выполняется на пуле после её commit
+- **AND** владелец получает немедленное подтверждение запуска, а сводка
+  приходит отдельным сообщением
 
 ### Requirement: Owner action commands require inline confirmation
 
