@@ -32,6 +32,7 @@ func TestWithUserLockPropagatesResult(t *testing.T) {
 // lock) would hang forever; the timeout turns that into a fast failure.
 func TestDecideApplyInsideUserLockDoesNotSelfDeadlock(t *testing.T) {
 	db := testutil.NewDB(t)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 

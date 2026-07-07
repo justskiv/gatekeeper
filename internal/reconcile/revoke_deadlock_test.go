@@ -85,6 +85,7 @@ func seedDueRevocation(t *testing.T, db *sql.DB, tgID int64, now time.Time) {
 // hang into a fast failure.
 func TestRevokeDueWithPoolReadingSourceDoesNotDeadlock(t *testing.T) {
 	db := testutil.NewDB(t)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -118,6 +119,7 @@ func TestRevokeDueWithPoolReadingSourceDoesNotDeadlock(t *testing.T) {
 // a protected grant is not soft-kicked in the apply phase.
 func TestRevokeDueProtectionResolvedInDecidePhase(t *testing.T) {
 	db := testutil.NewDB(t)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
