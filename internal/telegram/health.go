@@ -181,12 +181,17 @@ func recordHealthFailure(
 		return err
 	}
 
-	_, created, err := alerts.CreateOpenIfMissing(ctx, store.AlertInput{
+	alertID, created, err := alerts.CreateOpenIfMissing(ctx, store.AlertInput{
 		Severity: chat.Severity,
 		Kind:     alertKindBotRightsLost,
 		Title:    alertTitle(chat),
 		Detail: fmt.Sprintf(
 			"chat_key=%s chat_id=%d reason=%s", chat.Key, chat.ID, reason),
+		// This path notifies the owner itself, a few lines down, with copy that
+		// names the chat and the reason. The repository this path is given has
+		// no delivery wired, so the flag changes nothing today — it is set so
+		// that wiring one later adds a second message to nobody.
+		OwnerNotifiedByCaller: true,
 	})
 	if err != nil {
 		return err
@@ -197,8 +202,12 @@ func recordHealthFailure(
 		slog.Int64("chat_id", chat.ID),
 		slog.String("reason", reason))
 
+	// The notification is linked to the alert it describes. On the durable
+	// path that link is what lets a later restoration cancel a DM that has not
+	// gone out yet — the owner must not be told at 09:16 about rights that
+	// came back at 01:22.
 	if notifier != nil && created {
-		_ = notifier.SendFormattedOwners(ctx, ownerIDs,
+		_ = notifier.SendFormattedAlertOwners(ctx, ownerIDs, alertID,
 			messages.HealthFailure(chat.Name, chat.ID, reason))
 	}
 
@@ -302,17 +311,29 @@ func handleMyChatMember(
 			return nil, err
 		}
 
-		if _, _, err := repos.alerts.CreateOpenIfMissing(ctx, store.AlertInput{
+		alertID, _, err := repos.alerts.CreateOpenIfMissing(ctx, store.AlertInput{
 			Severity: chat.Severity,
 			Kind:     alertKindBotRightsLost,
 			Title:    alertTitle(chat),
 			Detail: fmt.Sprintf(
 				"chat_key=%s chat_id=%d reason=%s", chat.Key, chat.ID, reason),
-		}); err != nil {
+			// The poller hands this path a delivery-enabled repository, so
+			// without the opt-out one lost right costs the owner two messages:
+			// the repository's generic operator alert and the effect returned
+			// below. The effect wins because it names the chat and the reason;
+			// the generic text can only quote the alert row back.
+			OwnerNotifiedByCaller: true,
+		})
+		if err != nil {
 			return nil, err
 		}
 
-		return ownerEffects(ownerIDs,
+		// The id is carried into the effect rather than discarded. Without it
+		// the owner DM is durable but unlinked: rights that come back resolve
+		// the alert and retire its other deliveries while this one still goes
+		// out, hours later, about a problem that is over. Same reasoning as
+		// recordHealthFailure on the startup/reconcile path.
+		return ownerAlertEffects(ownerIDs, alertID,
 			messages.HealthFailure(chat.Name, chat.ID, reason)), nil
 	}
 
@@ -438,7 +459,27 @@ func findHealthChat(chats []HealthChat, id int64) (HealthChat, bool) {
 	return HealthChat{}, false
 }
 
+// ownerEffects builds one owner DM per owner for a message that reports on no
+// particular alert: a discovery notice, or rights coming back.
 func ownerEffects(ownerIDs []int64, text string) []OutboundMessage {
+	return ownerMessages(ownerIDs, text, nil)
+}
+
+// ownerAlertEffects builds owner DMs that report on alertID, so the durable
+// rows they become are retired when that alert resolves.
+func ownerAlertEffects(
+	ownerIDs []int64,
+	alertID int64,
+	text string,
+) []OutboundMessage {
+	return ownerMessages(ownerIDs, text, &alertID)
+}
+
+func ownerMessages(
+	ownerIDs []int64,
+	text string,
+	alertID *int64,
+) []OutboundMessage {
 	effects := make([]OutboundMessage, 0, len(ownerIDs))
 	for _, ownerID := range ownerIDs {
 		effects = append(effects, OutboundMessage{
@@ -446,6 +487,7 @@ func ownerEffects(ownerIDs []int64, text string) []OutboundMessage {
 			TGID:      ownerID,
 			Text:      text,
 			ParseMode: messages.ParseModeHTML,
+			AlertID:   alertID,
 		})
 	}
 

@@ -146,7 +146,7 @@ func (p *Poller) Run(ctx context.Context) error {
 
 	offset, err := updatesRepo.ResolveOffset(ctx, store.NewMeta(p.db))
 	if err != nil {
-		if isContextDone(ctx, err) {
+		if ctx.Err() != nil {
 			return nil
 		}
 
@@ -156,7 +156,7 @@ func (p *Poller) Run(ctx context.Context) error {
 	p.logger.Info("telegram poller resolved offset", slog.Int64("offset", offset))
 
 	if err := p.processPending(ctx); err != nil {
-		if isContextDone(ctx, err) {
+		if ctx.Err() != nil {
 			return nil
 		}
 
@@ -179,7 +179,7 @@ func (p *Poller) Run(ctx context.Context) error {
 			AllowedUpdates: DefaultAllowedUpdates,
 		})
 		if err != nil {
-			if isContextDone(ctx, err) {
+			if ctx.Err() != nil {
 				return nil
 			}
 
@@ -189,7 +189,7 @@ func (p *Poller) Run(ctx context.Context) error {
 
 			nextBackoff, waitErr := p.waitAfterPollError(ctx, err, backoff)
 			if waitErr != nil {
-				if isContextDone(ctx, waitErr) {
+				if ctx.Err() != nil {
 					return nil
 				}
 
@@ -213,7 +213,7 @@ func (p *Poller) Run(ctx context.Context) error {
 		}
 
 		if err := updatesRepo.InsertBatch(ctx, batch, nextOffset); err != nil {
-			if isContextDone(ctx, err) {
+			if ctx.Err() != nil {
 				return nil
 			}
 
@@ -223,7 +223,7 @@ func (p *Poller) Run(ctx context.Context) error {
 		offset = nextOffset
 
 		if err := p.processPending(ctx); err != nil {
-			if isContextDone(ctx, err) {
+			if ctx.Err() != nil {
 				return nil
 			}
 
@@ -330,7 +330,7 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 
 	preflight, err := p.buildPreflight(ctx, &update)
 	if err != nil {
-		if isContextDone(ctx, err) {
+		if ctx.Err() != nil {
 			return err
 		}
 
@@ -339,7 +339,7 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
-		if isContextDone(ctx, err) {
+		if ctx.Err() != nil {
 			return err
 		}
 
@@ -384,7 +384,7 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 	if err != nil {
 		_ = tx.Rollback()
 
-		if isContextDone(ctx, err) {
+		if ctx.Err() != nil {
 			return err
 		}
 
@@ -396,7 +396,7 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 	); err != nil {
 		_ = tx.Rollback()
 
-		if isContextDone(ctx, err) {
+		if ctx.Err() != nil {
 			return err
 		}
 
@@ -404,7 +404,7 @@ func (p *Poller) processOne(ctx context.Context, row store.TelegramUpdate) error
 	}
 
 	if err := tx.Commit(); err != nil {
-		if isContextDone(ctx, err) {
+		if ctx.Err() != nil {
 			return err
 		}
 
@@ -450,7 +450,7 @@ func (p *Poller) runPostCommitSync(ctx context.Context, job *SyncJob) {
 	}
 
 	if err != nil {
-		if isContextDone(ctx, err) {
+		if ctx.Err() != nil {
 			return
 		}
 
@@ -507,7 +507,7 @@ func (p *Poller) acknowledgeRetryCallback(ctx context.Context, update *models.Up
 	}
 
 	if err := p.client.AnswerCallbackQuery(ctx, query.ID); err != nil {
-		if isContextDone(ctx, err) {
+		if ctx.Err() != nil {
 			return
 		}
 
@@ -531,7 +531,7 @@ func (p *Poller) acknowledgeRetryCallback(ctx context.Context, update *models.Up
 	if err := p.client.EditMessageReplyMarkup(
 		ctx, msg.Chat.ID, msg.ID, checking,
 	); err != nil {
-		if isContextDone(ctx, err) {
+		if ctx.Err() != nil {
 			return
 		}
 
@@ -782,7 +782,7 @@ func containsID(ids []int64, want int64) bool {
 func (p *Poller) markFailed(ctx context.Context, updateID int64, cause error) error {
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
-		if isContextDone(ctx, err) {
+		if ctx.Err() != nil {
 			return err
 		}
 
@@ -794,7 +794,7 @@ func (p *Poller) markFailed(ctx context.Context, updateID int64, cause error) er
 	); err != nil {
 		_ = tx.Rollback()
 
-		if isContextDone(ctx, err) {
+		if ctx.Err() != nil {
 			return err
 		}
 
@@ -812,7 +812,7 @@ func (p *Poller) markFailed(ctx context.Context, updateID int64, cause error) er
 	}); err != nil {
 		_ = tx.Rollback()
 
-		if isContextDone(ctx, err) {
+		if ctx.Err() != nil {
 			return err
 		}
 
@@ -820,7 +820,7 @@ func (p *Poller) markFailed(ctx context.Context, updateID int64, cause error) er
 	}
 
 	if err := tx.Commit(); err != nil {
-		if isContextDone(ctx, err) {
+		if ctx.Err() != nil {
 			return err
 		}
 
@@ -910,12 +910,6 @@ func buildUpdateBatch(
 	}
 
 	return batch, nextOffset, nil
-}
-
-func isContextDone(ctx context.Context, err error) bool {
-	return ctx.Err() != nil ||
-		errors.Is(err, context.Canceled) ||
-		errors.Is(err, context.DeadlineExceeded)
 }
 
 func updateType(update *models.Update) string {

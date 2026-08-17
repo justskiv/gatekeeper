@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -164,7 +163,7 @@ func (r *Reconciler) Run(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			if _, err := r.RunOnce(ctx); err != nil {
-				if isContextDone(ctx, err) {
+				if ctx.Err() != nil {
 					return nil
 				}
 
@@ -626,10 +625,4 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
-}
-
-func isContextDone(ctx context.Context, err error) bool {
-	return ctx.Err() != nil ||
-		errors.Is(err, context.Canceled) ||
-		errors.Is(err, context.DeadlineExceeded)
 }

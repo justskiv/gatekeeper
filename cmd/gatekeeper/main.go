@@ -47,8 +47,13 @@ func main() {
 	}
 }
 
-//nolint:funlen,wsl_v5 // Startup wiring is intentionally linear.
+//nolint:funlen // Startup wiring is intentionally linear.
 func run() error {
+	// Taken before anything else can fail, because it is what
+	// `gatekeeper_reconcile_last_run_age_seconds` measures from until the first
+	// reconcile pass completes.
+	processStart := time.Now()
+
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -160,6 +165,10 @@ func run() error {
 			db, cfg, statusEngine, poller, healthChats, operatorWriter,
 			func() bool { return true },
 			telegramWebhookRegistered.Load,
+			runtime.enforcer.Alive,
+			enforcerStats(runtime.enforcer),
+			tgClient.APIErrorCounts,
+			processStart,
 			logger,
 		)
 		runtime.group.Go(func() error {
@@ -234,6 +243,57 @@ func shouldStartHTTPServer(cfg config.Config) bool {
 		cfg.MetricsEnabled
 }
 
+// enforcerStats adapts the enforcer's own view of itself to the shape the
+// metrics endpoint declares. The adapter lives here, in main, so that
+// internal/webhook keeps knowing nothing about internal/enforcer — the same
+// arrangement as the readiness and liveness func fields.
+func enforcerStats(enf *enforcer.Enforcer) func() webhook.EnforcerStats {
+	return func() webhook.EnforcerStats {
+		health := enf.Health()
+
+		processed := enf.Processed()
+
+		counts := make([]webhook.ProcessedCount, 0, len(processed))
+		for _, count := range processed {
+			counts = append(counts, webhook.ProcessedCount{
+				Type:   string(count.Type),
+				Result: string(count.Result),
+				Count:  count.Count,
+			})
+		}
+
+		return webhook.EnforcerStats{
+			WorkersConfigured: health.WorkersConfigured,
+			WorkersAlive:      health.WorkersAlive,
+			WorkersStale:      health.WorkersStale,
+			MaxCycleAge:       health.MaxCycleAge,
+			Restarts:          health.Restarts,
+			Processed:         counts,
+		}
+	}
+}
+
+// telegramErrorCounts adapts the client's normalized failure counters the same
+// way, so the exposition can carry them without webhook importing telegram.
+func telegramErrorCounts(
+	counts func() []telegram.APIErrorCount,
+) func() []webhook.TelegramErrorCount {
+	return func() []webhook.TelegramErrorCount {
+		raw := counts()
+
+		out := make([]webhook.TelegramErrorCount, 0, len(raw))
+		for _, count := range raw {
+			out = append(out, webhook.TelegramErrorCount{
+				Method:   count.Method,
+				Category: string(count.Category),
+				Count:    count.Count,
+			})
+		}
+
+		return out
+	}
+}
+
 func newHTTPServer(
 	db *sql.DB,
 	cfg config.Config,
@@ -243,6 +303,10 @@ func newHTTPServer(
 	operatorWriter *operatorlog.Writer,
 	getMeOK func() bool,
 	telegramWebhookRegistered func() bool,
+	enforcerAlive func() bool,
+	enforcerStats func() webhook.EnforcerStats,
+	telegramErrors func() []telegram.APIErrorCount,
+	processStart time.Time,
 	logger *slog.Logger,
 ) *webhook.Server {
 	var tributeHandler http.Handler
@@ -279,8 +343,14 @@ func newHTTPServer(
 			GetMeOK:                            getMeOK,
 			RequireTelegramWebhookRegistration: cfg.TelegramMode == "webhook",
 			TelegramWebhookRegistered:          telegramWebhookRegistered,
+			EnforcerAlive:                      enforcerAlive,
 		},
-		Metrics:  &webhook.Metrics{Ops: store.NewOps(db)},
+		Metrics: &webhook.Metrics{
+			Ops:            store.NewOps(db),
+			Enforcer:       enforcerStats,
+			TelegramErrors: telegramErrorCounts(telegramErrors),
+			ProcessStart:   processStart,
+		},
 		Tribute:  tributeHandler,
 		Telegram: telegramHandler,
 		Logger:   logger,
@@ -400,6 +470,7 @@ type runtimeGroup struct {
 	inviteChecker sharedInviteReadiness
 	reconciler    *reconcile.Reconciler
 	cleanup       *reconcile.CleanupService
+	enforcer      *enforcer.Enforcer
 }
 
 func startRuntime(
@@ -479,6 +550,7 @@ func startRuntime(
 		inviteChecker: inviteService,
 		reconciler:    reconciler,
 		cleanup:       reconcile.NewCleanupService(db, reconcileCfg, logger),
+		enforcer:      enforcerRunner,
 	}, groupCtx
 }
 

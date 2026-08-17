@@ -38,6 +38,12 @@ type OutboundMessage struct {
 	ParseMode string
 	Plain     bool
 	Buttons   [][]commandbot.Button
+
+	// AlertID links the message to the operational alert it reports on, when
+	// there is one. It is what makes the durable row cancellable: resolving the
+	// alert retires the delivery instead of letting it arrive hours later,
+	// describing a problem that is already over.
+	AlertID *int64
 }
 
 // RouteResult describes how an update reached a terminal state.
@@ -788,10 +794,19 @@ func (r *Router) durableDMEffects(
 		}
 
 		var err error
-		if effect.ParseMode != "" && !effect.Plain {
+
+		switch {
+		case effect.AlertID != nil:
+			// An alert-linked message keys on its alert rather than on this
+			// update: the link is the handle a later resolve uses to retire the
+			// row, and it doubles as the dedupe identity, so the same failure
+			// reported twice does not queue two copies.
+			err = notifier.SendAlertDM(
+				ctx, effect.TGID, *effect.AlertID, effect.Text, effect.ParseMode)
+		case effect.ParseMode != "" && !effect.Plain:
 			err = notifier.SendFormattedDurableDM(
 				ctx, effect.TGID, effect.Text, effect.ParseMode, marker)
-		} else {
+		default:
 			err = notifier.SendDurableDM(ctx, effect.TGID, effect.Text, marker)
 		}
 

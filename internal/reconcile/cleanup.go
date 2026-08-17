@@ -53,7 +53,7 @@ func (s *CleanupService) Run(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			if err := s.RunOnce(ctx); err != nil {
-				if isContextDone(ctx, err) {
+				if ctx.Err() != nil {
 					return nil
 				}
 
@@ -77,7 +77,7 @@ func (s *CleanupService) RunOnce(ctx context.Context) error {
 		return err
 	}
 
-	if _, err := cleanup.DeleteDoneActions(ctx, rawCutoff); err != nil {
+	if _, err := cleanup.DeleteSettledActions(ctx, rawCutoff); err != nil {
 		return err
 	}
 

@@ -120,6 +120,7 @@ func (s *Server) Run(ctx context.Context) error {
 func (s *Server) buildMux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", methodHandler(http.MethodGet, s.healthz))
+	mux.HandleFunc("/livez", methodHandler(http.MethodGet, s.livez))
 	mux.HandleFunc("/readyz", methodHandler(http.MethodGet, s.readyz))
 
 	if s.cfg.MetricsEnabled {
@@ -147,6 +148,25 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
+// livez reports process-local liveness only: background subsystems that must
+// be running. It performs no database or network access, and that is what
+// separates it from /readyz, which is deliberately strict and may flap on a
+// transient Telegram or reconcile hiccup. /healthz keeps its narrower meaning:
+// the HTTP server itself is up.
+func (s *Server) livez(w http.ResponseWriter, _ *http.Request) {
+	alive := s.cfg.Readiness.EnforcerAlive
+	if alive == nil || alive() {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+
+		return
+	}
+
+	writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+		"status": "not_live",
+		"failed": []string{"enforcer"},
+	})
+}
+
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	result := s.cfg.Readiness.Check(r.Context())
 	if result.Ready {
@@ -161,6 +181,12 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// metrics answers 200 even when the store read fails part-way, and that is
+// deliberate: a 5xx would throw away the in-process families (worker pool,
+// Telegram errors) that Metrics.Write emits first, exactly when the database is
+// the thing misbehaving. The partial body is not silent either — it carries
+// `gatekeeper_metrics_store_scrape_success 0`, so the failure is a series
+// Prometheus can alert on rather than a line only in this log.
 func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	metrics := s.cfg.Metrics
 	if metrics == nil {
@@ -169,7 +195,8 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	if err := metrics.Write(r.Context(), w); err != nil {
-		s.cfg.Logger.Warn("failed to write metrics", slog.Any("error", err))
+		s.cfg.Logger.Error("metrics scrape read the store incompletely",
+			slog.Any("error", err))
 	}
 }
 

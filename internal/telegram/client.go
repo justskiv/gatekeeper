@@ -8,8 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	botapi "github.com/go-telegram/bot"
@@ -19,7 +23,13 @@ import (
 	"github.com/justskiv/gatekeeper/internal/messages"
 )
 
-const defaultServerURL = "https://api.telegram.org"
+const (
+	defaultServerURL = "https://api.telegram.org"
+
+	// tokenMask stands in for the bot token everywhere an error would
+	// otherwise render it.
+	tokenMask = "***"
+)
 
 // DefaultAllowedUpdates is the explicit update surface requested from
 // Telegram on every poll.
@@ -38,6 +48,27 @@ type Client struct {
 	serverURL      string
 	httpClient     *http.Client
 	allowedUpdates []string
+
+	// errorMu guards errorCounts. Every Telegram call in the process goes
+	// through this one client, so the counters describe the whole runtime.
+	errorMu sync.Mutex
+	// errorCounts tallies normalized API failures per (method, category).
+	// Cardinality is bounded by the Bot API methods this client calls times
+	// the ErrorCategory enum, so the map cannot grow with traffic.
+	errorCounts map[apiErrorKey]int64
+}
+
+// apiErrorKey is one bounded (method, category) counter slot.
+type apiErrorKey struct {
+	method   string
+	category ErrorCategory
+}
+
+// APIErrorCount is one normalized Telegram failure counter.
+type APIErrorCount struct {
+	Method   string
+	Category ErrorCategory
+	Count    int64
 }
 
 // ClientOption configures Client construction.
@@ -101,6 +132,7 @@ func NewClient(token string, opts ...ClientOption) (*Client, error) {
 		serverURL:      options.serverURL,
 		httpClient:     options.httpClient,
 		allowedUpdates: options.allowedUpdates,
+		errorCounts:    map[apiErrorKey]int64{},
 	}, nil
 }
 
@@ -109,11 +141,64 @@ func (c *Client) BotID() int64 {
 	return c.bot.ID()
 }
 
+// normalize classifies a Bot API failure and counts it. Every client method
+// funnels its errors here, which is what makes the counter a complete record of
+// what Telegram did to this process rather than a sample of it.
+func (c *Client) normalize(method string, err error) error {
+	normalized := NormalizeError(method, err)
+	if normalized == nil {
+		return nil
+	}
+
+	category := ErrorCategoryOther
+
+	var apiErr *APIError
+	if errors.As(normalized, &apiErr) {
+		category = apiErr.Category
+	}
+
+	c.errorMu.Lock()
+	defer c.errorMu.Unlock()
+
+	c.errorCounts[apiErrorKey{method: method, category: category}]++
+
+	return normalized
+}
+
+// APIErrorCounts returns the failures seen so far, ordered by method then
+// category so the exposition is stable between scrapes.
+//
+// The counters are in-process and monotonic: they reset when the process
+// restarts, which is exactly the behaviour a Prometheus counter is defined for.
+func (c *Client) APIErrorCounts() []APIErrorCount {
+	c.errorMu.Lock()
+	defer c.errorMu.Unlock()
+
+	out := make([]APIErrorCount, 0, len(c.errorCounts))
+	for key, count := range c.errorCounts {
+		out = append(out, APIErrorCount{
+			Method:   key.method,
+			Category: key.category,
+			Count:    count,
+		})
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Method != out[j].Method {
+			return out[i].Method < out[j].Method
+		}
+
+		return out[i].Category < out[j].Category
+	})
+
+	return out
+}
+
 // GetMe verifies the token and returns the bot user.
 func (c *Client) GetMe(ctx context.Context) (*models.User, error) {
 	user, err := c.bot.GetMe(ctx)
 	if err != nil {
-		return nil, NormalizeError("getMe", err)
+		return nil, c.normalize("getMe", err)
 	}
 
 	return user, nil
@@ -123,7 +208,7 @@ func (c *Client) GetMe(ctx context.Context) (*models.User, error) {
 func (c *Client) GetChat(ctx context.Context, chatID int64) (*models.ChatFullInfo, error) {
 	chat, err := c.bot.GetChat(ctx, &botapi.GetChatParams{ChatID: chatID})
 	if err != nil {
-		return nil, NormalizeError("getChat", err)
+		return nil, c.normalize("getChat", err)
 	}
 
 	return chat, nil
@@ -138,7 +223,7 @@ func (c *Client) GetChatMember(
 		UserID: userID,
 	})
 	if err != nil {
-		return nil, NormalizeError("getChatMember", err)
+		return nil, c.normalize("getChatMember", err)
 	}
 
 	return member, nil
@@ -202,10 +287,10 @@ func (c *Client) sendMessage(
 	_, err := c.bot.SendMessage(ctx, params)
 	if err != nil {
 		if chatID > 0 {
-			return NormalizeError("sendMessage", err)
+			return c.normalize("sendMessage", err)
 		}
 
-		return NormalizeError("sendChatMessage", err)
+		return c.normalize("sendChatMessage", err)
 	}
 
 	return nil
@@ -218,7 +303,7 @@ func (c *Client) AnswerCallbackQuery(ctx context.Context, callbackQueryID string
 		CallbackQueryID: callbackQueryID,
 	})
 	if err != nil {
-		return NormalizeError("answerCallbackQuery", err)
+		return c.normalize("answerCallbackQuery", err)
 	}
 
 	return nil
@@ -250,7 +335,7 @@ func (c *Client) EditMessageText(
 			return nil
 		}
 
-		return NormalizeError("editMessageText", err)
+		return c.normalize("editMessageText", err)
 	}
 
 	return nil
@@ -278,7 +363,7 @@ func (c *Client) EditMessageReplyMarkup(
 			return nil
 		}
 
-		return NormalizeError("editMessageReplyMarkup", err)
+		return c.normalize("editMessageReplyMarkup", err)
 	}
 
 	return nil
@@ -304,7 +389,7 @@ func (c *Client) CreateChatInviteLink(
 
 	var link models.ChatInviteLink
 	if err := c.rawRequest(ctx, "createChatInviteLink", wire, &link); err != nil {
-		return nil, NormalizeError("createChatInviteLink", err)
+		return nil, c.normalize("createChatInviteLink", err)
 	}
 
 	return &link, nil
@@ -321,7 +406,7 @@ func (c *Client) RevokeChatInviteLink(
 		"chat_id":     chatID,
 		"invite_link": inviteLink,
 	}, &link); err != nil {
-		return nil, NormalizeError("revokeChatInviteLink", err)
+		return nil, c.normalize("revokeChatInviteLink", err)
 	}
 
 	return &link, nil
@@ -336,7 +421,7 @@ func (c *Client) ApproveChatJoinRequest(
 		"chat_id": chatID,
 		"user_id": userID,
 	}, nil); err != nil {
-		return NormalizeError("approveChatJoinRequest", err)
+		return c.normalize("approveChatJoinRequest", err)
 	}
 
 	return nil
@@ -351,7 +436,7 @@ func (c *Client) DeclineChatJoinRequest(
 		"chat_id": chatID,
 		"user_id": userID,
 	}, nil); err != nil {
-		return NormalizeError("declineChatJoinRequest", err)
+		return c.normalize("declineChatJoinRequest", err)
 	}
 
 	return nil
@@ -363,7 +448,7 @@ func (c *Client) BanChatMember(ctx context.Context, chatID, userID int64) error 
 		"chat_id": chatID,
 		"user_id": userID,
 	}, nil); err != nil {
-		return NormalizeError("banChatMember", err)
+		return c.normalize("banChatMember", err)
 	}
 
 	return nil
@@ -380,7 +465,7 @@ func (c *Client) UnbanChatMember(
 		"user_id":        userID,
 		"only_if_banned": onlyIfBanned,
 	}, nil); err != nil {
-		return NormalizeError("unbanChatMember", err)
+		return c.normalize("unbanChatMember", err)
 	}
 
 	return nil
@@ -400,7 +485,7 @@ func (c *Client) SetMyCommands(ctx context.Context, ownerIDs []int64) error {
 		Commands: userCommands,
 		Scope:    &models.BotCommandScopeDefault{},
 	}); err != nil {
-		return NormalizeError("setMyCommands", err)
+		return c.normalize("setMyCommands", err)
 	}
 
 	ownerCommands := append([]models.BotCommand(nil), userCommands...)
@@ -459,7 +544,7 @@ func (c *Client) SetMyCommands(ctx context.Context, ownerIDs []int64) error {
 			Commands: ownerCommands,
 			Scope:    &models.BotCommandScopeChat{ChatID: ownerID},
 		}); err != nil {
-			return NormalizeError("setMyCommands", err)
+			return c.normalize("setMyCommands", err)
 		}
 	}
 
@@ -482,7 +567,7 @@ func (c *Client) SetWebhook(
 		"secret_token":    secretToken,
 		"allowed_updates": allowedUpdates,
 	}, nil); err != nil {
-		return NormalizeError("setWebhook", err)
+		return c.normalize("setWebhook", err)
 	}
 
 	return nil
@@ -493,7 +578,7 @@ func (c *Client) DeleteWebhook(ctx context.Context) error {
 	if err := c.rawRequest(ctx, "deleteWebhook", map[string]any{
 		"drop_pending_updates": false,
 	}, nil); err != nil {
-		return NormalizeError("deleteWebhook", err)
+		return c.normalize("deleteWebhook", err)
 	}
 
 	return nil
@@ -515,7 +600,7 @@ func (c *Client) GetUpdates(
 
 	var rawUpdates []json.RawMessage
 	if err := c.rawRequest(ctx, "getUpdates", params, &rawUpdates); err != nil {
-		return nil, NormalizeError("getUpdates", err)
+		return nil, c.normalize("getUpdates", err)
 	}
 
 	updates := make([]FetchedUpdate, 0, len(rawUpdates))
@@ -584,15 +669,22 @@ func (c *Client) rawRequest(
 	req, err := http.NewRequestWithContext(
 		ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("create telegram %s request: %w", method, err)
+		// A parse failure reports the URL it could not parse, and that URL is
+		// the one carrying the token.
+		return fmt.Errorf("create telegram %s request: %w",
+			method, c.redactError(err))
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("do telegram %s request: %s",
-			method, strings.ReplaceAll(err.Error(), c.token, "***"))
+		// %w, not %s: the chain is what makes a client timeout distinguishable
+		// from a cancellation. Redaction happens inside redactError, which
+		// keeps that chain intact while guaranteeing the token appears in no
+		// rendering of the returned error.
+		return fmt.Errorf("do telegram %s request: %w",
+			method, c.redactError(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -637,11 +729,65 @@ func telegramAPIError(method string, resp apiResponse) error {
 	}
 }
 
+// redactError removes the bot token from a transport error while keeping the
+// error unwrappable.
+//
+// Two levels, because the first one alone is not total. *url.Error renders its
+// URL verbatim and that URL carries the token, so the field is scrubbed in
+// place. But the transport underneath is replaceable (WithHTTPClient), and a
+// RoundTripper is free to put the request URL into its own error text, where no
+// struct-level scrub reaches it: that text then travels into APIError.Error(),
+// into access_actions.last_error and into the logs. So the rendered message is
+// redacted wholesale as well, and the result is returned as a wrapper whose
+// Error() is the clean text while Unwrap() still exposes the original chain —
+// errors.Is/errors.As keep working, which is the whole point of wrapping the
+// transport error with %w instead of %s.
+//
+// The wrapper is allocated only when the rendered text actually still carries
+// the token, so the ordinary path returns the error it was given.
+func (c *Client) redactError(err error) error {
+	if err == nil || c.token == "" {
+		return err
+	}
+
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		urlErr.URL = strings.ReplaceAll(urlErr.URL, c.token, tokenMask)
+	}
+
+	message := err.Error()
+
+	redacted := strings.ReplaceAll(message, c.token, tokenMask)
+	if redacted == message {
+		return err
+	}
+
+	return &redactedError{message: redacted, err: err}
+}
+
+// redactedError renders a pre-redacted message while staying transparent to
+// errors.Is and errors.As. Error() is fixed at construction time, so nothing
+// downstream can reformat the original text back into existence.
+type redactedError struct {
+	message string
+	err     error
+}
+
+func (e *redactedError) Error() string {
+	return e.message
+}
+
+func (e *redactedError) Unwrap() error {
+	return e.err
+}
+
 // ErrorCategory is a caller-facing Telegram error class.
 type ErrorCategory string
 
 const (
 	ErrorCategoryRateLimited     ErrorCategory = "rate_limited"
+	ErrorCategoryTimeout         ErrorCategory = "timeout"
+	ErrorCategoryCanceled        ErrorCategory = "canceled"
 	ErrorCategoryDMBlocked       ErrorCategory = "dm_blocked"
 	ErrorCategoryPermanentRights ErrorCategory = "permanent_rights"
 	ErrorCategoryForbidden       ErrorCategory = "forbidden"
@@ -697,6 +843,24 @@ func NormalizeError(method string, err error) error {
 
 	category := ErrorCategoryOther
 
+	// Transport classification runs before the API-level switch but after the
+	// 429 block above: a rate limit whose chain happens to carry a deadline
+	// must stay rate-limited, or it loses retry_after.
+	switch {
+	case errors.Is(err, context.Canceled):
+		return &APIError{
+			Method:   method,
+			Category: ErrorCategoryCanceled,
+			Err:      err,
+		}
+	case isTimeoutErr(err):
+		return &APIError{
+			Method:   method,
+			Category: ErrorCategoryTimeout,
+			Err:      err,
+		}
+	}
+
 	switch {
 	case method == "sendMessage" && errors.Is(err, botapi.ErrorForbidden):
 		category = ErrorCategoryDMBlocked
@@ -715,6 +879,35 @@ func NormalizeError(method string, err error) error {
 	}
 
 	return &APIError{Method: method, Category: category, Err: err}
+}
+
+// isTimeoutErr reports whether err is a request timeout. It covers both the
+// deadline-shaped timeouts (http.Client.Timeout wraps context.DeadlineExceeded)
+// and net.Error timeouts such as "i/o timeout", which carry no deadline.
+func isTimeoutErr(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	var netErr net.Error
+
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// IsTimeout reports whether err is a normalized request timeout. A timeout
+// describes the error, never the caller's intent to stop: shutdown is decided
+// by context state alone.
+func IsTimeout(err error) bool {
+	var apiErr *APIError
+
+	return errors.As(err, &apiErr) &&
+		apiErr.Category == ErrorCategoryTimeout
+}
+
+// IsTransient reports whether err is worth retrying without treating the action
+// as suspect: a request timeout or a rate limit.
+func IsTransient(err error) bool {
+	return IsTimeout(err) || IsRateLimited(err)
 }
 
 // IsRateLimited reports whether err is a normalized 429.

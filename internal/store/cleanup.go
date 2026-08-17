@@ -52,17 +52,20 @@ func (r *Cleanup) DeleteTerminalTributeEvents(
 	return res.RowsAffected()
 }
 
-// DeleteDoneActions deletes completed outbox rows while preserving dead rows.
-func (r *Cleanup) DeleteDoneActions(
+// DeleteSettledActions deletes outbox rows that ended without leaving anything
+// for an operator to look at: `done` (delivered) and `cancelled` (retired
+// before delivery, e.g. because the alert it reported on resolved first).
+// `dead` rows are preserved — those are the ones worth investigating.
+func (r *Cleanup) DeleteSettledActions(
 	ctx context.Context,
 	cutoff time.Time,
 ) (int64, error) {
 	res, err := r.db.ExecContext(ctx, `
 		DELETE FROM access_actions
-		WHERE status = 'done'
+		WHERE status IN ('done', 'cancelled')
 		  AND updated_at < ?`, rfc3339(cutoff))
 	if err != nil {
-		return 0, fmt.Errorf("cleanup done actions: %w", err)
+		return 0, fmt.Errorf("cleanup settled actions: %w", err)
 	}
 
 	return res.RowsAffected()

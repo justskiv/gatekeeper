@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,14 +23,29 @@ import (
 )
 
 type fakeOutbox struct {
+	mu         sync.Mutex
 	action     domain.AccessAction
 	leased     bool
-	done       bool
-	dead       bool
-	retryRunAt time.Time
-	retryError string
-	deadError  string
-	inLease    *bool
+	leaseCount int
+	leaseErr   error
+	// leaseErrTimes limits leaseErr to the first N calls, so a test can let a
+	// worker crash a bounded number of times and then recover. -1 means always.
+	leaseErrTimes int
+	done          bool
+	dead          bool
+	cancelled     bool
+	released      bool
+	retryRunAt    time.Time
+	retryError    string
+	deadError     string
+	cancelReason  string
+	inLease       *bool
+
+	// repeat makes LeaseReady hand out the same action forever, so worker-loop
+	// tests can observe repeated failures instead of a single pass.
+	repeat bool
+	// leaseLost makes terminal transitions report a reclaimed lease.
+	leaseLost bool
 }
 
 func (o *fakeOutbox) LeaseReady(
@@ -37,11 +53,24 @@ func (o *fakeOutbox) LeaseReady(
 	time.Time,
 	time.Duration,
 ) (domain.AccessAction, bool, error) {
-	if o.leased {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if o.leaseErr != nil && o.leaseErrTimes != 0 {
+		if o.leaseErrTimes > 0 {
+			o.leaseErrTimes--
+		}
+
+		return domain.AccessAction{}, false, o.leaseErr
+	}
+
+	if o.leased && !o.repeat {
 		return domain.AccessAction{}, false, nil
 	}
 
 	o.leased = true
+	o.leaseCount++
+
 	if o.inLease != nil {
 		*o.inLease = true
 		defer func() { *o.inLease = false }()
@@ -50,7 +79,14 @@ func (o *fakeOutbox) LeaseReady(
 	return o.action, true, nil
 }
 
-func (o *fakeOutbox) MarkDone(context.Context, int64) error {
+func (o *fakeOutbox) MarkDone(context.Context, int64, time.Time) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if o.leaseLost {
+		return store.ErrLeaseLost
+	}
+
 	o.done = true
 
 	return nil
@@ -59,23 +95,98 @@ func (o *fakeOutbox) MarkDone(context.Context, int64) error {
 func (o *fakeOutbox) Retry(
 	_ context.Context,
 	_ int64,
+	_ time.Time,
 	runAfter time.Time,
 	lastError string,
 ) (domain.AccessAction, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if o.leaseLost {
+		return domain.AccessAction{}, store.ErrLeaseLost
+	}
+
 	o.retryRunAt = runAfter
 	o.retryError = lastError
 
 	return o.action, nil
 }
 
-func (o *fakeOutbox) MarkDead(_ context.Context, _ int64, lastError string) error {
+func (o *fakeOutbox) MarkDead(
+	_ context.Context,
+	_ int64,
+	_ time.Time,
+	lastError string,
+) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if o.leaseLost {
+		return store.ErrLeaseLost
+	}
+
 	o.dead = true
 	o.deadError = lastError
 
 	return nil
 }
 
+func (o *fakeOutbox) MarkCancelled(
+	_ context.Context,
+	_ int64,
+	_ time.Time,
+	reason string,
+) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if o.leaseLost {
+		return store.ErrLeaseLost
+	}
+
+	o.cancelled = true
+	o.cancelReason = reason
+
+	return nil
+}
+
+func (o *fakeOutbox) ReleaseLease(context.Context, int64, time.Time) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	o.released = true
+
+	return nil
+}
+
+func (o *fakeOutbox) snapshot() fakeOutboxState {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	return fakeOutboxState{
+		leaseCount: o.leaseCount,
+		done:       o.done,
+		dead:       o.dead,
+		released:   o.released,
+		retryRunAt: o.retryRunAt,
+		retryError: o.retryError,
+	}
+}
+
+type fakeOutboxState struct {
+	leaseCount int
+	done       bool
+	dead       bool
+	released   bool
+	retryRunAt time.Time
+	retryError string
+}
+
+// fakeTelegram is driven by the whole worker pool in the supervision and
+// liveness tests, so every field access is guarded: several workers call the
+// same fake concurrently and an unguarded `calls` append is a data race.
 type fakeTelegram struct {
+	mu              sync.Mutex
 	sendErr         error
 	member          *models.ChatMember
 	memberErr       error
@@ -91,6 +202,9 @@ type fakeTelegram struct {
 }
 
 func (t *fakeTelegram) SendMessage(context.Context, int64, string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	t.calls = append(t.calls, "sendMessage")
 	if t.networkInLease != nil && *t.networkInLease {
 		return errors.New("network called while lease was active")
@@ -105,6 +219,9 @@ func (t *fakeTelegram) SendFormattedMessage(
 	_ string,
 	parseMode string,
 ) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	t.calls = append(t.calls, "sendFormattedMessage")
 	t.parseMode = parseMode
 
@@ -122,6 +239,9 @@ func (t *fakeTelegram) EditMessageText(
 	text string,
 	replyMarkup models.ReplyMarkup,
 ) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	t.calls = append(t.calls, "editMessageText")
 	t.editChatID = chatID
 	t.editMessageID = messageID
@@ -141,6 +261,9 @@ func (t *fakeTelegram) SendMessageWithReplyMarkup(
 	string,
 	models.ReplyMarkup,
 ) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	t.calls = append(t.calls, "sendMessageWithReplyMarkup")
 
 	return t.sendErr
@@ -153,6 +276,9 @@ func (t *fakeTelegram) SendFormattedMessageWithReplyMarkup(
 	parseMode string,
 	_ models.ReplyMarkup,
 ) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	t.calls = append(t.calls, "sendFormattedMessageWithReplyMarkup")
 	t.parseMode = parseMode
 
@@ -164,24 +290,36 @@ func (t *fakeTelegram) GetChatMember(
 	int64,
 	int64,
 ) (*models.ChatMember, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	t.calls = append(t.calls, "getChatMember")
 
 	return t.member, t.memberErr
 }
 
 func (t *fakeTelegram) ApproveChatJoinRequest(context.Context, int64, int64) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	t.calls = append(t.calls, "approveChatJoinRequest")
 
 	return t.approveErr
 }
 
 func (t *fakeTelegram) DeclineChatJoinRequest(context.Context, int64, int64) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	t.calls = append(t.calls, "declineChatJoinRequest")
 
 	return nil
 }
 
 func (t *fakeTelegram) BanChatMember(context.Context, int64, int64) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	t.calls = append(t.calls, "banChatMember")
 
 	return nil
@@ -193,6 +331,9 @@ func (t *fakeTelegram) UnbanChatMember(
 	_ int64,
 	onlyIfBanned bool,
 ) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	t.calls = append(t.calls, "unbanChatMember")
 	t.onlyIfBanned = onlyIfBanned
 
@@ -284,6 +425,16 @@ func (u *fakeUsers) Upsert(_ context.Context, user domain.User) error {
 
 type fakeAlerts struct {
 	created []store.AlertInput
+
+	// resolved makes IsOpen answer "no" for every alert, standing in for an
+	// alert that auto-resolved while its notification sat in the queue.
+	resolved bool
+	// isOpenErr makes the pre-execute check fail, so a test can prove a read
+	// failure does not swallow the notification.
+	isOpenErr error
+	// isOpenCalls counts the pre-execute checks, so a test can prove the
+	// check is skipped for an action that carries no alert link.
+	isOpenCalls int
 }
 
 func (a *fakeAlerts) Create(
@@ -293,6 +444,16 @@ func (a *fakeAlerts) Create(
 	a.created = append(a.created, alert)
 
 	return int64(len(a.created)), nil
+}
+
+func (a *fakeAlerts) IsOpen(_ context.Context, _ int64) (bool, error) {
+	a.isOpenCalls++
+
+	if a.isOpenErr != nil {
+		return false, a.isOpenErr
+	}
+
+	return !a.resolved, nil
 }
 
 func TestEnforcerRetriesRateLimitWithRetryAfter(t *testing.T) {
@@ -757,6 +918,64 @@ func TestEnforcerVerifyMemberClubPreservesRevokedGrant(t *testing.T) {
 	require.NoError(t, err, "get grant")
 	assert.Equal(t, domain.GrantRevoked, grant.State,
 		"club membership must not resurrect a revoked grant")
+}
+
+// TestEnforcerCancelsNotificationWhoseAlertResolved covers the narrow window
+// resolve-time cancellation cannot reach: the row was already leased when the
+// alert resolved. Delivering it would tell the owner about a problem that is
+// over — the 2026-08-16 incident in miniature.
+func TestEnforcerCancelsNotificationWhoseAlertResolved(t *testing.T) {
+	tgID := random.TGID()
+	alertID := int64(42)
+	action := sendDMAction(tgID, 0)
+	action.AlertID = &alertID
+	outbox := &fakeOutbox{action: action}
+	tg := &fakeTelegram{}
+	e := newTestEnforcer(outbox, tg, &fakeUsers{}, &fakeAlerts{resolved: true})
+
+	ok, err := e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce")
+	assert.True(t, ok, "the leased action still counts as work")
+	assert.Empty(t, tg.calls, "a resolved alert's notification must not be sent")
+	assert.True(t, outbox.cancelled, "the action must be cancelled")
+	assert.False(t, outbox.done, "cancelling is not delivering")
+	assert.False(t, outbox.dead, "cancelling is not failing")
+}
+
+// TestEnforcerDeliversWhenAlertStateIsUnreadable pins the fail-open side of the
+// guard: a database read failure must never be what swallows a notification.
+func TestEnforcerDeliversWhenAlertStateIsUnreadable(t *testing.T) {
+	tgID := random.TGID()
+	alertID := int64(42)
+	action := sendDMAction(tgID, 0)
+	action.AlertID = &alertID
+	outbox := &fakeOutbox{action: action}
+	tg := &fakeTelegram{}
+	e := newTestEnforcer(outbox, tg, &fakeUsers{},
+		&fakeAlerts{isOpenErr: errors.New("database is locked")})
+
+	_, err := e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce")
+	assert.Equal(t, []string{"sendMessage"}, tg.calls,
+		"an unreadable alert state must not suppress the message")
+	assert.True(t, outbox.done, "the action completes normally")
+	assert.False(t, outbox.cancelled, "nothing proved the alert resolved")
+}
+
+// TestEnforcerSkipsAlertCheckForUnlinkedAction keeps the guard off the hot
+// path: almost every action carries no alert, and none of them should pay for
+// an extra read.
+func TestEnforcerSkipsAlertCheckForUnlinkedAction(t *testing.T) {
+	tgID := random.TGID()
+	outbox := &fakeOutbox{action: sendDMAction(tgID, 0)}
+	alerts := &fakeAlerts{resolved: true}
+	tg := &fakeTelegram{}
+	e := newTestEnforcer(outbox, tg, &fakeUsers{}, alerts)
+
+	_, err := e.runOnce(context.Background())
+	require.NoError(t, err, "runOnce")
+	assert.Zero(t, alerts.isOpenCalls, "an unlinked action must not be checked")
+	assert.True(t, outbox.done, "the action is delivered as usual")
 }
 
 func TestEnforcerDeadActionCreatesAlert(t *testing.T) {

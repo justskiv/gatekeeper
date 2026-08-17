@@ -54,23 +54,73 @@ const (
 	ActionRevokeInvite ActionType = "revoke_invite"
 )
 
-// ActionStatus is the access_actions execution state machine.
+// AllActionTypes returns every action type in declaration order.
+//
+// It exists so that consumers which must enumerate the whole enum — the
+// metrics endpoint zero-fills one series per type × status pair — read one
+// list instead of each keeping a copy. Go has no way to enumerate the members
+// of a string enum, so this list is itself hand-maintained: adding a constant
+// above does not add it here, and nothing at compile time says so. Two tests
+// stand in for the compiler, and neither of them consults this function to
+// decide what it should contain: one parses the const block in this file, the
+// other reads the CHECK constraint the schema puts on
+// `access_actions.action_type`. The returned slice is freshly allocated on
+// every call, so a caller cannot mutate the canonical order.
+func AllActionTypes() []ActionType {
+	return []ActionType{
+		ActionEnsureInvite,
+		ActionSendInvite,
+		ActionApproveJoin,
+		ActionDeclineJoin,
+		ActionSoftKick,
+		ActionHardBan,
+		ActionUnban,
+		ActionSendDM,
+		ActionEditMessage,
+		ActionVerifyMember,
+		ActionRevokeInvite,
+	}
+}
+
+// ActionStatus is the access_actions execution state machine:
+// queued -> running -> done | dead | cancelled. `cancelled` retires a row that
+// must not be executed at all — the work it described stopped being relevant
+// before a worker got to it — which is neither a success nor a failure.
 type ActionStatus string
 
 const (
-	ActionQueued  ActionStatus = "queued"
-	ActionRunning ActionStatus = "running"
-	ActionDone    ActionStatus = "done"
-	ActionFailed  ActionStatus = "failed"
-	ActionDead    ActionStatus = "dead"
+	ActionQueued    ActionStatus = "queued"
+	ActionRunning   ActionStatus = "running"
+	ActionDone      ActionStatus = "done"
+	ActionDead      ActionStatus = "dead"
+	ActionCancelled ActionStatus = "cancelled"
 )
+
+// AllActionStatuses returns every action status in state-machine order:
+// the two live states first, then the three terminal ones. See AllActionTypes
+// for why the enumeration lives here rather than at the consumer, and for what
+// keeps this hand-maintained list honest.
+func AllActionStatuses() []ActionStatus {
+	return []ActionStatus{
+		ActionQueued,
+		ActionRunning,
+		ActionDone,
+		ActionDead,
+		ActionCancelled,
+	}
+}
 
 // AccessAction is one durable Telegram action owned by the Enforcer.
 type AccessAction struct {
-	ID             int64
-	Type           ActionType
-	TGID           *int64
-	Resource       *Resource
+	ID       int64
+	Type     ActionType
+	TGID     *int64
+	Resource *Resource
+
+	// AlertID links the action to the operational alert it reports on, when
+	// there is one. Resolving that alert cancels whatever is still queued for
+	// it, so the owner is not told about a problem that is already over.
+	AlertID        *int64
 	IdempotencyKey string
 	PayloadJSON    []byte
 	Status         ActionStatus

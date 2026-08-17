@@ -22,6 +22,12 @@ type Readiness struct {
 	RequireTelegramWebhookRegistration bool
 	TelegramWebhookRegistered          func() bool
 	Now                                func() time.Time
+
+	// EnforcerAlive reports whether the outbox worker pool is still turning
+	// its loop. Unlike get_me or reconcile freshness, a stopped worker pool is
+	// never transient, so it belongs in readiness. A nil func means the
+	// enforcer is not supervised here and the input is skipped.
+	EnforcerAlive func() bool
 }
 
 // ReadinessResult is the machine-readable readiness decision.
@@ -93,6 +99,10 @@ func (r Readiness) Check(ctx context.Context) ReadinessResult {
 	if r.RequireTelegramWebhookRegistration &&
 		(r.TelegramWebhookRegistered == nil || !r.TelegramWebhookRegistered()) {
 		failed = append(failed, "telegram_webhook_registration")
+	}
+
+	if r.EnforcerAlive != nil && !r.EnforcerAlive() {
+		failed = append(failed, "enforcer")
 	}
 
 	return ReadinessResult{

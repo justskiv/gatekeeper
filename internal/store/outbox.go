@@ -12,14 +12,25 @@ import (
 
 // AccessActionInput describes an action to enqueue in access_actions.
 type AccessActionInput struct {
-	Type           domain.ActionType
-	TGID           *int64
-	Resource       *domain.Resource
+	Type     domain.ActionType
+	TGID     *int64
+	Resource *domain.Resource
+
+	// AlertID links the row to the operational alert it reports on. Set it on
+	// every operator notification about an alert: it is the only handle
+	// resolve-time cancellation has on the delivery.
+	AlertID        *int64
 	IdempotencyKey string
 	PayloadJSON    []byte
 	RunAfter       time.Time
 	MaxAttempts    int
 }
+
+// ErrLeaseLost reports that a terminal transition was attempted by a worker
+// that no longer owns the action: the lease expired and another worker
+// reclaimed the row. The caller MUST NOT retry the transition — the current
+// owner is responsible for the outcome.
+var ErrLeaseLost = errors.New("outbox lease lost")
 
 // Outbox is the repository for durable Telegram actions.
 type Outbox struct {
@@ -63,12 +74,14 @@ func (r *Outbox) Enqueue(
 
 	res, err := r.db.ExecContext(ctx, `
 		INSERT INTO access_actions (
-			action_type, tg_id, resource, idempotency_key, payload_json,
-			status, run_after, attempts, max_attempts, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, 'queued', ?, 0, ?, ?, ?)
+			action_type, tg_id, resource, alert_id, idempotency_key,
+			payload_json, status, run_after, attempts, max_attempts,
+			created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, 0, ?, ?, ?)
 		ON CONFLICT(idempotency_key) DO NOTHING`,
 		string(input.Type), sqlNullInt64(input.TGID), nullableResource(input.Resource),
-		input.IdempotencyKey, string(payload), rfc3339(runAfter), maxAttempts, now, now)
+		sqlNullInt64(input.AlertID), input.IdempotencyKey, string(payload),
+		rfc3339(runAfter), maxAttempts, now, now)
 	if err != nil {
 		return domain.AccessAction{}, false,
 			fmt.Errorf("enqueue action %s: %w", input.IdempotencyKey, err)
@@ -94,7 +107,7 @@ func (r *Outbox) GetByID(
 	id int64,
 ) (domain.AccessAction, error) {
 	action, err := scanAction(r.db.QueryRowContext(ctx, `
-		SELECT id, action_type, tg_id, resource, idempotency_key,
+		SELECT id, action_type, tg_id, resource, alert_id, idempotency_key,
 		       payload_json, status, run_after, attempts, max_attempts,
 		       locked_until, last_error, created_at, updated_at
 		FROM access_actions
@@ -116,7 +129,7 @@ func (r *Outbox) GetByIdempotencyKey(
 	key string,
 ) (domain.AccessAction, error) {
 	action, err := scanAction(r.db.QueryRowContext(ctx, `
-		SELECT id, action_type, tg_id, resource, idempotency_key,
+		SELECT id, action_type, tg_id, resource, alert_id, idempotency_key,
 		       payload_json, status, run_after, attempts, max_attempts,
 		       locked_until, last_error, created_at, updated_at
 		FROM access_actions
@@ -156,7 +169,7 @@ func (r *Outbox) LeaseReady(
 			ORDER BY run_after, id
 			LIMIT 1
 		)
-		RETURNING id, action_type, tg_id, resource, idempotency_key,
+		RETURNING id, action_type, tg_id, resource, alert_id, idempotency_key,
 		          payload_json, status, run_after, attempts, max_attempts,
 		          locked_until, last_error, created_at, updated_at`,
 		rfc3339(now.Add(leaseFor)), rfc3339(time.Now()), rfc3339(now),
@@ -172,27 +185,56 @@ func (r *Outbox) LeaseReady(
 	return action, true, nil
 }
 
-// MarkDone marks a running action as successfully completed.
-func (r *Outbox) MarkDone(ctx context.Context, id int64) error {
+// MarkDone marks a running action as successfully completed. leaseUntil is the
+// fencing token returned by LeaseReady; a stale one yields ErrLeaseLost.
+func (r *Outbox) MarkDone(
+	ctx context.Context,
+	id int64,
+	leaseUntil time.Time,
+) error {
 	res, err := r.db.ExecContext(ctx, `
 		UPDATE access_actions
 		SET status = 'done',
 		    locked_until = NULL,
 		    last_error = '',
 		    updated_at = ?
-		WHERE id = ?`,
-		rfc3339(time.Now()), id)
+		WHERE id = ? AND status = 'running' AND locked_until = ?`,
+		rfc3339(time.Now()), id, rfc3339(leaseUntil))
 	if err != nil {
 		return fmt.Errorf("mark action %d done: %w", id, err)
 	}
 
-	return requireAffected(res, "action", id)
+	return requireLease(res, id)
 }
 
-// Retry returns an action to the queue and records retry metadata.
+// ReleaseLease returns an in-flight action to the queue without recording a
+// failed attempt. Used when the process stops mid-execution: the next process
+// picks the action up immediately instead of waiting out locked_until.
+func (r *Outbox) ReleaseLease(
+	ctx context.Context,
+	id int64,
+	leaseUntil time.Time,
+) error {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE access_actions
+		SET status = 'queued',
+		    locked_until = NULL,
+		    updated_at = ?
+		WHERE id = ? AND status = 'running' AND locked_until = ?`,
+		rfc3339(time.Now()), id, rfc3339(leaseUntil))
+	if err != nil {
+		return fmt.Errorf("release action %d lease: %w", id, err)
+	}
+
+	return requireLease(res, id)
+}
+
+// Retry returns an action to the queue and records retry metadata. leaseUntil
+// is the fencing token returned by LeaseReady; a stale one yields ErrLeaseLost.
 func (r *Outbox) Retry(
 	ctx context.Context,
 	id int64,
+	leaseUntil time.Time,
 	runAfter time.Time,
 	lastError string,
 ) (domain.AccessAction, error) {
@@ -204,13 +246,14 @@ func (r *Outbox) Retry(
 		    locked_until = NULL,
 		    last_error = ?,
 		    updated_at = ?
-		WHERE id = ?
-		RETURNING id, action_type, tg_id, resource, idempotency_key,
+		WHERE id = ? AND status = 'running' AND locked_until = ?
+		RETURNING id, action_type, tg_id, resource, alert_id, idempotency_key,
 		          payload_json, status, run_after, attempts, max_attempts,
 		          locked_until, last_error, created_at, updated_at`,
-		rfc3339(runAfter), lastError, rfc3339(time.Now()), id))
+		rfc3339(runAfter), lastError, rfc3339(time.Now()), id,
+		rfc3339(leaseUntil)))
 	if errors.Is(err, sql.ErrNoRows) {
-		return domain.AccessAction{}, ErrNotFound
+		return domain.AccessAction{}, ErrLeaseLost
 	}
 
 	if err != nil {
@@ -220,8 +263,14 @@ func (r *Outbox) Retry(
 	return action, nil
 }
 
-// MarkDead moves an action to dead and records the final error.
-func (r *Outbox) MarkDead(ctx context.Context, id int64, lastError string) error {
+// MarkDead moves an action to dead and records the final error. leaseUntil is
+// the fencing token returned by LeaseReady; a stale one yields ErrLeaseLost.
+func (r *Outbox) MarkDead(
+	ctx context.Context,
+	id int64,
+	leaseUntil time.Time,
+	lastError string,
+) error {
 	res, err := r.db.ExecContext(ctx, `
 		UPDATE access_actions
 		SET status = 'dead',
@@ -229,13 +278,68 @@ func (r *Outbox) MarkDead(ctx context.Context, id int64, lastError string) error
 		    locked_until = NULL,
 		    last_error = ?,
 		    updated_at = ?
-		WHERE id = ?`,
-		lastError, rfc3339(time.Now()), id)
+		WHERE id = ? AND status = 'running' AND locked_until = ?`,
+		lastError, rfc3339(time.Now()), id, rfc3339(leaseUntil))
 	if err != nil {
 		return fmt.Errorf("mark action %d dead: %w", id, err)
 	}
 
-	return requireAffected(res, "action", id)
+	return requireLease(res, id)
+}
+
+// MarkCancelled retires a leased action that must not be executed after all,
+// recording why in last_error. It is not a failure: nothing was attempted and
+// nothing is owed a retry. leaseUntil is the fencing token returned by
+// LeaseReady; a stale one yields ErrLeaseLost.
+func (r *Outbox) MarkCancelled(
+	ctx context.Context,
+	id int64,
+	leaseUntil time.Time,
+	reason string,
+) error {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE access_actions
+		SET status = 'cancelled',
+		    locked_until = NULL,
+		    last_error = ?,
+		    updated_at = ?
+		WHERE id = ? AND status = 'running' AND locked_until = ?`,
+		reason, rfc3339(time.Now()), id, rfc3339(leaseUntil))
+	if err != nil {
+		return fmt.Errorf("mark action %d cancelled: %w", id, err)
+	}
+
+	return requireLease(res, id)
+}
+
+// CancelQueuedForAlert retires the deliveries still waiting in the queue for
+// alertID and reports how many rows it retired.
+//
+// Only `queued` rows are touched. A `running` row is mid-flight and belongs to
+// the worker that leased it; cancelling it here would be a second writer racing
+// that worker for the outcome, which is exactly what lease fencing exists to
+// prevent. The worker's own pre-execute check covers that narrow window
+// instead, so cancellation is best-effort by construction: an action leased
+// microseconds before this statement commits can still be delivered.
+func (r *Outbox) CancelQueuedForAlert(
+	ctx context.Context,
+	alertID int64,
+	reason string,
+) (int64, error) {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE access_actions
+		SET status = 'cancelled',
+		    locked_until = NULL,
+		    last_error = ?,
+		    updated_at = ?
+		WHERE alert_id = ? AND status = 'queued'`,
+		reason, rfc3339(time.Now()), alertID)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"cancel queued deliveries for alert %d: %w", alertID, err)
+	}
+
+	return res.RowsAffected()
 }
 
 type actionScanner interface {
@@ -248,13 +352,14 @@ func scanAction(scanner actionScanner) (domain.AccessAction, error) {
 		actionType, status   string
 		tgID                 sql.NullInt64
 		resource             sql.NullString
+		alertID              sql.NullInt64
 		payload              string
 		runAfter             string
 		lockedUntil          sql.NullString
 		createdAt, updatedAt string
 	)
 
-	err := scanner.Scan(&a.ID, &actionType, &tgID, &resource,
+	err := scanner.Scan(&a.ID, &actionType, &tgID, &resource, &alertID,
 		&a.IdempotencyKey, &payload, &status, &runAfter, &a.Attempts,
 		&a.MaxAttempts, &lockedUntil, &a.LastError, &createdAt, &updatedAt)
 	if err != nil {
@@ -263,6 +368,7 @@ func scanAction(scanner actionScanner) (domain.AccessAction, error) {
 
 	a.Type = domain.ActionType(actionType)
 	a.TGID = int64Ptr(tgID)
+	a.AlertID = int64Ptr(alertID)
 
 	if resource.Valid {
 		v := domain.Resource(resource.String)
@@ -305,6 +411,21 @@ func nullableResource(v *domain.Resource) any {
 	}
 
 	return string(*v)
+}
+
+// requireLease turns a no-op terminal transition into ErrLeaseLost: the row is
+// either gone or already reclaimed by another worker.
+func requireLease(res sql.Result, id int64) error {
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read action %d rows affected: %w", id, err)
+	}
+
+	if affected == 0 {
+		return ErrLeaseLost
+	}
+
+	return nil
 }
 
 func requireAffected(res sql.Result, label string, id int64) error {

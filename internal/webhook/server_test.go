@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -103,6 +104,130 @@ func TestReadinessFailsForHealthStaleReconcileAndTelegramRegistration(t *testing
 		"telegram_webhook_registration",
 	} {
 		assert.Containsf(t, body, want, "readyz body missing %q", want)
+	}
+}
+
+// TestReadinessFailsWhenEnforcerIsDead pins the enforcer as a readiness input:
+// unlike `get_me` or reconcile freshness, a stopped worker pool never recovers
+// on its own, so it must not be reported ready.
+func TestReadinessFailsWhenEnforcerIsDead(t *testing.T) {
+	ctx := context.Background()
+	base := Readiness{
+		DB:      testutil.NewDB(t),
+		GetMeOK: func() bool { return true },
+	}
+
+	dead := base
+	dead.EnforcerAlive = func() bool { return false }
+	assert.Contains(t, dead.Check(ctx).Failed, "enforcer",
+		"a stopped worker pool must fail readiness")
+
+	live := base
+	live.EnforcerAlive = func() bool { return true }
+	assert.NotContains(t, live.Check(ctx).Failed, "enforcer",
+		"a turning worker pool is not a readiness failure")
+
+	assert.NotContains(t, base.Check(ctx).Failed, "enforcer",
+		"a nil probe means the enforcer is not supervised here and is skipped")
+}
+
+// TestLivezReportsEnforcerState covers the property that separates `/livez`
+// from `/readyz`: liveness is process-local. Every case is built with a nil
+// `DB`, which `/readyz` reports as `db` and `schema` failures — `/livez` must
+// report neither, because it never looks.
+func TestLivezReportsEnforcerState(t *testing.T) {
+	cases := []struct {
+		name       string
+		alive      func() bool
+		wantStatus int
+		wantBody   string
+		wantFailed []string
+	}{
+		{
+			name:       "unsupervised enforcer is live",
+			alive:      nil,
+			wantStatus: http.StatusOK,
+			wantBody:   "ok",
+			wantFailed: nil,
+		},
+		{
+			name:       "turning worker pool is live",
+			alive:      func() bool { return true },
+			wantStatus: http.StatusOK,
+			wantBody:   "ok",
+			wantFailed: nil,
+		},
+		{
+			name:       "stopped worker pool is not live",
+			alive:      func() bool { return false },
+			wantStatus: http.StatusServiceUnavailable,
+			wantBody:   "not_live",
+			wantFailed: []string{"enforcer"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := NewServer(Config{
+				Readiness: Readiness{DB: nil, EnforcerAlive: tc.alive},
+			})
+
+			resp := request(server.Handler(), http.MethodGet, "/livez")
+			require.Equal(t, tc.wantStatus, resp.Code, "livez status body=%s",
+				resp.Body.String())
+
+			var body struct {
+				Status string   `json:"status"`
+				Failed []string `json:"failed"`
+			}
+
+			require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &body),
+				"decode livez body")
+
+			assert.Equal(t, tc.wantBody, body.Status, "livez status field")
+			assert.Equal(t, tc.wantFailed, body.Failed,
+				"the enforcer is the only livez input")
+			assert.NotContains(t, body.Failed, "db",
+				"livez must not reach for the database")
+			assert.NotContains(t, body.Failed, "schema",
+				"livez must not check the schema")
+		})
+	}
+
+	// Same nil DB, same live enforcer: `/readyz` fails on the dependencies
+	// `/livez` deliberately ignores. This is the contrast the two endpoints
+	// exist for.
+	server := NewServer(Config{
+		Readiness: Readiness{DB: nil, EnforcerAlive: func() bool { return true }},
+	})
+
+	resp := request(server.Handler(), http.MethodGet, "/readyz")
+	require.Equal(t, http.StatusServiceUnavailable, resp.Code, "readyz status")
+	assert.Contains(t, resp.Body.String(), "db",
+		"readyz still checks the database that livez skipped")
+}
+
+// TestHealthzUnchangedByLiveness pins the existing contract: `/healthz` means
+// the HTTP server is up and nothing more, so no enforcer state can change it.
+func TestHealthzUnchangedByLiveness(t *testing.T) {
+	cases := []struct {
+		name  string
+		alive func() bool
+	}{
+		{name: "unsupervised enforcer", alive: nil},
+		{name: "turning worker pool", alive: func() bool { return true }},
+		{name: "stopped worker pool", alive: func() bool { return false }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := NewServer(Config{
+				Readiness: Readiness{EnforcerAlive: tc.alive},
+			})
+
+			assertStatus(t, server.Handler(), http.MethodGet, "/healthz",
+				http.StatusOK)
+		})
 	}
 }
 

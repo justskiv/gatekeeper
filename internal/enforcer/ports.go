@@ -21,14 +21,27 @@ type OutboxStore interface {
 		now time.Time,
 		leaseFor time.Duration,
 	) (domain.AccessAction, bool, error)
-	MarkDone(ctx context.Context, id int64) error
+	MarkDone(ctx context.Context, id int64, leaseUntil time.Time) error
 	Retry(
 		ctx context.Context,
 		id int64,
+		leaseUntil time.Time,
 		runAfter time.Time,
 		lastError string,
 	) (domain.AccessAction, error)
-	MarkDead(ctx context.Context, id int64, lastError string) error
+	MarkDead(
+		ctx context.Context,
+		id int64,
+		leaseUntil time.Time,
+		lastError string,
+	) error
+	MarkCancelled(
+		ctx context.Context,
+		id int64,
+		leaseUntil time.Time,
+		reason string,
+	) error
+	ReleaseLease(ctx context.Context, id int64, leaseUntil time.Time) error
 }
 
 // TelegramClient is the consumer-side Telegram API surface.
@@ -99,9 +112,12 @@ type AuditStore interface {
 	Append(ctx context.Context, e store.AuditEntry) error
 }
 
-// AlertStore is the operational alert surface used for dead actions.
+// AlertStore is the operational alert surface used for dead actions and for
+// the pre-execute check that keeps a resolved alert's notification from going
+// out.
 type AlertStore interface {
 	Create(ctx context.Context, a store.AlertInput) (int64, error)
+	IsOpen(ctx context.Context, id int64) (bool, error)
 }
 
 // Stores bundles repository dependencies.

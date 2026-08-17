@@ -118,6 +118,74 @@ func TestDurableFormattedDMEnqueuesParseMode(t *testing.T) {
 	assert.Equal(t, messages.ParseModeHTML, payload.ParseMode)
 }
 
+// TestAlertOwnerDMLinksAlertAndDedupes covers both effects of the alert-keyed
+// marker: the row carries the link resolve-time cancellation needs, and a
+// repeated failure for the same alert reuses one idempotency key instead of
+// queueing a second copy of the same message.
+func TestAlertOwnerDMLinksAlertAndDedupes(t *testing.T) {
+	db := testutil.NewDB(t)
+	ctx := context.Background()
+	ownerID := random.TGID()
+	alertID := int64(7)
+
+	users := store.NewUsers(db)
+	require.NoError(t, users.Upsert(ctx, domain.User{
+		TGID:    ownerID,
+		DMState: domain.DMOpen,
+	}), "upsert owner")
+
+	outbox := &fakeOutbox{}
+	notifier := NewDurable(users, outbox, nil)
+
+	require.NoError(t, notifier.SendFormattedAlertOwners(
+		ctx, []int64{ownerID}, alertID, "<b>rights lost</b>",
+	), "first SendFormattedAlertOwners")
+
+	require.NotNil(t, outbox.input.AlertID, "the row must carry the alert link")
+	assert.Equal(t, alertID, *outbox.input.AlertID)
+
+	firstKey := outbox.input.IdempotencyKey
+
+	require.NoError(t, notifier.SendFormattedAlertOwners(
+		ctx, []int64{ownerID}, alertID, "<b>rights lost</b>",
+	), "second SendFormattedAlertOwners")
+
+	assert.Equal(t, firstKey, outbox.input.IdempotencyKey,
+		"a repeated failure for the same alert must reuse the key")
+}
+
+// TestOwnerDMWithoutAlertKeepsUniqueMarker guards the other half of dmMarker:
+// a message with no dedupe identity of its own must stay unique, or distinct
+// notifications would silently collapse into one.
+func TestOwnerDMWithoutAlertKeepsUniqueMarker(t *testing.T) {
+	db := testutil.NewDB(t)
+	ctx := context.Background()
+	ownerID := random.TGID()
+
+	users := store.NewUsers(db)
+	require.NoError(t, users.Upsert(ctx, domain.User{
+		TGID:    ownerID,
+		DMState: domain.DMOpen,
+	}), "upsert owner")
+
+	outbox := &fakeOutbox{}
+	notifier := NewDurable(users, outbox, nil)
+
+	require.NoError(t, notifier.SendFormattedOwners(
+		ctx, []int64{ownerID}, "first",
+	), "first SendFormattedOwners")
+
+	firstKey := outbox.input.IdempotencyKey
+
+	require.NoError(t, notifier.SendFormattedOwners(
+		ctx, []int64{ownerID}, "second",
+	), "second SendFormattedOwners")
+
+	assert.Nil(t, outbox.input.AlertID, "an unlinked message carries no alert")
+	assert.NotEqual(t, firstKey, outbox.input.IdempotencyKey,
+		"unlinked owner messages must not collapse into one row")
+}
+
 func TestDurableSendDMSkipsKnownBlockedUser(t *testing.T) {
 	db := testutil.NewDB(t)
 	ctx := context.Background()

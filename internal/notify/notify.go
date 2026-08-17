@@ -61,6 +61,25 @@ func NewDurable(users *store.Users, outbox outboxEnqueuer, logger *slog.Logger) 
 	return &Notifier{users: users, outbox: outbox, logger: logger}
 }
 
+// dmTarget is one outgoing direct message and everything that decides how it
+// is stored. It travels as a struct because the durable path needs the marker
+// and the alert link alongside the text, and a positional call with that many
+// knobs stops being readable at the call site.
+type dmTarget struct {
+	tgID      int64
+	text      string
+	parseMode string
+	plain     bool
+
+	// marker participates in the idempotency key. An empty marker means the
+	// caller has no natural dedupe identity for this message.
+	marker string
+
+	// alertID links the enqueued row to the alert it reports on, so resolving
+	// that alert cancels the delivery. Nil for messages unrelated to an alert.
+	alertID *int64
+}
+
 // SendDM sends a direct message unless the user is known as blocked.
 func (n *Notifier) SendDM(ctx context.Context, tgID int64, text string) error {
 	return n.SendDurableDM(ctx, tgID, text, "")
@@ -80,7 +99,12 @@ func (n *Notifier) SendDurableDM(
 	text string,
 	marker string,
 ) error {
-	return n.sendDM(ctx, tgID, text, "", true, marker)
+	return n.sendDM(ctx, dmTarget{
+		tgID:   tgID,
+		text:   text,
+		plain:  true,
+		marker: marker,
+	})
 }
 
 // SendFormattedDurableDM enqueues or sends a formatted direct message.
@@ -91,17 +115,17 @@ func (n *Notifier) SendFormattedDurableDM(
 	parseMode string,
 	marker string,
 ) error {
-	return n.sendDM(ctx, tgID, text, parseMode, false, marker)
+	return n.sendDM(ctx, dmTarget{
+		tgID:      tgID,
+		text:      text,
+		parseMode: parseMode,
+		marker:    marker,
+	})
 }
 
-func (n *Notifier) sendDM(
-	ctx context.Context,
-	tgID int64,
-	text string,
-	parseMode string,
-	plain bool,
-	marker string,
-) error {
+func (n *Notifier) sendDM(ctx context.Context, dm dmTarget) error {
+	tgID, text, parseMode := dm.tgID, dm.text, dm.parseMode
+
 	user, err := n.users.Get(ctx, tgID)
 	switch {
 	case err == nil && user.DMState == domain.DMBlocked:
@@ -120,7 +144,7 @@ func (n *Notifier) sendDM(
 	}
 
 	if n.outbox != nil {
-		return n.enqueueDM(ctx, tgID, text, parseMode, plain, marker)
+		return n.enqueueDM(ctx, dm)
 	}
 
 	if n.sender == nil {
@@ -163,32 +187,25 @@ func (n *Notifier) sendDM(
 	return fmt.Errorf("send dm to %d: %w", tgID, err)
 }
 
-func (n *Notifier) enqueueDM(
-	ctx context.Context,
-	tgID int64,
-	text string,
-	parseMode string,
-	plain bool,
-	marker string,
-) error {
+func (n *Notifier) enqueueDM(ctx context.Context, dm dmTarget) error {
+	tgID := dm.tgID
+
 	payload, err := json.Marshal(struct {
 		Text      string `json:"text"`
 		ParseMode string `json:"parse_mode,omitempty"`
 		Plain     bool   `json:"plain,omitempty"`
-	}{Text: text, ParseMode: parseMode, Plain: plain})
+	}{Text: dm.text, ParseMode: dm.parseMode, Plain: dm.plain})
 	if err != nil {
 		return fmt.Errorf("encode dm payload for %d: %w", tgID, err)
 	}
 
-	if marker == "" {
-		marker = fmt.Sprintf("manual:%d:%d", tgID, time.Now().UnixNano())
-	}
-
 	_, _, err = n.outbox.Enqueue(ctx, store.AccessActionInput{
-		Type:           domain.ActionSendDM,
-		TGID:           &tgID,
-		IdempotencyKey: domain.AccessActionKey(domain.ActionSendDM, &tgID, nil, marker),
-		PayloadJSON:    payload,
+		Type:    domain.ActionSendDM,
+		TGID:    &tgID,
+		AlertID: dm.alertID,
+		IdempotencyKey: domain.AccessActionKey(
+			domain.ActionSendDM, &tgID, nil, dmMarker(dm)),
+		PayloadJSON: payload,
 	})
 	if err != nil {
 		return fmt.Errorf("enqueue dm to %d: %w", tgID, err)
@@ -197,31 +214,91 @@ func (n *Notifier) enqueueDM(
 	return nil
 }
 
+// dmMarker picks the idempotency marker for an enqueued message.
+//
+// An alert-linked message keys on the alert, which also dedupes it: a health
+// check that keeps failing raises the same alert and must not queue a second
+// copy of the same DM. The timestamped `manual:` fallback is the opposite — a
+// deliberately unique marker for callers with no dedupe identity of their own,
+// where suppressing a repeat would silently drop a distinct message.
+func dmMarker(dm dmTarget) string {
+	switch {
+	case dm.marker != "":
+		return dm.marker
+	case dm.alertID != nil:
+		return fmt.Sprintf("admin_alert:%d:%d", *dm.alertID, dm.tgID)
+	default:
+		return fmt.Sprintf("manual:%d:%d", dm.tgID, time.Now().UnixNano())
+	}
+}
+
 // SendOwners sends the same direct message to every owner.
 func (n *Notifier) SendOwners(
 	ctx context.Context, ownerIDs []int64, text string,
 ) error {
-	return n.sendOwners(ctx, ownerIDs, text, "", true)
+	return n.sendOwners(ctx, ownerIDs, dmTarget{text: text, plain: true})
 }
 
 // SendFormattedOwners sends the same formatted direct message to every owner.
 func (n *Notifier) SendFormattedOwners(
 	ctx context.Context, ownerIDs []int64, text string,
 ) error {
-	return n.sendOwners(ctx, ownerIDs, text, messages.ParseModeHTML, false)
+	return n.sendOwners(ctx, ownerIDs, dmTarget{
+		text:      text,
+		parseMode: messages.ParseModeHTML,
+	})
+}
+
+// SendFormattedAlertOwners notifies every owner about alertID and links each
+// enqueued row to it, so resolving the alert cancels whatever has not gone out
+// yet. On the non-durable notifier (startup, no outbox) the message is sent
+// immediately and there is no row to link or cancel — that path keeps its
+// current behaviour.
+func (n *Notifier) SendFormattedAlertOwners(
+	ctx context.Context,
+	ownerIDs []int64,
+	alertID int64,
+	text string,
+) error {
+	return n.sendOwners(ctx, ownerIDs, dmTarget{
+		text:      text,
+		parseMode: messages.ParseModeHTML,
+		alertID:   &alertID,
+	})
+}
+
+// SendAlertDM enqueues one direct message linked to alertID, for a caller that
+// already knows the single recipient. Same contract as
+// SendFormattedAlertOwners: the link retires the delivery when the alert
+// resolves, and it is also the message's dedupe identity. An empty parseMode
+// sends plain text.
+func (n *Notifier) SendAlertDM(
+	ctx context.Context,
+	tgID int64,
+	alertID int64,
+	text string,
+	parseMode string,
+) error {
+	return n.sendDM(ctx, dmTarget{
+		tgID:      tgID,
+		text:      text,
+		parseMode: parseMode,
+		plain:     parseMode == "",
+		alertID:   &alertID,
+	})
 }
 
 func (n *Notifier) sendOwners(
 	ctx context.Context,
 	ownerIDs []int64,
-	text string,
-	parseMode string,
-	plain bool,
+	dm dmTarget,
 ) error {
 	var firstErr error
 
 	for _, ownerID := range ownerIDs {
-		err := n.sendDM(ctx, ownerID, text, parseMode, plain, "")
+		dm.tgID = ownerID
+
+		err := n.sendDM(ctx, dm)
 		if err != nil {
 			n.logger.Warn("failed to send owner dm",
 				slog.Int64("owner_tg_id", ownerID),

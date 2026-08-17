@@ -39,6 +39,39 @@ type InviteLinkCount struct {
 	Count    int
 }
 
+// AlertCount is an operational alert count grouped by kind, severity and
+// status.
+type AlertCount struct {
+	Kind     string
+	Severity string
+	Status   string
+	Count    int
+}
+
+// OutboxBacklog is queue pressure at one instant: how much work is waiting,
+// how much is in flight, and how long the oldest waiting item has waited.
+//
+// Counts and ages come from a single scan so they describe the same instant;
+// two queries could disagree with each other while a worker commits between
+// them, and a backlog metric that contradicts itself is worse than none.
+type OutboxBacklog struct {
+	// Queued counts rows waiting for a worker, whether or not they are due.
+	Queued int
+	// Running counts rows a worker currently holds a lease on.
+	Running int
+	// Due counts queued rows whose run_after has already passed — the part of
+	// the backlog that a healthy pool would be draining right now.
+	Due int
+	// OldestQueuedAge is now minus the oldest queued row's created_at: how long
+	// the least recently created piece of pending work has existed. Zero when
+	// nothing is queued.
+	OldestQueuedAge time.Duration
+	// OldestDueAge is now minus the earliest run_after among due rows: how long
+	// the queue has been overdue. Zero when nothing is due, which is the normal
+	// state of a pool that keeps up.
+	OldestDueAge time.Duration
+}
+
 // OpsStats is the owner-facing runtime summary.
 type OpsStats struct {
 	ActiveSubscriptions []CountByName
@@ -303,6 +336,99 @@ func (r *Ops) RevocationReasonCounts(ctx context.Context) ([]CountByName, error)
 		WHERE kind = 'access_revoked'
 		GROUP BY reason
 		ORDER BY reason`)
+}
+
+// OutboxBacklog returns queue pressure at now in one scan.
+//
+// The aggregate is expressed with `sum(CASE WHEN ... THEN 1 ELSE 0 END)` and
+// `min(CASE WHEN ... THEN col END)` rather than the `FILTER` clause, to stay on
+// the SQL surface the rest of this package already uses. An aggregate without
+// GROUP BY always yields exactly one row, so the empty table arrives here as a
+// row of NULLs: the counts are coalesced in SQL and the timestamps are scanned
+// as nullable, which is what makes an empty queue report zeros instead of
+// failing to scan.
+func (r *Ops) OutboxBacklog(
+	ctx context.Context,
+	now time.Time,
+) (OutboxBacklog, error) {
+	var (
+		backlog      OutboxBacklog
+		oldestQueued sql.NullString
+		oldestDue    sql.NullString
+	)
+
+	nowStr := rfc3339(now)
+
+	err := r.db.QueryRowContext(ctx, `
+		SELECT
+			COALESCE(sum(CASE WHEN status = 'queued' THEN 1 ELSE 0 END), 0),
+			COALESCE(sum(CASE WHEN status = 'running' THEN 1 ELSE 0 END), 0),
+			COALESCE(sum(CASE WHEN status = 'queued' AND run_after <= ?
+				THEN 1 ELSE 0 END), 0),
+			min(CASE WHEN status = 'queued' THEN created_at END),
+			min(CASE WHEN status = 'queued' AND run_after <= ?
+				THEN run_after END)
+		FROM access_actions`, nowStr, nowStr).
+		Scan(&backlog.Queued, &backlog.Running, &backlog.Due,
+			&oldestQueued, &oldestDue)
+	if err != nil {
+		return OutboxBacklog{}, fmt.Errorf("read outbox backlog: %w", err)
+	}
+
+	if backlog.OldestQueuedAge, err = ageSince(oldestQueued, now); err != nil {
+		return OutboxBacklog{}, fmt.Errorf("parse oldest queued created_at: %w", err)
+	}
+
+	if backlog.OldestDueAge, err = ageSince(oldestDue, now); err != nil {
+		return OutboxBacklog{}, fmt.Errorf("parse oldest due run_after: %w", err)
+	}
+
+	return backlog, nil
+}
+
+// ageSince turns a nullable stored timestamp into its age at now. A NULL means
+// "no such row", which is an age of zero rather than an error.
+func ageSince(value sql.NullString, now time.Time) (time.Duration, error) {
+	if !value.Valid || value.String == "" {
+		return 0, nil
+	}
+
+	at, err := parseTime(value.String)
+	if err != nil {
+		return 0, err
+	}
+
+	return now.Sub(at), nil
+}
+
+// AlertCounts returns operational alert counts grouped by bounded dimensions.
+func (r *Ops) AlertCounts(ctx context.Context) ([]AlertCount, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT kind, severity, status, count(*)
+		FROM admin_alerts
+		GROUP BY kind, severity, status
+		ORDER BY kind, severity, status`)
+	if err != nil {
+		return nil, fmt.Errorf("read alert counts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []AlertCount
+	for rows.Next() {
+		var count AlertCount
+		if err := rows.Scan(&count.Kind, &count.Severity, &count.Status,
+			&count.Count); err != nil {
+			return nil, fmt.Errorf("scan alert count: %w", err)
+		}
+
+		out = append(out, count)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate alert counts: %w", err)
+	}
+
+	return out, nil
 }
 
 // InviteLinkCounts returns invite-link counts grouped by bounded dimensions.
